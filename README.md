@@ -1,6 +1,7 @@
 # Miscoshorts - AI-Powered YouTube Shorts Generator
 
 Automatically creates viral YouTube Shorts from long-form videos using AI analysis and automatic subtitle generation.
+🎥 **[WATCH YOUTUBE TUTORIAL](https://youtu.be/zukJLVUwMxA?si=_DQ2RG10uzXtt7yT)**
 
 ## Features
 
