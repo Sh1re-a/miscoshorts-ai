@@ -82,15 +82,26 @@ const defaultSubtitleStyle: SubtitleStyle = {
   fontSize: 35,
 }
 
+const apiKeyStorageKey = 'miscoshorts.apiKey'
+
+function loadSavedApiKey() {
+  try {
+    return window.localStorage.getItem(apiKeyStorageKey) ?? ''
+  } catch {
+    return ''
+  }
+}
+
 function App() {
   const [videoUrl, setVideoUrl] = useState('')
-  const [apiKey, setApiKey] = useState('')
+  const [apiKey, setApiKey] = useState(loadSavedApiKey)
   const [outputFilename, setOutputFilename] = useState('short_con_subs.mp4')
   const [subtitleStyle, setSubtitleStyle] = useState<SubtitleStyle>(defaultSubtitleStyle)
   const [jobId, setJobId] = useState<string | null>(null)
   const [job, setJob] = useState<JobPayload>({ status: 'idle' })
   const [requestError, setRequestError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [apiKeyNotice, setApiKeyNotice] = useState(apiKey ? 'Saved locally in this browser.' : 'Not saved yet.')
 
   const activeFontPreset = fontPresets.find((preset) => preset.id === subtitleStyle.fontPreset) ?? fontPresets[0]
   const activeColorPreset = colorPresets.find((preset) => preset.id === subtitleStyle.colorPreset) ?? colorPresets[0]
@@ -124,7 +135,34 @@ function App() {
     return () => window.clearInterval(intervalId)
   }, [jobId, pollJob])
 
+  useEffect(() => {
+    try {
+      const trimmedKey = apiKey.trim()
+      if (!trimmedKey) {
+        window.localStorage.removeItem(apiKeyStorageKey)
+        setApiKeyNotice('Not saved yet.')
+        return
+      }
+
+      window.localStorage.setItem(apiKeyStorageKey, trimmedKey)
+      setApiKeyNotice('Saved locally in this browser.')
+    } catch {
+      setApiKeyNotice('Could not save locally in this browser.')
+    }
+  }, [apiKey])
+
   const isWorking = !['idle', 'completed', 'failed'].includes(job.status)
+
+  function clearSavedApiKey() {
+    try {
+      window.localStorage.removeItem(apiKeyStorageKey)
+    } catch {
+      // Ignore storage failures and still clear the field in memory.
+    }
+
+    setApiKey('')
+    setApiKeyNotice('Saved key cleared from this browser.')
+  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -226,7 +264,16 @@ function App() {
                   </div>
 
                   <div className="space-y-2">
-                    <Label htmlFor="apiKey">Gemini API key</Label>
+                    <div className="flex items-center justify-between gap-3">
+                      <Label htmlFor="apiKey">Gemini API key</Label>
+                      <button
+                        type="button"
+                        onClick={clearSavedApiKey}
+                        className="text-xs font-medium text-slate-500 transition hover:text-slate-900"
+                      >
+                        Clear saved key
+                      </button>
+                    </div>
                     <Input
                       id="apiKey"
                       type="password"
@@ -236,6 +283,7 @@ function App() {
                       autoComplete="off"
                       required
                     />
+                    <p className="text-xs text-slate-500">{apiKeyNotice}</p>
                   </div>
 
                   <div className="space-y-2">
