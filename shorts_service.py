@@ -71,6 +71,7 @@ def create_short_from_url(
     base_dir: str | Path = "outputs",
     job_id: str | None = None,
     progress_callback: ProgressCallback | None = None,
+    subtitle_style: dict | None = None,
 ) -> dict:
     ensure_dependencies()
 
@@ -117,7 +118,7 @@ def create_short_from_url(
             y2=height,
         )
 
-        clip_final = subtitles.create_subtitles(clip_vertical, result["segments"], start)
+        clip_final = subtitles.create_subtitles(clip_vertical, result["segments"], start, subtitle_style)
         clip_final.write_videofile(
             str(output_path),
             codec="libx264",
@@ -136,6 +137,7 @@ def create_short_from_url(
             "start": start,
             "end": end,
             "outputFilename": output_filename,
+            "subtitleStyle": subtitle_style,
             "outputPath": str(output_path),
             "transcriptPath": str(transcript_path),
             "outputDir": str(output_dir),

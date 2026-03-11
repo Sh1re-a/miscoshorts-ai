@@ -36,6 +36,7 @@ def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str) ->
             output_filename=output_filename,
             job_id=job_id,
             progress_callback=lambda stage, message: _job_progress(job_id, stage, message),
+            subtitle_style=jobs[job_id].get("subtitleStyle"),
         )
         _set_job(job_id, status="completed", result=result, updatedAt=time.time())
     except Exception as error:
@@ -53,6 +54,7 @@ def process_video():
     video_url = (payload.get("videoUrl") or "").strip()
     api_key = (payload.get("apiKey") or "").strip()
     output_filename = (payload.get("outputFilename") or "short_con_subs.mp4").strip() or "short_con_subs.mp4"
+    subtitle_style = payload.get("subtitleStyle") or {}
 
     if not video_url:
         return jsonify({"error": "videoUrl is required"}), 400
@@ -60,7 +62,7 @@ def process_video():
         return jsonify({"error": "apiKey is required"}), 400
 
     job_id = uuid.uuid4().hex[:10]
-    _set_job(job_id, status="queued", createdAt=time.time(), updatedAt=time.time())
+    _set_job(job_id, status="queued", subtitleStyle=subtitle_style, createdAt=time.time(), updatedAt=time.time())
 
     worker = threading.Thread(
         target=_run_job,
