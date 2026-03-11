@@ -4,6 +4,19 @@ Create vertical YouTube Shorts from long-form videos using Whisper for transcrip
 
 This fork adds a cleaner local workflow, a browser-first React dashboard, and a more shareable setup for demos and non-technical users.
 
+## Run The App
+
+If you are not technical, use the app launch file and nothing else:
+
+- macOS: double-click `launch_app.command`
+- Windows: double-click `launch_app.bat`
+
+That is the main way to run this project.
+
+On Windows, the launcher can also handle first-time setup for you. It installs missing dependencies, prepares the app, and opens it in the browser. Later launches are faster and reuse the existing setup.
+
+If you are sending this to a friend, send the full project folder, not just the launcher file.
+
 ## Thanks
 
 Big thanks to the original creator for the idea, codebase foundation, and tutorial inspiration behind this project. This fork builds on that work and reshapes it into a more user-friendly local tool.
@@ -44,7 +57,7 @@ The local app then:
 - FFmpeg installed and available in `PATH`
 - A Gemini API key
 
-## Quick Start
+## Developer Setup
 
 ### macOS / Linux
 
@@ -90,9 +103,9 @@ winget install Gyan.FFmpeg
 choco install ffmpeg
 ```
 
-## Run The Browser App
+## Manual Run
 
-A one-command local start is now available:
+A terminal-based local start is also available:
 
 ```bash
 python3 start_local.py
@@ -104,7 +117,7 @@ py start_local.py
 
 That script starts the backend, starts the React frontend, and opens the browser automatically.
 
-If you want a no-command launcher instead of typing in the terminal:
+If you want the non-technical option instead of typing in the terminal:
 
 - macOS: double-click `launch_app.command`
 - Windows: double-click `launch_app.bat`
