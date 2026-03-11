@@ -248,7 +248,7 @@ function App() {
                     />
                   </div>
 
-                  <div className="rounded-[24px] border border-amber-100 bg-amber-50/70 p-4 text-sm text-slate-700">
+                  <div className="rounded-[24px] border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-slate-700 shadow-sm shadow-amber-100/70">
                     The first browser version keeps clip selection automatic. You style the subtitles, then Gemini picks the moment.
                   </div>
 
