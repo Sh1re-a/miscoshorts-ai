@@ -92,6 +92,20 @@ choco install ffmpeg
 
 ## Run The Browser App
 
+En enklare en-kommandostart finns nu ocksa:
+
+```bash
+python3 start_local.py
+```
+
+```powershell
+py start_local.py
+```
+
+Det skriptet startar backend, startar React-frontenden och oppnar webblasaren automatiskt.
+
+Om du hellre vill starta allt manuellt:
+
 Start the backend:
 
 ```bash
