@@ -3,3 +3,4 @@ moviepy
 google-generativeai
 openai-whisper
 python-dotenv
+Flask
