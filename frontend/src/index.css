@@ -1,0 +1,121 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 222 47% 7%;
+    --foreground: 44 67% 93%;
+    --card: 223 39% 11%;
+    --card-foreground: 44 67% 93%;
+    --popover: 223 39% 11%;
+    --popover-foreground: 44 67% 93%;
+    --primary: 33 93% 65%;
+    --primary-foreground: 222 47% 7%;
+    --secondary: 215 28% 17%;
+    --secondary-foreground: 44 67% 93%;
+    --muted: 216 24% 18%;
+    --muted-foreground: 214 14% 71%;
+    --accent: 174 44% 45%;
+    --accent-foreground: 222 47% 7%;
+    --destructive: 0 74% 58%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 217 25% 18%;
+    --input: 217 25% 18%;
+    --ring: 33 93% 65%;
+    --radius: 1.25rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    @apply scroll-smooth;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: 'Space Grotesk', sans-serif;
+    min-width: 320px;
+    min-height: 100vh;
+  }
+
+  a {
+    @apply text-inherit no-underline;
+  }
+
+  #root {
+    min-height: 100vh;
+  }
+}
+
+@layer utilities {
+  .bg-ink {
+    background:
+      radial-gradient(circle at top left, rgba(245, 158, 11, 0.12), transparent 32%),
+      radial-gradient(circle at bottom right, rgba(45, 212, 191, 0.12), transparent 24%),
+      #090d17;
+  }
+
+  .bg-night {
+    background-color: rgba(12, 18, 32, 0.86);
+  }
+
+  .text-sand {
+    color: #f4cf8e;
+  }
+
+  .border-sand\/60 {
+    border-color: rgba(244, 207, 142, 0.6);
+  }
+
+  .bg-sand\/10 {
+    background-color: rgba(244, 207, 142, 0.1);
+  }
+}
+
+.hero-orb {
+  position: absolute;
+  width: 28rem;
+  height: 28rem;
+  border-radius: 9999px;
+  filter: blur(90px);
+  opacity: 0.55;
+  animation: float 14s ease-in-out infinite;
+}
+
+.hero-orb-left {
+  top: -7rem;
+  left: -8rem;
+  background: rgba(245, 158, 11, 0.26);
+}
+
+.hero-orb-right {
+  right: -9rem;
+  bottom: 12%;
+  background: rgba(45, 212, 191, 0.18);
+  animation-delay: -5s;
+}
+
+.grid-fade {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
+  background-size: 40px 40px;
+  mask-image: radial-gradient(circle at center, black 35%, transparent 86%);
+}
+
+@keyframes float {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+  50% {
+    transform: translate3d(0, 24px, 0);
+  }
+}
