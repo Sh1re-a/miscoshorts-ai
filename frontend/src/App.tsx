@@ -54,6 +54,7 @@ type SubtitleStyle = {
 
 type FontPreset = 'clean' | 'bold' | 'soft'
 type ColorPreset = 'sun' | 'ivory' | 'mint'
+type ClipCountOption = 1 | 3 | 5
 
 const progressByStatus: Record<JobStatus, number> = {
   idle: 0,
@@ -85,6 +86,12 @@ const colorPresets: Array<{ id: ColorPreset; label: string; text: string; stroke
   { id: 'sun', label: 'Sun', text: '#f6d34a', stroke: '#101010' },
   { id: 'ivory', label: 'Ivory', text: '#fff7e8', stroke: '#101010' },
   { id: 'mint', label: 'Mint', text: '#d8fff3', stroke: '#102a43' },
+]
+
+const clipCountOptions: Array<{ value: ClipCountOption; label: string; note: string }> = [
+  { value: 1, label: '1 clip', note: 'Fastest render' },
+  { value: 3, label: '3 clips', note: 'Best default' },
+  { value: 5, label: '5 clips', note: 'More options' },
 ]
 
 const defaultSubtitleStyle: SubtitleStyle = {
@@ -124,7 +131,7 @@ function App() {
   const [requestError, setRequestError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [apiKeyNotice, setApiKeyNotice] = useState(apiKey ? 'Saved locally in this browser.' : 'Not saved yet.')
-  const clipCount = 3
+  const [clipCount, setClipCount] = useState<ClipCountOption>(3)
 
   const activeFontPreset = fontPresets.find((preset) => preset.id === subtitleStyle.fontPreset) ?? fontPresets[0]
   const activeColorPreset = colorPresets.find((preset) => preset.id === subtitleStyle.colorPreset) ?? colorPresets[0]
@@ -270,7 +277,7 @@ function App() {
               <CardHeader>
                 <CardTitle className="text-2xl text-slate-950">Create</CardTitle>
                 <CardDescription className="text-slate-600">
-                  Three fields. Three clips.
+                  Three fields. Your choice of clips.
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -320,8 +327,32 @@ function App() {
                     />
                   </div>
 
+                  <div className="space-y-3">
+                    <Label>How many clips</Label>
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      {clipCountOptions.map((option) => {
+                        const selected = clipCount === option.value
+                        return (
+                          <button
+                            key={option.value}
+                            type="button"
+                            onClick={() => setClipCount(option.value)}
+                            className={`rounded-[22px] border px-4 py-4 text-left transition ${
+                              selected
+                                ? 'border-amber-300 bg-amber-50 shadow-[0_14px_30px_rgba(245,158,11,0.14)]'
+                                : 'border-slate-200 bg-white hover:border-amber-200 hover:bg-amber-50/40'
+                            }`}
+                          >
+                            <p className="text-base font-semibold text-slate-900">{option.label}</p>
+                            <p className="mt-1 text-sm text-slate-500">{option.note}</p>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+
                   <div className="rounded-[24px] border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-slate-700 shadow-sm shadow-amber-100/70">
-                    You style the subtitles, then Gemini now picks and renders three different clip options from the same source video.
+                    You style the subtitles, then Gemini picks and renders the number of clip options you choose from the same source video.
                   </div>
 
                   <Button className="w-full" type="submit" disabled={isSubmitting || isWorking}>
