@@ -65,9 +65,9 @@ const labels: Array<{ status: JobStatus; label: string }> = [
 ]
 
 const fontPresets: Array<{ id: FontPreset; label: string; stack: string; note: string }> = [
-  { id: 'clean', label: 'Clean', stack: 'Arial, Helvetica, sans-serif', note: 'Sharp and readable' },
-  { id: 'bold', label: 'Bold', stack: 'Arial Black, Arial, sans-serif', note: 'High-contrast punch' },
-  { id: 'soft', label: 'Soft', stack: 'Trebuchet MS, Arial, sans-serif', note: 'Gentler rounded look' },
+  { id: 'clean', label: 'Studio', stack: 'Avenir Next, Helvetica Neue, Arial, sans-serif', note: 'Premium and balanced' },
+  { id: 'bold', label: 'Punch', stack: 'Avenir Next Condensed, Arial Black, sans-serif', note: 'Stronger impact' },
+  { id: 'soft', label: 'Editorial', stack: 'Trebuchet MS, Gill Sans, Arial, sans-serif', note: 'Softer and polished' },
 ]
 
 const colorPresets: Array<{ id: ColorPreset; label: string; text: string; stroke: string }> = [
@@ -365,12 +365,13 @@ function App() {
                   <div className="preview-video-frame">
                     <div className="preview-video-overlay" />
                     <div className="preview-kicker">Sample frame</div>
+                      <div className="preview-subtitle-shadow" />
                     <div className="preview-subtitle-wrap">
                       <p
                         className="preview-subtitle"
                         style={{
                           fontFamily: activeFontPreset.stack,
-                          fontSize: `${Math.max(22, subtitleStyle.fontSize * 0.82)}px`,
+                            fontSize: `${Math.max(20, subtitleStyle.fontSize * 0.78)}px`,
                           color: activeColorPreset.text,
                           WebkitTextStroke: `3px ${activeColorPreset.stroke}`,
                         }}

@@ -5,9 +5,30 @@ from moviepy.video.tools.subtitles import SubtitlesClip
 
 
 FONT_PRESETS = {
-    "clean": ["Arial-Bold", "Helvetica-Bold", "Arial", "DejaVuSans-Bold"],
-    "bold": ["Arial-Bold", "Impact", "Helvetica-Bold", "DejaVuSans-Bold"],
-    "soft": ["TrebuchetMS-Bold", "Arial-Bold", "Calibri", "DejaVuSans-Bold"],
+    "clean": [
+        "Avenir Next Demi Bold",
+        "Helvetica Neue Bold",
+        "Segoe UI Bold",
+        "Arial-Bold",
+        "Helvetica-Bold",
+        "DejaVuSans-Bold",
+    ],
+    "bold": [
+        "Avenir Next Heavy",
+        "Bahnschrift SemiBold",
+        "Arial-Bold",
+        "Impact",
+        "Helvetica-Bold",
+        "DejaVuSans-Bold",
+    ],
+    "soft": [
+        "Avenir Next Demi Bold",
+        "TrebuchetMS-Bold",
+        "Gill Sans Bold",
+        "Calibri",
+        "Arial-Bold",
+        "DejaVuSans-Bold",
+    ],
 }
 
 COLOR_PRESETS = {
@@ -69,17 +90,20 @@ def get_font_candidates(font_preset):
 def create_textclip_with_fallback(text, video_clip, subtitle_style):
     last_error = None
     colors = COLOR_PRESETS[subtitle_style["colorPreset"]]
+    font_size = subtitle_style["fontSize"]
+    stroke_width = max(2, round(font_size * 0.08))
+    caption_width = int(video_clip.w * 0.72)
 
     for font in get_font_candidates(subtitle_style["fontPreset"]):
         try:
             return TextClip(text=text,
                             font=font,
-                            font_size=subtitle_style["fontSize"],
+                            font_size=font_size,
                             color=colors["color"],
                             stroke_color=colors["stroke_color"],
-                            stroke_width=3,
+                            stroke_width=stroke_width,
                             method='caption',
-                            size=(int(video_clip.w * 0.8), None),
+                            size=(caption_width, None),
                             text_align='center')
         except Exception as error:
             last_error = error
@@ -107,7 +131,7 @@ def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_sty
             text_style = lambda txt: create_textclip_with_fallback(txt, video_clip, resolved_style)
 
     subtitles = SubtitlesClip(subtitles=subtitles_data, make_textclip=text_style)
-    subtitles = subtitles.with_position(('center', 'center'))
+    subtitles = subtitles.with_position(("center", int(video_clip.h * 0.72)))
     final_clip = CompositeVideoClip([video_clip, subtitles])
     
     return final_clip
