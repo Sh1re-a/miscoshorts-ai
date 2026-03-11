@@ -1,3 +1,3 @@
 @echo off
 cd /d %~dp0
-py start_local.py
+powershell -ExecutionPolicy Bypass -File "%~dp0setup_windows.ps1"

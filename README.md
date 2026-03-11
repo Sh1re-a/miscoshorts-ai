@@ -109,6 +109,18 @@ If you want a no-command launcher instead of typing in the terminal:
 - macOS: double-click `launch_app.command`
 - Windows: double-click `launch_app.bat`
 
+On Windows, `launch_app.bat` now does more than just start the app:
+
+- installs Python if missing
+- installs Node.js if missing
+- installs FFmpeg if missing
+- creates a local virtual environment
+- installs Python dependencies
+- builds the frontend
+- opens the local app in the browser
+
+That makes it the best file to send to a non-technical Windows user together with the full project folder.
+
 If you prefer to start everything manually:
 
 Start the backend:
@@ -247,7 +259,9 @@ miscoshorts-ai/
 ├── gemini_analyzer.py
 ├── shorts_service.py
 ├── server.py
+├── app_launcher.py
 ├── start_local.py
+├── setup_windows.ps1
 ├── launch_app.command
 ├── launch_app.bat
 ├── subtitles.py
