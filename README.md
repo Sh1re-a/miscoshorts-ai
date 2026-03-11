@@ -1,29 +1,46 @@
 # Miscoshorts AI
 
-Create vertical YouTube Shorts from long-form videos using Whisper for transcription, Gemini for clip selection, and MoviePy for the final render.
+Create vertical YouTube Shorts from long-form videos using Whisper for transcription, Gemini for clip selection, and MoviePy for subtitle-ready rendering.
 
-This fork focuses on a simpler setup flow so the tool is easier to demo, maintain, and share.
+This fork adds a cleaner local workflow, a browser-first React dashboard, and a more shareable setup for demos and non-technical users.
+
+## Thanks
+
+Big thanks to the original creator for the idea, codebase foundation, and tutorial inspiration behind this project. This fork builds on that work and reshapes it into a more user-friendly local tool.
 
 ## What It Does
 
 - Downloads a YouTube video with `yt-dlp`
 - Transcribes the audio with `openai-whisper`
-- Asks Gemini to find the strongest short-form segment
+- Uses Gemini to select the strongest short-form moment
 - Crops the video to 9:16 format
-- Adds centered subtitles automatically
+- Adds subtitles automatically
 - Exports a ready-to-post `.mp4`
+- Offers both terminal mode and a local browser UI
 
-## Demo Flow
+## Browser Mode
 
-1. Paste a YouTube URL when the script asks for it.
-2. Paste your Gemini API key or save it in a local `.env` file.
-3. Review the suggested viral segment.
-4. Accept the suggestion or type your own start and end time.
-5. Wait for the short to render.
+The new default experience is a local browser dashboard built with React.
+
+You paste:
+
+- a YouTube link
+- a Gemini API key
+- an optional output filename
+
+The local app then:
+
+1. sends the request to a Python backend running on your machine
+2. downloads the source video
+3. transcribes it with Whisper
+4. asks Gemini for the best short clip
+5. renders subtitles and exports the final MP4
+6. lets you download both the video and the transcript from the browser
 
 ## Requirements
 
 - Python 3.12+
+- Node.js 20+
 - FFmpeg installed and available in `PATH`
 - A Gemini API key
 
@@ -37,6 +54,9 @@ cd miscoshorts-ai
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+cd frontend
+npm install
+cd ..
 ```
 
 ### Windows PowerShell
@@ -47,6 +67,9 @@ cd miscoshorts-ai
 py -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+cd frontend
+npm install
+cd ..
 ```
 
 Install FFmpeg:
@@ -67,7 +90,51 @@ winget install Gyan.FFmpeg
 choco install ffmpeg
 ```
 
-Run the app:
+## Run The Browser App
+
+Start the backend:
+
+```bash
+python3 webapp.py
+```
+
+```powershell
+py webapp.py
+```
+
+Start the frontend in a second terminal:
+
+```bash
+cd frontend
+npm run dev
+```
+
+Then open:
+
+```text
+http://127.0.0.1:5173
+```
+
+## Run As One Local App
+
+If you build the frontend first, the Python server can serve the finished browser UI directly.
+
+```bash
+cd frontend
+npm run build
+cd ..
+python3 webapp.py
+```
+
+Then open:
+
+```text
+http://127.0.0.1:5001
+```
+
+## Terminal Mode
+
+The original terminal flow still exists if you prefer it.
 
 ```bash
 python3 maker.py
@@ -79,15 +146,9 @@ py maker.py
 
 ## Configuration
 
-You can run the tool without editing any Python files.
+You can still save local values in a `.env` file.
 
-At startup the script can ask for:
-
-- `GEMINI_API_KEY`
-- `URL_VIDEO`
-- `OUTPUT_FILENAME`
-
-If you want to save those values locally, copy `.env.example` to `.env` and fill it in:
+Copy the example file:
 
 ```bash
 cp .env.example .env
@@ -97,7 +158,7 @@ cp .env.example .env
 Copy-Item .env.example .env
 ```
 
-Example `.env` values:
+Example values:
 
 ```env
 GEMINI_API_KEY=your_gemini_api_key_here
@@ -109,24 +170,13 @@ OUTPUT_FILENAME=short_con_subs.mp4
 
 ## Output Files
 
-- `short_con_subs.mp4`: final rendered short
-- `transcripcion_completa.txt`: full transcription
-- `video_temp.mp4`: temporary download removed after processing
+Generated files are stored inside `outputs/<job-id>/`.
 
-## Packaging Idea
+Typical artifacts:
 
-If you want to share this with a friend later, package it as a standalone app with PyInstaller after testing the Python version locally.
-
-Typical flow:
-
-```bash
-pip install pyinstaller
-pyinstaller --onefile maker.py
-```
-
-Build the final app on the same operating system your friend will use.
-
-My recommendation is to keep this project terminal-first until the workflow feels stable. After that, build a small local UI on top of the same logic. That is a better path than jumping straight into React too early.
+- rendered short `.mp4`
+- full transcript `.txt`
+- temporary download cleaned up automatically after processing
 
 ## Troubleshooting
 
@@ -138,7 +188,15 @@ Check that FFmpeg is installed:
 ffmpeg -version
 ```
 
-If Windows still cannot find FFmpeg after install, close and reopen PowerShell so `PATH` is refreshed.
+If Windows still cannot find FFmpeg after install, close and reopen PowerShell so `PATH` refreshes.
+
+### Missing Flask Or Other Python Packages
+
+Reinstall Python dependencies:
+
+```bash
+pip install -r requirements.txt
+```
 
 ### Whisper Package Conflicts
 
@@ -151,25 +209,22 @@ pip install openai-whisper
 
 ### Font Errors
 
-If subtitle rendering fails because of fonts, try changing the font in `subtitulos.py` to one available on your system.
-
-Good fallback options:
-
-- `Arial-Bold`
-- `LiberationSans-Bold`
-- `Ubuntu-Bold`
+If subtitle rendering fails because of fonts, the app already tries several fallbacks, especially for Windows. If needed, change the font list in `subtitulos.py`.
 
 ### Gemini Errors
 
-- Make sure your API key is valid
-- Make sure the `.env` file is in the project root
-- Check your Gemini quota and model access
+- make sure your API key is valid
+- make sure you still have Gemini quota available
+- check that your local firewall or proxy is not blocking requests
 
 ## Project Structure
 
 ```text
 miscoshorts-ai/
+├── frontend/
 ├── maker.py
+├── shorts_service.py
+├── webapp.py
 ├── cerebro_gemini.py
 ├── subtitulos.py
 ├── requirements.txt
@@ -179,8 +234,7 @@ miscoshorts-ai/
 
 ## Roadmap
 
-- Better error messages for failed downloads
-- Easier packaging for non-technical users
-- Optional local web UI after terminal flow is stable
-- Optional desktop app build
-- Cleaner release workflow for GitHub
+- Better job history in the browser UI
+- One-click packaging for non-technical users
+- More control over clip selection before render
+- Cleaner GitHub release workflow
