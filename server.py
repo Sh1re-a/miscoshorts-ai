@@ -27,13 +27,14 @@ def _job_progress(job_id: str, stage: str, message: str) -> None:
     _set_job(job_id, status=stage, message=message, updatedAt=time.time())
 
 
-def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str) -> None:
+def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, clip_count: int) -> None:
     _set_job(job_id, status="queued", message="The job is queued.", updatedAt=time.time())
     try:
         result = create_short_from_url(
             video_url=video_url,
             api_key=api_key,
             output_filename=output_filename,
+            clip_count=clip_count,
             job_id=job_id,
             progress_callback=lambda stage, message: _job_progress(job_id, stage, message),
             subtitle_style=jobs[job_id].get("subtitleStyle"),
@@ -55,23 +56,29 @@ def process_video():
     api_key = (payload.get("apiKey") or "").strip()
     output_filename = (payload.get("outputFilename") or "short_con_subs.mp4").strip() or "short_con_subs.mp4"
     subtitle_style = payload.get("subtitleStyle") or {}
+    clip_count = payload.get("clipCount") or 3
 
     if not video_url:
         return jsonify({"error": "videoUrl is required"}), 400
     if not api_key:
         return jsonify({"error": "apiKey is required"}), 400
 
+    try:
+        clip_count = max(1, min(5, int(clip_count)))
+    except (TypeError, ValueError):
+        return jsonify({"error": "clipCount must be a number between 1 and 5"}), 400
+
     job_id = uuid.uuid4().hex[:10]
-    _set_job(job_id, status="queued", subtitleStyle=subtitle_style, createdAt=time.time(), updatedAt=time.time())
+    _set_job(job_id, status="queued", subtitleStyle=subtitle_style, clipCount=clip_count, createdAt=time.time(), updatedAt=time.time())
 
     worker = threading.Thread(
         target=_run_job,
-        args=(job_id, video_url, api_key, output_filename),
+        args=(job_id, video_url, api_key, output_filename, clip_count),
         daemon=True,
     )
     worker.start()
 
-    return jsonify({"jobId": job_id, "status": "queued"}), 202
+    return jsonify({"jobId": job_id, "status": "queued", "clipCount": clip_count}), 202
 
 
 @app.get("/api/jobs/<job_id>")
@@ -88,6 +95,19 @@ def download_video(job_id: str):
     if not job or job.get("status") != "completed":
         return jsonify({"error": "Video not ready"}), 404
     return send_file(job["result"]["outputPath"], as_attachment=True)
+
+
+@app.get("/api/jobs/<job_id>/download/video/<int:clip_index>")
+def download_video_clip(job_id: str, clip_index: int):
+    job = jobs.get(job_id)
+    if not job or job.get("status") != "completed":
+        return jsonify({"error": "Video not ready"}), 404
+
+    clips = job.get("result", {}).get("clips") or []
+    if clip_index < 1 or clip_index > len(clips):
+        return jsonify({"error": "Clip not found"}), 404
+
+    return send_file(clips[clip_index - 1]["outputPath"], as_attachment=True)
 
 
 @app.get("/api/jobs/<job_id>/download/transcript")

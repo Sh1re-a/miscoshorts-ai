@@ -25,7 +25,19 @@ type JobResult = {
   start: number
   end: number
   outputFilename: string
+  outputDir: string
+  clipCount: number
+  clips: JobClip[]
   subtitleStyle?: SubtitleStyle
+}
+
+type JobClip = {
+  index: number
+  title?: string
+  reason?: string
+  start: number
+  end: number
+  outputFilename: string
 }
 
 type JobPayload = {
@@ -112,6 +124,7 @@ function App() {
   const [requestError, setRequestError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [apiKeyNotice, setApiKeyNotice] = useState(apiKey ? 'Saved locally in this browser.' : 'Not saved yet.')
+  const clipCount = 3
 
   const activeFontPreset = fontPresets.find((preset) => preset.id === subtitleStyle.fontPreset) ?? fontPresets[0]
   const activeColorPreset = colorPresets.find((preset) => preset.id === subtitleStyle.colorPreset) ?? colorPresets[0]
@@ -191,17 +204,18 @@ function App() {
           apiKey,
           outputFilename,
           subtitleStyle,
+          clipCount,
         }),
       })
 
-      const payload = (await response.json()) as { jobId?: string; error?: string; status?: JobStatus }
+      const payload = (await response.json()) as { jobId?: string; error?: string; status?: JobStatus; clipCount?: number }
 
       if (!response.ok || !payload.jobId) {
         throw new Error(payload.error ?? 'Could not start the job.')
       }
 
       setJobId(payload.jobId)
-      setJob({ status: payload.status ?? 'queued', message: 'The job started in your local backend.' })
+      setJob({ status: payload.status ?? 'queued', message: `The job started in your local backend and will render ${payload.clipCount ?? clipCount} clips.` })
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unexpected error'
       setJob({ status: 'failed', error: message })
@@ -256,7 +270,7 @@ function App() {
               <CardHeader>
                 <CardTitle className="text-2xl text-slate-950">Create</CardTitle>
                 <CardDescription className="text-slate-600">
-                  Three fields. One render.
+                  Three fields. Three clips.
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -307,7 +321,7 @@ function App() {
                   </div>
 
                   <div className="rounded-[24px] border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-slate-700 shadow-sm shadow-amber-100/70">
-                    The first browser version keeps clip selection automatic. You style the subtitles, then Gemini picks the moment.
+                    You style the subtitles, then Gemini now picks and renders three different clip options from the same source video.
                   </div>
 
                   <Button className="w-full" type="submit" disabled={isSubmitting || isWorking}>
@@ -490,29 +504,38 @@ function App() {
                   <>
                     <div className="rounded-[24px] border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
                       <div className="mb-2 flex items-center gap-2 font-medium">
-                        <CheckCircle2 className="h-4 w-4" /> Render complete
+                        <CheckCircle2 className="h-4 w-4" /> {job.result.clipCount} clips ready
                       </div>
-                      <p>{job.result.title ?? 'Untitled clip'}</p>
-                      <p className="mt-2 text-emerald-800/80">{job.result.reason ?? 'Gemini selected the strongest moment.'}</p>
+                      <p>{job.result.title ?? 'Your first clip is ready.'}</p>
+                      <p className="mt-2 text-emerald-800/80">Saved locally in {job.result.outputDir}</p>
                     </div>
 
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <div className="rounded-[22px] border border-slate-200 bg-slate-50 p-4">
-                        <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Start</p>
-                        <p className="mt-2 text-2xl font-semibold text-slate-950">{job.result.start.toFixed(1)}s</p>
-                      </div>
-                      <div className="rounded-[22px] border border-slate-200 bg-slate-50 p-4">
-                        <p className="text-xs uppercase tracking-[0.3em] text-slate-500">End</p>
-                        <p className="mt-2 text-2xl font-semibold text-slate-950">{job.result.end.toFixed(1)}s</p>
-                      </div>
+                    <div className="rounded-[22px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                      Local save folder: <span className="font-medium text-slate-900">{job.result.outputDir}</span>
+                    </div>
+
+                    <div className="space-y-3">
+                      {job.result.clips.map((clip) => (
+                        <div key={clip.index} className="rounded-[24px] border border-slate-200 bg-slate-50 p-4">
+                          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                            <div className="space-y-2">
+                              <p className="text-xs uppercase tracking-[0.28em] text-slate-500">Clip {clip.index}</p>
+                              <p className="text-lg font-semibold text-slate-950">{clip.title ?? `Clip ${clip.index}`}</p>
+                              <p className="text-sm text-slate-600">{clip.reason ?? 'Gemini selected a strong moment from the source video.'}</p>
+                              <p className="text-sm text-slate-500">{clip.start.toFixed(1)}s to {clip.end.toFixed(1)}s</p>
+                              <p className="text-sm text-slate-500">{clip.outputFilename}</p>
+                            </div>
+                            <Button asChild className="sm:w-auto">
+                              <a href={`/api/jobs/${jobId}/download/video/${clip.index}`}>
+                                <Download className="mr-2 h-4 w-4" /> Download clip
+                              </a>
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
                     </div>
 
                     <div className="flex flex-col gap-3 sm:flex-row">
-                      <Button asChild className="flex-1">
-                        <a href={`/api/jobs/${jobId}/download/video`}>
-                          <Download className="mr-2 h-4 w-4" /> Download MP4
-                        </a>
-                      </Button>
                       <Button asChild variant="secondary" className="flex-1">
                         <a href={`/api/jobs/${jobId}/download/transcript`}>
                           <Download className="mr-2 h-4 w-4" /> Download transcript
