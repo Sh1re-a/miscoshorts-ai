@@ -38,7 +38,6 @@ type JobPayload = {
 type SubtitleStyle = {
   fontPreset: FontPreset
   colorPreset: ColorPreset
-  fontSize: number
 }
 
 type FontPreset = 'clean' | 'bold' | 'soft'
@@ -79,7 +78,18 @@ const colorPresets: Array<{ id: ColorPreset; label: string; text: string; stroke
 const defaultSubtitleStyle: SubtitleStyle = {
   fontPreset: 'clean',
   colorPreset: 'sun',
-  fontSize: 35,
+}
+
+const previewFontSizeByPreset: Record<FontPreset, string> = {
+  clean: 'clamp(1.55rem, 3.4vw, 2.4rem)',
+  bold: 'clamp(1.65rem, 3.6vw, 2.55rem)',
+  soft: 'clamp(1.5rem, 3.2vw, 2.3rem)',
+}
+
+const previewSubtitleByPreset: Record<FontPreset, string> = {
+  clean: 'Every line now locks into the frame with a polished studio finish.',
+  bold: 'High-impact captions hit hard and stay clean inside the shot.',
+  soft: 'Refined subtitles stay readable, balanced, and premium on screen.',
 }
 
 const apiKeyStorageKey = 'miscoshorts.apiKey'
@@ -323,7 +333,7 @@ function App() {
                   <Type className="h-5 w-5 text-amber-600" /> Subtitle style
                 </CardTitle>
                 <CardDescription className="text-slate-600">
-                  Keep it simple. Pick a font feel, a color, and a size.
+                  Pick the tone. The app now auto-fits subtitle scale and exports in a cleaner vertical quality profile.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-5">
@@ -373,23 +383,8 @@ function App() {
                   </div>
                 </div>
 
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <Label htmlFor="fontSize">Size</Label>
-                    <span className="text-sm text-slate-500">{subtitleStyle.fontSize}px</span>
-                  </div>
-                  <input
-                    id="fontSize"
-                    type="range"
-                    min={24}
-                    max={56}
-                    step={2}
-                    value={subtitleStyle.fontSize}
-                    onChange={(event) =>
-                      setSubtitleStyle((current) => ({ ...current, fontSize: Number(event.target.value) }))
-                    }
-                    className="slider w-full"
-                  />
+                <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-600">
+                  Long subtitle lines are split automatically, sized to fit the frame, and rendered with a stronger screen-ready shadow treatment.
                 </div>
               </CardContent>
             </Card>
@@ -412,25 +407,27 @@ function App() {
                 <div className="preview-stage aspect-[16/10] rounded-[28px] border border-white/70 p-4 shadow-inner shadow-white/50">
                   <div className="preview-video-frame">
                     <div className="preview-video-overlay" />
-                    <div className="preview-kicker">Sample frame</div>
-                      <div className="preview-subtitle-shadow" />
+                    <div className="preview-kicker">Cinematic preview</div>
+                    <div className="preview-caption-chip">1080 x 1920 export</div>
+                    <div className="preview-subtitle-shadow" />
                     <div className="preview-subtitle-wrap">
                       <p
                         className="preview-subtitle"
                         style={{
                           fontFamily: activeFontPreset.stack,
-                            fontSize: `${Math.max(20, subtitleStyle.fontSize * 0.78)}px`,
+                          fontSize: previewFontSizeByPreset[subtitleStyle.fontPreset],
                           color: activeColorPreset.text,
-                          WebkitTextStroke: `3px ${activeColorPreset.stroke}`,
+                          WebkitTextStroke: `2.5px ${activeColorPreset.stroke}`,
+                          textShadow: `0 8px 22px rgba(15, 23, 42, 0.38), 0 2px 0 ${activeColorPreset.stroke}`,
                         }}
                       >
-                        This is how your subtitle styling will look in the final short.
+                        {previewSubtitleByPreset[subtitleStyle.fontPreset]}
                       </p>
                     </div>
                   </div>
                 </div>
 
-                <div className="grid gap-3 md:grid-cols-3">
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                   <div className="rounded-[22px] border border-slate-200 bg-slate-50 px-4 py-3">
                     <p className="text-xs uppercase tracking-[0.22em] text-slate-500">Font</p>
                     <p className="mt-2 font-semibold text-slate-900">{activeFontPreset.label}</p>
@@ -440,8 +437,12 @@ function App() {
                     <p className="mt-2 font-semibold text-slate-900">{activeColorPreset.label}</p>
                   </div>
                   <div className="rounded-[22px] border border-slate-200 bg-slate-50 px-4 py-3">
-                    <p className="text-xs uppercase tracking-[0.22em] text-slate-500">Size</p>
-                    <p className="mt-2 font-semibold text-slate-900">{subtitleStyle.fontSize}px</p>
+                    <p className="text-xs uppercase tracking-[0.22em] text-slate-500">Fit</p>
+                    <p className="mt-2 font-semibold text-slate-900">Auto</p>
+                  </div>
+                  <div className="rounded-[22px] border border-slate-200 bg-slate-50 px-4 py-3">
+                    <p className="text-xs uppercase tracking-[0.22em] text-slate-500">Export</p>
+                    <p className="mt-2 font-semibold text-slate-900">Full HD Vertical</p>
                   </div>
                 </div>
               </CardContent>
