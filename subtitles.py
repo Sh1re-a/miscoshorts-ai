@@ -4,20 +4,20 @@ from moviepy import TextClip, CompositeVideoClip
 from moviepy.video.tools.subtitles import SubtitlesClip
 
 
-def hamta_foredragna_fonter():
-    systemnamn = platform.system().lower()
+def get_preferred_fonts():
+    system_name = platform.system().lower()
 
-    if systemnamn == 'windows':
+    if system_name == 'windows':
         return ['Arial-Bold', 'Arial', 'Calibri', 'DejaVuSans-Bold']
-    if systemnamn == 'darwin':
+    if system_name == 'darwin':
         return ['Arial-Bold', 'Helvetica-Bold', 'Arial', 'DejaVuSans-Bold']
     return ['DejaVuSans-Bold', 'LiberationSans-Bold', 'Arial-Bold', 'Arial']
 
 
-def skapa_textklipp_med_reservfont(text, video_clip):
-    senaste_fel = None
+def create_textclip_with_fallback(text, video_clip):
+    last_error = None
 
-    for font in hamta_foredragna_fonter():
+    for font in get_preferred_fonts():
         try:
             return TextClip(text=text,
                             font=font,
@@ -29,30 +29,30 @@ def skapa_textklipp_med_reservfont(text, video_clip):
                             size=(int(video_clip.w * 0.8), None),
                             text_align='center')
         except Exception as error:
-            senaste_fel = error
+            last_error = error
 
     raise RuntimeError(
-        "Det gick inte att skapa undertexten med nagon kompatibel font."
-    ) from senaste_fel
+        "Could not render subtitles with any compatible font."
+    ) from last_error
 
 
-def skapa_undertexter(video_clip, whisper_segment, beskarning_start):
-    print("📝 Skapar undertextlager...")
+def create_subtitles(video_clip, whisper_segments, clip_start_time):
+    print("📝 Building subtitle layers...")
 
-    undertexter = []
-    for segment in whisper_segment:
-        start = segment['start'] - beskarning_start
-        end = segment['end'] - beskarning_start
+    subtitles_data = []
+    for segment in whisper_segments:
+        start = segment['start'] - clip_start_time
+        end = segment['end'] - clip_start_time
         text = segment['text'].strip()
 
         if end > 0 and start < video_clip.duration:
             start = max(0, start)
             end = min(video_clip.duration, end)
-            undertexter.append(((start, end), text))
+            subtitles_data.append(((start, end), text))
 
-    textstil = lambda txt: skapa_textklipp_med_reservfont(txt, video_clip)
+    text_style = lambda txt: create_textclip_with_fallback(txt, video_clip)
 
-    subtitles = SubtitlesClip(subtitles=undertexter, make_textclip=textstil)
+    subtitles = SubtitlesClip(subtitles=subtitles_data, make_textclip=text_style)
     subtitles = subtitles.with_position(('center', 'center'))
     final_clip = CompositeVideoClip([video_clip, subtitles])
     

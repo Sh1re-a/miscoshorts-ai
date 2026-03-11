@@ -10,8 +10,8 @@ import whisper
 import yt_dlp
 from moviepy import VideoFileClip
 
-import cerebro_gemini as gemini_tjanst
-import subtitulos as undertextning
+import gemini_analyzer
+import subtitles
 
 
 ProgressCallback = Callable[[str, str], None]
@@ -22,49 +22,49 @@ def _emit(callback: ProgressCallback | None, stage: str, message: str) -> None:
         callback(stage, message)
 
 
-def kontrollera_beroenden() -> None:
+def ensure_dependencies() -> None:
     if shutil.which("ffmpeg"):
         return
 
     raise EnvironmentError(
-        "FFmpeg ar inte installerat eller finns inte i PATH. I Windows kan du installera det med 'winget install Gyan.FFmpeg'."
+        "FFmpeg is not installed or not available in PATH. On Windows, install it with 'winget install Gyan.FFmpeg'."
     )
 
 
-def ladda_ner_video(url: str, mal_bas: Path) -> Path:
+def download_video(url: str, destination_base: Path) -> Path:
     ydl_opts = {
         "format": "best[ext=mp4]",
-        "outtmpl": str(mal_bas.with_suffix(".%(ext)s")),
+        "outtmpl": str(destination_base.with_suffix(".%(ext)s")),
         "quiet": True,
         "no_warnings": True,
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
-    return mal_bas.with_suffix(".mp4")
+    return destination_base.with_suffix(".mp4")
 
 
-def tolka_gemini_svar(text: str) -> dict:
+def parse_gemini_response(text: str) -> dict:
     data = {}
-    for rad in text.split("\n"):
-        if "TITEL:" in rad:
-            data["titel"] = rad.split("TITEL:")[1].strip()
-        if "START:" in rad:
-            data["start"] = float(rad.split("START:")[1].strip())
-        if "SLUT:" in rad:
-            data["slut"] = float(rad.split("SLUT:")[1].strip())
-        if "ORSAK:" in rad:
-            data["orsak"] = rad.split("ORSAK:")[1].strip()
+    for line in text.split("\n"):
+        if "TITLE:" in line:
+            data["title"] = line.split("TITLE:")[1].strip()
+        if "START:" in line:
+            data["start"] = float(line.split("START:")[1].strip())
+        if "END:" in line:
+            data["end"] = float(line.split("END:")[1].strip())
+        if "REASON:" in line:
+            data["reason"] = line.split("REASON:")[1].strip()
     return data
 
 
-def skapa_utdatamapp(base_dir: str | Path = "outputs", job_id: str | None = None) -> tuple[str, Path]:
+def create_output_dir(base_dir: str | Path = "outputs", job_id: str | None = None) -> tuple[str, Path]:
     job_id = job_id or uuid.uuid4().hex[:10]
     output_dir = Path(base_dir) / job_id
     output_dir.mkdir(parents=True, exist_ok=True)
     return job_id, output_dir
 
 
-def skapa_short_fran_url(
+def create_short_from_url(
     video_url: str,
     api_key: str,
     output_filename: str = "short_con_subs.mp4",
@@ -72,10 +72,10 @@ def skapa_short_fran_url(
     job_id: str | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> dict:
-    kontrollera_beroenden()
+    ensure_dependencies()
 
-    job_id, output_dir = skapa_utdatamapp(base_dir=base_dir, job_id=job_id)
-    transcript_path = output_dir / "fullstandig_transkription.txt"
+    job_id, output_dir = create_output_dir(base_dir=base_dir, job_id=job_id)
+    transcript_path = output_dir / "full_transcript.txt"
     temp_base = output_dir / "video_temp"
 
     video_path = None
@@ -83,29 +83,29 @@ def skapa_short_fran_url(
     clip_final = None
 
     try:
-        _emit(progress_callback, "downloading", "Laddar ner video fran YouTube...")
-        video_path = ladda_ner_video(video_url, temp_base)
+        _emit(progress_callback, "downloading", "Downloading video from YouTube...")
+        video_path = download_video(video_url, temp_base)
 
-        _emit(progress_callback, "transcribing", "Transkriberar ljud med Whisper...")
+        _emit(progress_callback, "transcribing", "Transcribing audio with Whisper...")
         model = whisper.load_model("base")
-        resultat = model.transcribe(str(video_path))
+        result = model.transcribe(str(video_path))
 
         transcript_path.write_text(
-            f"URL: {video_url}\n{resultat['text']}", encoding="utf-8"
+            f"URL: {video_url}\n{result['text']}", encoding="utf-8"
         )
 
-        _emit(progress_callback, "analyzing", "Fragar Gemini efter det basta klippet...")
-        analys = gemini_tjanst.hitta_viralt_klipp(resultat["segments"], api_key)
-        clip_data = tolka_gemini_svar(analys)
+        _emit(progress_callback, "analyzing", "Asking Gemini for the best clip...")
+        analysis = gemini_analyzer.find_viral_clip(result["segments"], api_key)
+        clip_data = parse_gemini_response(analysis)
 
-        if "start" not in clip_data or "slut" not in clip_data:
-            raise ValueError("Gemini returnerade inget giltigt START- och SLUT-intervall.")
+        if "start" not in clip_data or "end" not in clip_data:
+            raise ValueError("Gemini did not return a valid START and END interval.")
 
         start = clip_data["start"]
-        end = clip_data["slut"]
+        end = clip_data["end"]
         output_path = output_dir / output_filename
 
-        _emit(progress_callback, "rendering", "Renderar vertikal short med undertexter...")
+        _emit(progress_callback, "rendering", "Rendering vertical short with subtitles...")
         clip = VideoFileClip(str(video_path)).subclipped(start, end)
 
         width, height = clip.size
@@ -117,7 +117,7 @@ def skapa_short_fran_url(
             y2=height,
         )
 
-        clip_final = undertextning.skapa_undertexter(clip_vertical, resultat["segments"], start)
+        clip_final = subtitles.create_subtitles(clip_vertical, result["segments"], start)
         clip_final.write_videofile(
             str(output_path),
             codec="libx264",
@@ -127,12 +127,12 @@ def skapa_short_fran_url(
             logger=None,
         )
 
-        _emit(progress_callback, "completed", "Shorten ar klar for nedladdning.")
+        _emit(progress_callback, "completed", "The short is ready to download.")
         return {
             "jobId": job_id,
             "videoUrl": video_url,
-            "title": clip_data.get("titel"),
-            "reason": clip_data.get("orsak"),
+            "title": clip_data.get("title"),
+            "reason": clip_data.get("reason"),
             "start": start,
             "end": end,
             "outputFilename": output_filename,

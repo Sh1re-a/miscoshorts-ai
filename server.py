@@ -7,7 +7,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request, send_file, send_from_directory
 
-from shorts_service import skapa_short_fran_url
+from shorts_service import create_short_from_url
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -28,9 +28,9 @@ def _job_progress(job_id: str, stage: str, message: str) -> None:
 
 
 def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str) -> None:
-    _set_job(job_id, status="queued", message="Jobbet ligger i ko.", updatedAt=time.time())
+    _set_job(job_id, status="queued", message="The job is queued.", updatedAt=time.time())
     try:
-        result = skapa_short_fran_url(
+        result = create_short_from_url(
             video_url=video_url,
             api_key=api_key,
             output_filename=output_filename,
