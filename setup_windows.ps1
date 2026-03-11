@@ -4,6 +4,10 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $frontendDir = Join-Path $root "frontend"
 $venvDir = Join-Path $root ".venv"
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
+$stateDir = Join-Path $root ".setup-state"
+$pythonDepsStamp = Join-Path $stateDir "python-deps.stamp"
+$frontendDepsStamp = Join-Path $stateDir "frontend-deps.stamp"
+$frontendBuildStamp = Join-Path $stateDir "frontend-build.stamp"
 
 function Refresh-SessionPath {
     $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
@@ -61,10 +65,53 @@ function Get-PythonCommand {
     return "python"
 }
 
+function Ensure-StateDir {
+    if (-not (Test-Path $stateDir)) {
+        New-Item -ItemType Directory -Path $stateDir | Out-Null
+    }
+}
+
+function Update-Stamp($stampPath) {
+    if (Test-Path $stampPath) {
+        (Get-Item $stampPath).LastWriteTimeUtc = [DateTime]::UtcNow
+        return
+    }
+
+    New-Item -ItemType File -Path $stampPath | Out-Null
+}
+
+function Test-Stale($stampPath, $paths) {
+    if (-not (Test-Path $stampPath)) {
+        return $true
+    }
+
+    $stampTime = (Get-Item $stampPath).LastWriteTimeUtc
+
+    foreach ($path in $paths) {
+        if (-not (Test-Path $path)) {
+            return $true
+        }
+
+        $item = Get-Item $path
+        if ($item.PSIsContainer) {
+            $newestChild = Get-ChildItem -Path $path -Recurse -File | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+            if ($null -ne $newestChild -and $newestChild.LastWriteTimeUtc -gt $stampTime) {
+                return $true
+            }
+        }
+        elseif ($item.LastWriteTimeUtc -gt $stampTime) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
 Set-Location $root
 
 Write-Host "Preparing Miscoshorts AI for Windows..."
 Refresh-SessionPath
+Ensure-StateDir
 Ensure-Python
 Ensure-Node
 Ensure-Ffmpeg
@@ -76,21 +123,37 @@ if (-not (Test-Path $venvPython)) {
     & $pythonCommand -m venv .venv
 }
 
-Write-Host "Installing Python packages ..."
-& $venvPython -m pip install --upgrade pip
-& $venvPython -m pip install -r requirements.txt
+if (Test-Stale $pythonDepsStamp @((Join-Path $root "requirements.txt"), $venvPython)) {
+    Write-Host "Installing Python packages ..."
+    & $venvPython -m pip install --upgrade pip
+    & $venvPython -m pip install -r requirements.txt
+    Update-Stamp $pythonDepsStamp
+}
+else {
+    Write-Host "Python packages are already installed. Skipping reinstall."
+}
 
-if (-not (Test-Path (Join-Path $frontendDir "node_modules"))) {
+if (Test-Stale $frontendDepsStamp @((Join-Path $frontendDir "package.json"), (Join-Path $frontendDir "package-lock.json"))) {
     Write-Host "Installing frontend packages ..."
     Push-Location $frontendDir
     npm install
     Pop-Location
+    Update-Stamp $frontendDepsStamp
+}
+else {
+    Write-Host "Frontend packages are already installed. Skipping npm install."
 }
 
-Write-Host "Building frontend ..."
-Push-Location $frontendDir
-npm run build
-Pop-Location
+if (Test-Stale $frontendBuildStamp @((Join-Path $frontendDir "src"), (Join-Path $frontendDir "index.html"), (Join-Path $frontendDir "package.json"), (Join-Path $frontendDir "vite.config.ts"))) {
+    Write-Host "Building frontend ..."
+    Push-Location $frontendDir
+    npm run build
+    Pop-Location
+    Update-Stamp $frontendBuildStamp
+}
+else {
+    Write-Host "Frontend build is up to date. Skipping build."
+}
 
 Write-Host "Launching app ..."
 & $venvPython app_launcher.py

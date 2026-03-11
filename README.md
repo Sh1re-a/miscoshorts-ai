@@ -119,6 +119,8 @@ On Windows, `launch_app.bat` now does more than just start the app:
 - builds the frontend
 - opens the local app in the browser
 
+On the first run it sets everything up. On later runs it reuses the existing setup and skips reinstalling or rebuilding unless something changed.
+
 That makes it the best file to send to a non-technical Windows user together with the full project folder.
 
 If you prefer to start everything manually:

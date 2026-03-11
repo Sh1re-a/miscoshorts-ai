@@ -123,6 +123,7 @@ checkpoints/
 # Cache directories
 .cache/
 cache/
+.setup-state/
 
 # Node / frontend
 node_modules/
