@@ -1,11 +1,22 @@
 import google.generativeai as genai
 import os
+from dotenv import load_dotenv
 
-GEMINI_API_KEY = "API_KEY_AQUI"
-genai.configure(api_key=GEMINI_API_KEY)
+load_dotenv()
 
-def encontrar_clip_viral(segmentos_whisper):
+
+def obtener_gemini_api_key(api_key=None):
+    clave = (api_key or os.getenv("GEMINI_API_KEY", "")).strip()
+    if not clave:
+        raise ValueError(
+            "No se encontro GEMINI_API_KEY. Anade tu clave en un archivo .env o escribela al iniciar el programa."
+        )
+    return clave
+
+def encontrar_clip_viral(segmentos_whisper, api_key=None):
     print("✨ Consultando a Gemini (con timestamps)...")
+
+    genai.configure(api_key=obtener_gemini_api_key(api_key))
 
     texto_con_tiempos = ""
     for seg in segmentos_whisper:
