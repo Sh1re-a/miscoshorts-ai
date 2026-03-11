@@ -29,11 +29,23 @@ This fork focuses on a simpler setup flow so the tool is easier to demo, maintai
 
 ## Quick Start
 
+### macOS / Linux
+
 ```bash
 git clone git@github.com:Sh1re-a/miscoshorts-ai.git
 cd miscoshorts-ai
 python3 -m venv .venv
 source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### Windows PowerShell
+
+```powershell
+git clone git@github.com:Sh1re-a/miscoshorts-ai.git
+cd miscoshorts-ai
+py -m venv .venv
+.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
@@ -47,10 +59,22 @@ brew install ffmpeg
 sudo apt update && sudo apt install ffmpeg
 ```
 
+```powershell
+# Windows with winget
+winget install Gyan.FFmpeg
+
+# or with Chocolatey
+choco install ffmpeg
+```
+
 Run the app:
 
 ```bash
 python3 maker.py
+```
+
+```powershell
+py maker.py
 ```
 
 ## Configuration
@@ -67,6 +91,10 @@ If you want to save those values locally, copy `.env.example` to `.env` and fill
 
 ```bash
 cp .env.example .env
+```
+
+```powershell
+Copy-Item .env.example .env
 ```
 
 Example `.env` values:
@@ -98,6 +126,8 @@ pyinstaller --onefile maker.py
 
 Build the final app on the same operating system your friend will use.
 
+My recommendation is to keep this project terminal-first until the workflow feels stable. After that, build a small local UI on top of the same logic. That is a better path than jumping straight into React too early.
+
 ## Troubleshooting
 
 ### Missing FFmpeg
@@ -107,6 +137,8 @@ Check that FFmpeg is installed:
 ```bash
 ffmpeg -version
 ```
+
+If Windows still cannot find FFmpeg after install, close and reopen PowerShell so `PATH` is refreshed.
 
 ### Whisper Package Conflicts
 
@@ -149,5 +181,6 @@ miscoshorts-ai/
 
 - Better error messages for failed downloads
 - Easier packaging for non-technical users
+- Optional local web UI after terminal flow is stable
 - Optional desktop app build
 - Cleaner release workflow for GitHub

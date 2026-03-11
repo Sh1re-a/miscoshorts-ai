@@ -1,6 +1,7 @@
 import yt_dlp
 from moviepy import VideoFileClip
 import os
+import shutil
 import whisper
 import warnings
 from dotenv import load_dotenv
@@ -45,6 +46,19 @@ def pedir_valor(mensaje, valor_actual=""):
     return valor or valor_actual
 
 
+def es_confirmacion_positiva(valor):
+    return valor.strip().lower() in {"s", "si", "y", "yes"}
+
+
+def validar_dependencias():
+    if shutil.which("ffmpeg"):
+        return
+
+    raise EnvironmentError(
+        "FFmpeg no esta instalado o no esta disponible en PATH. En Windows puedes instalarlo con 'winget install Gyan.FFmpeg' y despues reiniciar la terminal."
+    )
+
+
 def obtener_url_video():
     url = URL_VIDEO
     if not url or url == "TU_URL_DE_VIDEO_AQUI":
@@ -53,8 +67,8 @@ def obtener_url_video():
     if not url:
         raise ValueError("Necesitas indicar una URL de YouTube para continuar.")
 
-    guardar = input("Quieres guardar esta URL como valor por defecto en .env? (s/N): ").strip().lower()
-    if guardar == "s":
+    guardar = input("Quieres guardar esta URL como valor por defecto en .env? (s/N): ").strip()
+    if es_confirmacion_positiva(guardar):
         actualizar_env("URL_VIDEO", url)
 
     return url
@@ -73,8 +87,8 @@ def obtener_api_key():
     if not api_key:
         raise ValueError("No se proporciono GEMINI_API_KEY.")
 
-    guardar = input("Quieres guardar tu API key en .env para no escribirla cada vez? (s/N): ").strip().lower()
-    if guardar == "s":
+    guardar = input("Quieres guardar tu API key en .env para no escribirla cada vez? (s/N): ").strip()
+    if es_confirmacion_positiva(guardar):
         actualizar_env("GEMINI_API_KEY", api_key)
 
     return api_key
@@ -103,6 +117,7 @@ def main():
     clip_final = None
 
     try:
+        validar_dependencias()
         url_video = obtener_url_video()
         nombre_salida = obtener_nombre_salida()
         api_key = obtener_api_key()
@@ -165,4 +180,7 @@ def main():
             os.remove(video_path)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as error:
+        print(f"\n❌ Error: {error}")
