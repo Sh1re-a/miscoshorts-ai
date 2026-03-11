@@ -15,6 +15,11 @@ import subtitles
 
 
 ProgressCallback = Callable[[str, str], None]
+OUTPUT_WIDTH = 1080
+OUTPUT_HEIGHT = 1920
+VIDEO_CRF = "18"
+VIDEO_BITRATE = "10M"
+VIDEO_AUDIO_BITRATE = "192k"
 
 
 def _emit(callback: ProgressCallback | None, stage: str, message: str) -> None:
@@ -117,14 +122,19 @@ def create_short_from_url(
             x2=width / 2 + new_width / 2,
             y2=height,
         )
+        clip_vertical = clip_vertical.resized(new_size=(OUTPUT_WIDTH, OUTPUT_HEIGHT))
 
         clip_final = subtitles.create_subtitles(clip_vertical, result["segments"], start, subtitle_style)
         clip_final.write_videofile(
             str(output_path),
             codec="libx264",
             audio_codec="aac",
-            fps=24,
+            fps=max(24, round(clip.fps or 24)),
+            bitrate=VIDEO_BITRATE,
+            audio_bitrate=VIDEO_AUDIO_BITRATE,
             threads=4,
+            preset="slow",
+            ffmpeg_params=["-crf", VIDEO_CRF, "-movflags", "+faststart", "-pix_fmt", "yuv420p"],
             logger=None,
         )
 
