@@ -104,6 +104,11 @@ py start_local.py
 
 That script starts the backend, starts the React frontend, and opens the browser automatically.
 
+If you want a no-command launcher instead of typing in the terminal:
+
+- macOS: double-click `launch_app.command`
+- Windows: double-click `launch_app.bat`
+
 If you prefer to start everything manually:
 
 Start the backend:
@@ -225,6 +230,8 @@ pip install openai-whisper
 
 If subtitle rendering fails because of fonts, the app already tries several fallbacks, especially for Windows. If needed, change the font list in `subtitles.py`.
 
+The current subtitle renderer now prefers higher-quality system fonts first, uses a narrower caption width, and places subtitles lower in the frame for a cleaner Shorts look.
+
 ### Gemini Errors
 
 - make sure your API key is valid
@@ -241,6 +248,8 @@ miscoshorts-ai/
 ├── shorts_service.py
 ├── server.py
 ├── start_local.py
+├── launch_app.command
+├── launch_app.bat
 ├── subtitles.py
 ├── requirements.txt
 ├── .env.example
