@@ -92,7 +92,7 @@ choco install ffmpeg
 
 ## Run The Browser App
 
-En enklare en-kommandostart finns nu ocksa:
+A one-command local start is now available:
 
 ```bash
 python3 start_local.py
@@ -102,18 +102,18 @@ python3 start_local.py
 py start_local.py
 ```
 
-Det skriptet startar backend, startar React-frontenden och oppnar webblasaren automatiskt.
+That script starts the backend, starts the React frontend, and opens the browser automatically.
 
-Om du hellre vill starta allt manuellt:
+If you prefer to start everything manually:
 
 Start the backend:
 
 ```bash
-python3 webapp.py
+python3 server.py
 ```
 
 ```powershell
-py webapp.py
+py server.py
 ```
 
 Start the frontend in a second terminal:
@@ -137,7 +137,7 @@ If you build the frontend first, the Python server can serve the finished browse
 cd frontend
 npm run build
 cd ..
-python3 webapp.py
+python3 server.py
 ```
 
 Then open:
@@ -151,11 +151,11 @@ http://127.0.0.1:5001
 The original terminal flow still exists if you prefer it.
 
 ```bash
-python3 maker.py
+python3 cli.py
 ```
 
 ```powershell
-py maker.py
+py cli.py
 ```
 
 ## Configuration
@@ -223,7 +223,7 @@ pip install openai-whisper
 
 ### Font Errors
 
-If subtitle rendering fails because of fonts, the app already tries several fallbacks, especially for Windows. If needed, change the font list in `subtitulos.py`.
+If subtitle rendering fails because of fonts, the app already tries several fallbacks, especially for Windows. If needed, change the font list in `subtitles.py`.
 
 ### Gemini Errors
 
@@ -236,11 +236,12 @@ If subtitle rendering fails because of fonts, the app already tries several fall
 ```text
 miscoshorts-ai/
 ├── frontend/
-├── maker.py
+├── cli.py
+├── gemini_analyzer.py
 ├── shorts_service.py
-├── webapp.py
-├── cerebro_gemini.py
-├── subtitulos.py
+├── server.py
+├── start_local.py
+├── subtitles.py
 ├── requirements.txt
 ├── .env.example
 └── README.md

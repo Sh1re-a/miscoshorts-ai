@@ -16,36 +16,36 @@ FRONTEND_DIR = ROOT_DIR / "frontend"
 BACKEND_HEALTH_URL = "http://127.0.0.1:5001/api/health"
 
 
-def npm_kommando() -> str:
+def npm_command() -> str:
     return "npm.cmd" if sys.platform.startswith("win") else "npm"
 
 
-def kontrollera_verktyg() -> None:
+def ensure_tools() -> None:
     if shutil.which(sys.executable) is None:
-        raise EnvironmentError("Python kunde inte hittas i den aktuella miljoen.")
+        raise EnvironmentError("Python could not be found in the current environment.")
 
-    if shutil.which(npm_kommando()) is None:
-        raise EnvironmentError("npm hittades inte. Installera Node.js innan du startar webbappen.")
+    if shutil.which(npm_command()) is None:
+        raise EnvironmentError("npm was not found. Install Node.js before starting the web app.")
 
     if not FRONTEND_DIR.exists():
-        raise FileNotFoundError("Frontend-mappen hittades inte.")
+        raise FileNotFoundError("The frontend directory was not found.")
 
 
-def hitta_ledig_port(startport: int = 5173, max_forsok: int = 20) -> int:
-    for port in range(startport, startport + max_forsok):
+def find_available_port(start_port: int = 5173, max_attempts: int = 20) -> int:
+    for port in range(start_port, start_port + max_attempts):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             if sock.connect_ex(("127.0.0.1", port)) != 0:
                 return port
 
-    raise RuntimeError("Kunde inte hitta en ledig port for frontenden.")
+    raise RuntimeError("Could not find an available port for the frontend.")
 
 
-def vantapah_url(url: str, timeout: float, process: subprocess.Popen[str], namn: str) -> None:
+def wait_for_url(url: str, timeout: float, process: subprocess.Popen[str], name: str) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if process.poll() is not None:
-            raise RuntimeError(f"{namn} stangdes ovantat med exitkod {process.returncode}.")
+            raise RuntimeError(f"{name} stopped unexpectedly with exit code {process.returncode}.")
 
         try:
             with urllib.request.urlopen(url, timeout=2):
@@ -53,10 +53,10 @@ def vantapah_url(url: str, timeout: float, process: subprocess.Popen[str], namn:
         except urllib.error.URLError:
             time.sleep(1)
 
-    raise TimeoutError(f"Tidsgrans overskreds medan {namn} startade.")
+    raise TimeoutError(f"Timed out while waiting for {name} to start.")
 
 
-def url_svarar(url: str) -> bool:
+def url_responds(url: str) -> bool:
     try:
         with urllib.request.urlopen(url, timeout=2):
             return True
@@ -64,7 +64,7 @@ def url_svarar(url: str) -> bool:
         return False
 
 
-def stang_process(process: subprocess.Popen[str] | None) -> None:
+def stop_process(process: subprocess.Popen[str] | None) -> None:
     if process is None or process.poll() is not None:
         return
 
@@ -76,53 +76,53 @@ def stang_process(process: subprocess.Popen[str] | None) -> None:
 
 
 def main() -> None:
-    kontrollera_verktyg()
-    frontend_port = hitta_ledig_port()
+    ensure_tools()
+    frontend_port = find_available_port()
     frontend_url = f"http://127.0.0.1:{frontend_port}"
 
     backend_process = None
-    if url_svarar(BACKEND_HEALTH_URL):
-        print("En lokal backend kor redan pa http://127.0.0.1:5001 och kommer att ateranvandas.")
+    if url_responds(BACKEND_HEALTH_URL):
+        print("A local backend is already running on http://127.0.0.1:5001 and will be reused.")
     else:
-        print("Startar lokal backend pa http://127.0.0.1:5001 ...")
+        print("Starting local backend on http://127.0.0.1:5001 ...")
         backend_process = subprocess.Popen(
-            [sys.executable, "webapp.py"],
+            [sys.executable, "server.py"],
             cwd=ROOT_DIR,
         )
 
     frontend_process = None
     try:
         if backend_process is not None:
-            vantapah_url(BACKEND_HEALTH_URL, timeout=20, process=backend_process, namn="backend")
+            wait_for_url(BACKEND_HEALTH_URL, timeout=20, process=backend_process, name="backend")
 
-        print(f"Startar React-frontenden pa {frontend_url} ...")
+        print(f"Starting React frontend on {frontend_url} ...")
         frontend_process = subprocess.Popen(
-            [npm_kommando(), "run", "dev", "--", "--port", str(frontend_port), "--strictPort"],
+            [npm_command(), "run", "dev", "--", "--port", str(frontend_port), "--strictPort"],
             cwd=FRONTEND_DIR,
         )
 
-        vantapah_url(frontend_url, timeout=30, process=frontend_process, namn="frontend")
+        wait_for_url(frontend_url, timeout=30, process=frontend_process, name="frontend")
 
-        print("Webbappen ar igang. Oppnar webblasaren...")
+        print("The web app is running. Opening the browser...")
         webbrowser.open(frontend_url)
-        print("Tryck Ctrl+C for att stanga backend och frontend.")
+        print("Press Ctrl+C to stop both backend and frontend.")
 
         while True:
             if backend_process is not None and backend_process.poll() is not None:
-                raise RuntimeError(f"Backenden stoppades med exitkod {backend_process.returncode}.")
+                raise RuntimeError(f"The backend stopped with exit code {backend_process.returncode}.")
             if frontend_process.poll() is not None:
-                raise RuntimeError(f"Frontenden stoppades med exitkod {frontend_process.returncode}.")
+                raise RuntimeError(f"The frontend stopped with exit code {frontend_process.returncode}.")
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\nStanger den lokala webbappen...")
+        print("\nStopping the local web app...")
     finally:
-        stang_process(frontend_process)
-        stang_process(backend_process)
+        stop_process(frontend_process)
+        stop_process(backend_process)
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as error:
-        print(f"\nFel vid uppstart: {error}")
+        print(f"\nStartup error: {error}")
         raise SystemExit(1) from error
