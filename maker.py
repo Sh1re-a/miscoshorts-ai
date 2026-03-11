@@ -6,110 +6,113 @@ import whisper
 import warnings
 from dotenv import load_dotenv
 
-# own modules
-import cerebro_gemini as cerebro
-import subtitulos
+# egna moduler
+import cerebro_gemini as gemini_tjanst
+import subtitulos as undertextning
 
 warnings.filterwarnings("ignore")
 load_dotenv()
 
 URL_VIDEO = os.getenv("URL_VIDEO", "").strip()
-NOMBRE_SALIDA = os.getenv("OUTPUT_FILENAME", "short_con_subs.mp4").strip() or "short_con_subs.mp4"
+UTDATAFILNAMN = os.getenv("OUTPUT_FILENAME", "short_con_subs.mp4").strip() or "short_con_subs.mp4"
 ENV_PATH = ".env"
 
 
-def actualizar_env(clave, valor):
-    lineas = []
+def uppdatera_env(nyckel, varde):
+    rader = []
     if os.path.exists(ENV_PATH):
-        with open(ENV_PATH, "r", encoding="utf-8") as archivo:
-            lineas = archivo.readlines()
+        with open(ENV_PATH, "r", encoding="utf-8") as fil:
+            rader = fil.readlines()
 
-    nueva_linea = f"{clave}={valor}\n"
-    reemplazada = False
+    ny_rad = f"{nyckel}={varde}\n"
+    ersatt = False
 
-    for indice, linea in enumerate(lineas):
-        if linea.startswith(f"{clave}="):
-            lineas[indice] = nueva_linea
-            reemplazada = True
+    for index, rad in enumerate(rader):
+        if rad.startswith(f"{nyckel}="):
+            rader[index] = ny_rad
+            ersatt = True
             break
 
-    if not reemplazada:
-        lineas.append(nueva_linea)
+    if not ersatt:
+        rader.append(ny_rad)
 
-    with open(ENV_PATH, "w", encoding="utf-8") as archivo:
-        archivo.writelines(lineas)
-
-
-def pedir_valor(mensaje, valor_actual=""):
-    sufijo = f" [{valor_actual}]" if valor_actual else ""
-    valor = input(f"{mensaje}{sufijo}: ").strip()
-    return valor or valor_actual
+    with open(ENV_PATH, "w", encoding="utf-8") as fil:
+        fil.writelines(rader)
 
 
-def es_confirmacion_positiva(valor):
-    return valor.strip().lower() in {"s", "si", "y", "yes"}
+def be_om_varde(meddelande, nuvarande_varde=""):
+    suffix = f" [{nuvarande_varde}]" if nuvarande_varde else ""
+    varde = input(f"{meddelande}{suffix}: ").strip()
+    return varde or nuvarande_varde
 
 
-def validar_dependencias():
+def ar_positiv_bekraftelse(varde):
+    return varde.strip().lower() in {"j", "ja", "s", "si", "y", "yes"}
+
+
+def kontrollera_beroenden():
     if shutil.which("ffmpeg"):
         return
 
     raise EnvironmentError(
-        "FFmpeg no esta instalado o no esta disponible en PATH. En Windows puedes instalarlo con 'winget install Gyan.FFmpeg' y despues reiniciar la terminal."
+        "FFmpeg ar inte installerat eller finns inte i PATH. I Windows kan du installera det med 'winget install Gyan.FFmpeg' och sedan starta om terminalen."
     )
 
 
-def obtener_url_video():
+def hamta_video_url():
     url = URL_VIDEO
     if not url or url == "TU_URL_DE_VIDEO_AQUI":
-        url = pedir_valor("Pega la URL del video de YouTube")
+        url = be_om_varde("Klistra in URL:en till YouTube-videon")
 
     if not url:
-        raise ValueError("Necesitas indicar una URL de YouTube para continuar.")
+        raise ValueError("Du maste ange en YouTube-URL for att fortsatta.")
 
-    guardar = input("Quieres guardar esta URL como valor por defecto en .env? (s/N): ").strip()
-    if es_confirmacion_positiva(guardar):
-        actualizar_env("URL_VIDEO", url)
+    spara = input("Vill du spara den har URL:en som standard i .env? (j/N): ").strip()
+    if ar_positiv_bekraftelse(spara):
+        uppdatera_env("URL_VIDEO", url)
 
     return url
 
 
-def obtener_nombre_salida():
-    return pedir_valor("Nombre del archivo de salida", NOMBRE_SALIDA) or "short_con_subs.mp4"
+def hamta_utdatafilnamn():
+    return be_om_varde("Namn pa utdatafilen", UTDATAFILNAMN) or "short_con_subs.mp4"
 
 
-def obtener_api_key():
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
-    if api_key:
-        return api_key
+def hamta_api_nyckel():
+    api_nyckel = os.getenv("GEMINI_API_KEY", "").strip()
+    if api_nyckel:
+        return api_nyckel
 
-    api_key = pedir_valor("Escribe tu GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("No se proporciono GEMINI_API_KEY.")
+    api_nyckel = be_om_varde("Skriv in din GEMINI_API_KEY")
+    if not api_nyckel:
+        raise ValueError("Ingen GEMINI_API_KEY angavs.")
 
-    guardar = input("Quieres guardar tu API key en .env para no escribirla cada vez? (s/N): ").strip()
-    if es_confirmacion_positiva(guardar):
-        actualizar_env("GEMINI_API_KEY", api_key)
+    spara = input("Vill du spara din API-nyckel i .env sa du slipper skriva in den varje gang? (j/N): ").strip()
+    if ar_positiv_bekraftelse(spara):
+        uppdatera_env("GEMINI_API_KEY", api_nyckel)
 
-    return api_key
+    return api_nyckel
 
-def descargar_video(url):
-    print(f"📥 Descargando video: {url}...")
+def ladda_ner_video(url):
+    print(f"📥 Laddar ner video: {url}...")
     ydl_opts = {'format': 'best[ext=mp4]', 'outtmpl': 'video_temp.%(ext)s', 'quiet': True, 'no_warnings': True}
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
     return "video_temp.mp4"
 
-def parsear_respuesta_gemini(texto):
-    """Extrae los datos limpios de la respuesta de texto de Gemini"""
-    datos = {}
-    lines = texto.split('\n')
-    for line in lines:
-        if "TITULO:" in line: datos['titulo'] = line.split("TITULO:")[1].strip()
-        if "INICIO:" in line: datos['inicio'] = float(line.split("INICIO:")[1].strip())
-        if "FIN:" in line: datos['fin'] = float(line.split("FIN:")[1].strip())
-        if "RAZON:" in line: datos['razon'] = line.split("RAZON:")[1].strip()
-    return datos
+def tolka_gemini_svar(text):
+    """Plockar ut de strukturerade fälten ur Geminis textsvar."""
+    data = {}
+    for rad in text.split('\n'):
+        if "TITEL:" in rad:
+            data['titel'] = rad.split("TITEL:")[1].strip()
+        if "START:" in rad:
+            data['start'] = float(rad.split("START:")[1].strip())
+        if "SLUT:" in rad:
+            data['slut'] = float(rad.split("SLUT:")[1].strip())
+        if "ORSAK:" in rad:
+            data['orsak'] = rad.split("ORSAK:")[1].strip()
+    return data
 
 def main():
     video_path = None
@@ -117,60 +120,60 @@ def main():
     clip_final = None
 
     try:
-        validar_dependencias()
-        url_video = obtener_url_video()
-        nombre_salida = obtener_nombre_salida()
-        api_key = obtener_api_key()
+        kontrollera_beroenden()
+        url_video = hamta_video_url()
+        utdatafilnamn = hamta_utdatafilnamn()
+        api_nyckel = hamta_api_nyckel()
 
-        video_path = descargar_video(url_video)
+        video_path = ladda_ner_video(url_video)
 
-        print("🔍 Transcribiendo audio para obtener tiempos...")
+        print("🔍 Transkriberar ljudet for att hitta tider...")
         model = whisper.load_model("base")
-        resultado = model.transcribe(video_path)
+        resultat = model.transcribe(video_path)
         with open("transcripcion_completa.txt", "w", encoding="utf-8") as f:
             f.write(f"URL: {url_video}\n")
-            f.write(resultado['text'])
+            f.write(resultat['text'])
 
-        analisis = cerebro.encontrar_clip_viral(resultado['segments'], api_key)
-        clip_data = parsear_respuesta_gemini(analisis)
+        analys = gemini_tjanst.hitta_viralt_klipp(resultat['segments'], api_nyckel)
+        klippdata = tolka_gemini_svar(analys)
 
-        if 'inicio' not in clip_data or 'fin' not in clip_data:
-            raise ValueError("Gemini no devolvio un rango valido de INICIO y FIN.")
+        if 'start' not in klippdata or 'slut' not in klippdata:
+            raise ValueError("Gemini returnerade inget giltigt START- och SLUT-intervall.")
 
-        print("🤖 PROPUESTA DE SHORT:")
-        print(f"📌 Título: {clip_data.get('titulo')}")
-        print(f"⏱️ Tiempo: {clip_data.get('inicio')}s --> {clip_data.get('fin')}s")
-        print(f"💡 Razón: {clip_data.get('razon')}")
-        confirmacion = input("¿Te mola? Escribe 's' para crearlo, o introduce nuevos tiempos (ej: 120-140): ")
+        print("🤖 FORSLAG TILL SHORT:")
+        print(f"📌 Titel: {klippdata.get('titel')}")
+        print(f"⏱️ Tid: {klippdata.get('start')}s --> {klippdata.get('slut')}s")
+        print(f"💡 Orsak: {klippdata.get('orsak')}")
+        bekraftelse = input("Vill du skapa den? Skriv 'j' for att godkanna, eller ange egna tider (ex: 120-140): ")
 
         start = 0
         end = 0
-        if confirmacion.lower() == 's':
-            start = clip_data['inicio']
-            end = clip_data['fin']
-        elif '-' in confirmacion:
-            partes = confirmacion.split('-')
-            start = float(partes[0])
-            end = float(partes[1])
+        if ar_positiv_bekraftelse(bekraftelse):
+            start = klippdata['start']
+            end = klippdata['slut']
+        elif '-' in bekraftelse:
+            delar = bekraftelse.split('-')
+            start = float(delar[0])
+            end = float(delar[1])
         else:
-            print("Cancelado.")
+            print("Avbrutet.")
             return
 
-        print(f"🚀 Cocinando el Short ({start}s a {end}s)...")
+        print(f"🚀 Renderar shorten ({start}s till {end}s)...")
         clip = VideoFileClip(video_path).subclipped(start, end)
 
         w, h = clip.size
         new_width = h * (9/16)
         clip_vertical = clip.cropped(x1=w/2 - new_width/2, y1=0, x2=w/2 + new_width/2, y2=h)
 
-        clip_final = subtitulos.generar_subtitulos(clip_vertical, resultado['segments'], start)
-        clip_final.write_videofile(nombre_salida,
+        clip_final = undertextning.skapa_undertexter(clip_vertical, resultat['segments'], start)
+        clip_final.write_videofile(utdatafilnamn,
                                    codec='libx264',
                                    audio_codec='aac',
                                    fps=24,
                                    threads=4)
 
-        print(f"🎉 ¡Video listo: {nombre_salida}!")
+        print(f"🎉 Videon ar klar: {utdatafilnamn}!")
     finally:
         if clip_final is not None:
             clip_final.close()

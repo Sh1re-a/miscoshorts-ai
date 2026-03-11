@@ -5,22 +5,23 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def obtener_gemini_api_key(api_key=None):
-    clave = (api_key or os.getenv("GEMINI_API_KEY", "")).strip()
-    if not clave:
+def hamta_gemini_api_nyckel(api_nyckel=None):
+    nyckel = (api_nyckel or os.getenv("GEMINI_API_KEY", "")).strip()
+    if not nyckel:
         raise ValueError(
-            "No se encontro GEMINI_API_KEY. Anade tu clave en un archivo .env o escribela al iniciar el programa."
+            "GEMINI_API_KEY hittades inte. Lagg in nyckeln i en .env-fil eller skriv in den nar programmet startar."
         )
-    return clave
+    return nyckel
 
-def encontrar_clip_viral(segmentos_whisper, api_key=None):
-    print("✨ Consultando a Gemini (con timestamps)...")
 
-    genai.configure(api_key=obtener_gemini_api_key(api_key))
+def hitta_viralt_klipp(whisper_segment, api_nyckel=None):
+    print("✨ Fragar Gemini med tidsstamplar...")
 
-    texto_con_tiempos = ""
-    for seg in segmentos_whisper:
-        texto_con_tiempos += f"[{seg['start']:.1f}s] {seg['text']}\n"
+    genai.configure(api_key=hamta_gemini_api_nyckel(api_nyckel))
+
+    text_med_tider = ""
+    for segment in whisper_segment:
+        text_med_tider += f"[{segment['start']:.1f}s] {segment['text']}\n"
 
     model = genai.GenerativeModel(
         model_name="gemini-2.5-flash",
@@ -28,17 +29,17 @@ def encontrar_clip_viral(segmentos_whisper, api_key=None):
     )
 
     prompt = f"""
-    Actúa como editor de video profesional. Analiza esta transcripción timestamped.
-    Identifica EL MEJOR segmento para un Short viral (30-60 seg).
+    Agera som en professionell videoredigerare. Analysera den har transkriptionen med tidsstamplar.
+    Identifiera DET BASTA segmentet for en viral Short (30-60 sekunder).
 
-    Transcripción:
-    {texto_con_tiempos}
+    Transkription:
+    {text_med_tider}
 
-    Responde SOLO con este formato exacto (sin explicaciones extra):
-    TITULO: [Escribe un título gancho aquí]
-    INICIO: [Solo el número del segundo, ej: 120.5]
-    FIN: [Solo el número del segundo, ej: 155.0]
-    RAZON: [Breve motivo]
+    Svara ENDAST med exakt det har formatet (utan extra forklaringar):
+    TITEL: [Skriv en stark och lockande titel har]
+    START: [Endast sekundtalet, till exempel 120.5]
+    SLUT: [Endast sekundtalet, till exempel 155.0]
+    ORSAK: [Kort motivering]
     """
 
     response = model.generate_content(prompt)
