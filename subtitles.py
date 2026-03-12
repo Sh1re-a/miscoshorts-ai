@@ -2,7 +2,6 @@ import platform
 import re
 
 from moviepy import ColorClip, CompositeVideoClip, TextClip
-from moviepy.video.tools.subtitles import SubtitlesClip
 
 
 FONT_PRESETS = {
@@ -42,6 +41,14 @@ DEFAULT_STYLE = {
     "fontPreset": "clean",
     "colorPreset": "sun",
 }
+
+TITLE_FONT_PRESETS = [
+    "Avenir Next Demi Bold",
+    "Helvetica Neue Medium",
+    "Arial-Bold",
+    "Helvetica-Bold",
+    "DejaVuSans-Bold",
+]
 
 
 def get_preferred_fonts():
@@ -148,7 +155,7 @@ def split_subtitle_text(text, start_time, end_time):
 
 
 def resolve_font_size(video_clip, text):
-    base_size = int(video_clip.h * 0.055)
+    base_size = int(video_clip.h * 0.049)
     text_length = len(text)
 
     if text_length >= 55:
@@ -158,15 +165,50 @@ def resolve_font_size(video_clip, text):
     elif text_length >= 28:
         base_size -= 2
 
-    return max(26, min(58, base_size))
+    return max(24, min(50, base_size))
+
+
+def resolve_top_text_size(video_clip, text, *, minimum, maximum, ratio):
+    base_size = int(video_clip.h * ratio)
+    text_length = len((text or "").strip())
+
+    if text_length >= 90:
+        base_size -= 7
+    elif text_length >= 60:
+        base_size -= 4
+    elif text_length >= 36:
+        base_size -= 2
+
+    return max(minimum, min(maximum, base_size))
+
+
+def _safe_duration(duration, fallback=0.2):
+    if duration is None:
+        return fallback
+    return max(fallback, float(duration))
+
+
+def _sanitize_overlay_text(text, max_length):
+    cleaned_text = re.sub(r"\s+", " ", (text or "")).strip()
+    if not cleaned_text:
+        return ""
+    if len(cleaned_text) <= max_length:
+        return cleaned_text
+    shortened = cleaned_text[: max(0, max_length - 1)].rstrip(" ,.!?:;-")
+    return f"{shortened}…"
+
+
+def _with_clip_timing(clip, start_time, end_time):
+    clip_duration = _safe_duration(end_time - start_time)
+    return clip.with_start(start_time).with_duration(clip_duration)
 
 
 def create_textclip_with_fallback(text, video_clip, subtitle_style):
     last_error = None
     colors = COLOR_PRESETS[subtitle_style["colorPreset"]]
     preferred_font_size = resolve_font_size(video_clip, text)
-    caption_width = int(video_clip.w * 0.64)
-    max_text_height = int(video_clip.h * 0.2)
+    caption_width = int(video_clip.w * 0.58)
+    max_text_height = int(video_clip.h * 0.17)
 
     for font in get_font_candidates(subtitle_style["fontPreset"]):
         for font_size in range(preferred_font_size, 23, -2):
@@ -200,7 +242,7 @@ def create_textclip_with_fallback(text, video_clip, subtitle_style):
                     face.close()
                     continue
 
-                shadow = shadow.with_opacity(0.32).with_position((0, max(2, round(font_size * 0.08))))
+                shadow = shadow.with_opacity(0.24).with_position((0, max(2, round(font_size * 0.08))))
                 face = face.with_position((0, 0))
                 clip = CompositeVideoClip([shadow, face], size=(caption_width, face.h + max(6, round(font_size * 0.1))))
 
@@ -213,9 +255,99 @@ def create_textclip_with_fallback(text, video_clip, subtitle_style):
     ) from last_error
 
 
-def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_style=None):
+def create_header_text_clip(text, video_clip, *, font_candidates, font_size, color, stroke_color, stroke_width, width_ratio, max_height_ratio, opacity=1.0):
+    last_error = None
+    width = int(video_clip.w * width_ratio)
+    max_height = int(video_clip.h * max_height_ratio)
+
+    for font in font_candidates:
+        for candidate_size in range(font_size, max(font_size - 10, 11), -2):
+            try:
+                clip = TextClip(
+                    text=text,
+                    font=font,
+                    font_size=candidate_size,
+                    color=color,
+                    stroke_color=stroke_color,
+                    stroke_width=stroke_width,
+                    method="caption",
+                    size=(width, None),
+                    interline=max(2, round(candidate_size * 0.12)),
+                    text_align="center",
+                )
+                if clip.h > max_height:
+                    clip.close()
+                    continue
+                if opacity != 1.0:
+                    clip = clip.with_opacity(opacity)
+                return clip
+            except Exception as error:
+                last_error = error
+
+    raise RuntimeError("Could not render header text with any compatible font.") from last_error
+
+
+def create_top_description_overlay(video_clip, title, reason, subtitle_style):
+    title_text = _sanitize_overlay_text(title, 52)
+    reason_text = _sanitize_overlay_text(reason, 82)
+    if not title_text and not reason_text:
+        return []
+
+    font_candidates = list(dict.fromkeys([*get_font_candidates(subtitle_style["fontPreset"]), *TITLE_FONT_PRESETS]))
+    overlays = []
+    video_duration = _safe_duration(video_clip.duration)
+    top_bar_height = int(video_clip.h * 0.12)
+    top_bar = ColorClip(size=(video_clip.w, top_bar_height), color=(6, 10, 18))
+    top_bar = top_bar.with_opacity(0.16).with_position((0, 0)).with_duration(video_duration)
+    overlays.append(top_bar)
+
+    current_y = int(video_clip.h * 0.028)
+
+    if title_text:
+        try:
+            title_clip = create_header_text_clip(
+                title_text,
+                video_clip,
+                font_candidates=font_candidates,
+                font_size=resolve_top_text_size(video_clip, title_text, minimum=24, maximum=38, ratio=0.022),
+                color="#f8fafc",
+                stroke_color="#09111c",
+                stroke_width=1,
+                width_ratio=0.76,
+                max_height_ratio=0.05,
+            )
+            title_clip = title_clip.with_position(("center", current_y)).with_duration(video_duration)
+            overlays.append(title_clip)
+            current_y += title_clip.h + int(video_clip.h * 0.005)
+        except Exception:
+            pass
+
+    if reason_text:
+        try:
+            reason_clip = create_header_text_clip(
+                reason_text,
+                video_clip,
+                font_candidates=font_candidates,
+                font_size=resolve_top_text_size(video_clip, reason_text, minimum=17, maximum=24, ratio=0.015),
+                color="#dbe7f3",
+                stroke_color="#09111c",
+                stroke_width=1,
+                width_ratio=0.78,
+                max_height_ratio=0.045,
+                opacity=0.88,
+            )
+            reason_clip = reason_clip.with_position(("center", current_y)).with_duration(video_duration)
+            overlays.append(reason_clip)
+        except Exception:
+            pass
+
+    return overlays
+
+
+def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_style=None, clip_title=None, clip_reason=None):
     print("📝 Building subtitle layers...")
     resolved_style = normalize_subtitle_style(subtitle_style)
+    video_duration = _safe_duration(video_clip.duration)
 
     subtitles_data = []
     for segment in whisper_segments:
@@ -223,20 +355,29 @@ def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_sty
         end = segment['end'] - clip_start_time
         text = segment['text'].strip()
 
-        if end > 0 and start < video_clip.duration:
+        if end > 0 and start < video_duration:
             start = max(0, start)
-            end = min(video_clip.duration, end)
+            end = min(video_duration, end)
             subtitles_data.extend(split_subtitle_text(text, start, end))
 
-    text_style = lambda txt: create_textclip_with_fallback(txt, video_clip, resolved_style)
+    subtitle_layers = []
+    subtitle_y = int(video_clip.h * 0.78)
+    for (start, end), text in subtitles_data:
+        subtitle_clip = create_textclip_with_fallback(text, video_clip, resolved_style)
+        subtitle_clip = _with_clip_timing(subtitle_clip, start, end)
+        subtitle_clip = subtitle_clip.with_position(("center", subtitle_y))
+        subtitle_layers.append(subtitle_clip)
 
-    subtitles = SubtitlesClip(subtitles=subtitles_data, make_textclip=text_style)
-    subtitles = subtitles.with_position(("center", int(video_clip.h * 0.74)))
-    bottom_shade_height = int(video_clip.h * 0.36)
+    bottom_shade_height = int(video_clip.h * 0.3)
     bottom_shade = ColorClip(size=(video_clip.w, bottom_shade_height), color=(7, 12, 20))
-    bottom_shade = bottom_shade.with_opacity(0.18).with_position((0, video_clip.h - bottom_shade_height))
+    bottom_shade = bottom_shade.with_opacity(0.13).with_position((0, video_clip.h - bottom_shade_height)).with_duration(video_duration)
     focus_shade = ColorClip(size=(video_clip.w, int(video_clip.h * 0.2)), color=(7, 12, 20))
-    focus_shade = focus_shade.with_opacity(0.12).with_position((0, int(video_clip.h * 0.7)))
-    final_clip = CompositeVideoClip([video_clip, bottom_shade, focus_shade, subtitles])
-    
+    focus_shade = focus_shade.with_opacity(0.08).with_position((0, int(video_clip.h * 0.74))).with_duration(video_duration)
+    top_description_layers = create_top_description_overlay(video_clip, clip_title, clip_reason, resolved_style)
+
+    layers = [video_clip, bottom_shade, focus_shade, *top_description_layers, *subtitle_layers]
+    final_clip = CompositeVideoClip(layers, size=video_clip.size).with_duration(video_duration)
+    if video_clip.audio is not None:
+        final_clip = final_clip.with_audio(video_clip.audio.with_duration(video_duration))
+
     return final_clip

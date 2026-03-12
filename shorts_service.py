@@ -17,9 +17,9 @@ import subtitles
 ProgressCallback = Callable[[str, str], None]
 OUTPUT_WIDTH = 1080
 OUTPUT_HEIGHT = 1920
-VIDEO_CRF = "18"
-VIDEO_BITRATE = "10M"
-VIDEO_AUDIO_BITRATE = "192k"
+VIDEO_CRF = "19"
+VIDEO_BITRATE = "8M"
+VIDEO_AUDIO_BITRATE = "160k"
 DEFAULT_CLIP_COUNT = 3
 
 
@@ -136,6 +136,7 @@ def create_short_from_url(
 
     video_path = None
     clip = None
+    clip_vertical = None
     clip_final = None
 
     try:
@@ -182,8 +183,17 @@ def create_short_from_url(
                 y2=height,
             )
             clip_vertical = clip_vertical.resized(new_size=(OUTPUT_WIDTH, OUTPUT_HEIGHT))
+            if clip.audio is not None:
+                clip_vertical = clip_vertical.with_audio(clip.audio.with_duration(clip.duration))
 
-            clip_final = subtitles.create_subtitles(clip_vertical, result["segments"], start, subtitle_style)
+            clip_final = subtitles.create_subtitles(
+                clip_vertical,
+                result["segments"],
+                start,
+                subtitle_style,
+                clip_title=clip_data.get("title"),
+                clip_reason=clip_data.get("reason"),
+            )
             clip_final.write_videofile(
                 str(output_path),
                 codec="libx264",
@@ -211,6 +221,8 @@ def create_short_from_url(
 
             clip_final.close()
             clip_final = None
+            clip_vertical.close()
+            clip_vertical = None
             clip.close()
             clip = None
 
@@ -234,6 +246,8 @@ def create_short_from_url(
     finally:
         if clip_final is not None:
             clip_final.close()
+        if clip_vertical is not None:
+            clip_vertical.close()
         if clip is not None:
             clip.close()
         if video_path and os.path.exists(video_path):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+import traceback
 import uuid
 from pathlib import Path
 
@@ -41,7 +42,13 @@ def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, cl
         )
         _set_job(job_id, status="completed", result=result, updatedAt=time.time())
     except Exception as error:
-        _set_job(job_id, status="failed", error=str(error), updatedAt=time.time())
+        _set_job(
+            job_id,
+            status="failed",
+            error=str(error),
+            traceback=traceback.format_exc(),
+            updatedAt=time.time(),
+        )
 
 
 @app.get("/api/health")
