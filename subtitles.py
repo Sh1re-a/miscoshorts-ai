@@ -203,6 +203,10 @@ def _with_clip_timing(clip, start_time, end_time):
     return clip.with_start(start_time).with_duration(clip_duration)
 
 
+def _prime_clip_duration(clip, duration=1.0):
+    return clip.with_duration(_safe_duration(duration, fallback=1.0))
+
+
 def create_textclip_with_fallback(text, video_clip, subtitle_style):
     last_error = None
     colors = COLOR_PRESETS[subtitle_style["colorPreset"]]
@@ -225,6 +229,7 @@ def create_textclip_with_fallback(text, video_clip, subtitle_style):
                                   size=(caption_width, None),
                                   interline=max(2, round(font_size * 0.1)),
                                   text_align='center')
+                shadow = _prime_clip_duration(shadow)
 
                 face = TextClip(text=text,
                                 font=font,
@@ -236,6 +241,7 @@ def create_textclip_with_fallback(text, video_clip, subtitle_style):
                                 size=(caption_width, None),
                                 interline=max(2, round(font_size * 0.1)),
                                 text_align='center')
+                face = _prime_clip_duration(face)
 
                 if max(shadow.h, face.h) > max_text_height:
                     shadow.close()
@@ -245,6 +251,7 @@ def create_textclip_with_fallback(text, video_clip, subtitle_style):
                 shadow = shadow.with_opacity(0.24).with_position((0, max(2, round(font_size * 0.08))))
                 face = face.with_position((0, 0))
                 clip = CompositeVideoClip([shadow, face], size=(caption_width, face.h + max(6, round(font_size * 0.1))))
+                clip = _prime_clip_duration(clip)
 
                 return clip
             except Exception as error:
@@ -275,6 +282,7 @@ def create_header_text_clip(text, video_clip, *, font_candidates, font_size, col
                     interline=max(2, round(candidate_size * 0.12)),
                     text_align="center",
                 )
+                clip = _prime_clip_duration(clip)
                 if clip.h > max_height:
                     clip.close()
                     continue
