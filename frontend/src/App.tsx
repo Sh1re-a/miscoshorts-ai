@@ -96,19 +96,19 @@ const clipCountOptions: Array<{ value: ClipCountOption; label: string; note: str
 
 const defaultSubtitleStyle: SubtitleStyle = {
   fontPreset: 'clean',
-  colorPreset: 'sun',
+  colorPreset: 'ivory',
 }
 
 const previewFontSizeByPreset: Record<FontPreset, string> = {
-  clean: 'clamp(1.55rem, 3.4vw, 2.4rem)',
-  bold: 'clamp(1.65rem, 3.6vw, 2.55rem)',
-  soft: 'clamp(1.5rem, 3.2vw, 2.3rem)',
+  clean: 'clamp(1.3rem, 2.9vw, 2rem)',
+  bold: 'clamp(1.4rem, 3vw, 2.1rem)',
+  soft: 'clamp(1.25rem, 2.8vw, 1.95rem)',
 }
 
 const previewSubtitleByPreset: Record<FontPreset, string> = {
-  clean: 'Every line now locks into the frame with a polished studio finish.',
-  bold: 'High-impact captions hit hard and stay clean inside the shot.',
-  soft: 'Refined subtitles stay readable, balanced, and premium on screen.',
+  clean: 'Studio subtitles stay clean, premium, and secondary to the video.',
+  bold: 'Stronger captions still sit inside the frame without taking over.',
+  soft: 'Editorial subtitles feel refined, readable, and intentionally understated.',
 }
 
 const apiKeyStorageKey = 'miscoshorts.apiKey'
@@ -429,7 +429,7 @@ function App() {
                 </div>
 
                 <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-600">
-                  Long subtitle lines are split automatically, sized to fit the frame, and rendered with a stronger screen-ready shadow treatment.
+                  Long lines are split automatically, scaled down for a cleaner premium look, and kept low in frame so the video stays in focus.
                 </div>
               </CardContent>
             </Card>
@@ -452,7 +452,7 @@ function App() {
                 <div className="preview-stage aspect-[16/10] rounded-[28px] border border-white/70 p-4 shadow-inner shadow-white/50">
                   <div className="preview-video-frame">
                     <div className="preview-video-overlay" />
-                    <div className="preview-kicker">Cinematic preview</div>
+                    <div className="preview-kicker">Premium preview</div>
                     <div className="preview-caption-chip">1080 x 1920 export</div>
                     <div className="preview-subtitle-shadow" />
                     <div className="preview-subtitle-wrap">
@@ -462,8 +462,8 @@ function App() {
                           fontFamily: activeFontPreset.stack,
                           fontSize: previewFontSizeByPreset[subtitleStyle.fontPreset],
                           color: activeColorPreset.text,
-                          WebkitTextStroke: `2.5px ${activeColorPreset.stroke}`,
-                          textShadow: `0 8px 22px rgba(15, 23, 42, 0.38), 0 2px 0 ${activeColorPreset.stroke}`,
+                          WebkitTextStroke: `1.75px ${activeColorPreset.stroke}`,
+                          textShadow: `0 6px 18px rgba(15, 23, 42, 0.3), 0 1px 0 ${activeColorPreset.stroke}`,
                         }}
                       >
                         {previewSubtitleByPreset[subtitleStyle.fontPreset]}
