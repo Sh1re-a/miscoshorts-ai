@@ -42,6 +42,11 @@ DEFAULT_STYLE = {
     "colorPreset": "sun",
 }
 
+TOP_OVERLAY_MIN_DURATION = 1.8
+TOP_OVERLAY_MAX_DURATION = 3.2
+WORD_HIGHLIGHT_LEAD = 0.03
+WORD_HIGHLIGHT_TAIL = 0.05
+
 TITLE_FONT_PRESETS = [
     "Avenir Next Demi Bold",
     "Helvetica Neue Medium",
@@ -205,6 +210,18 @@ def _with_clip_timing(clip, start_time, end_time):
 
 def _prime_clip_duration(clip, duration=1.0):
     return clip.with_duration(_safe_duration(duration, fallback=1.0))
+
+
+def _intro_overlay_duration(video_duration):
+    return min(TOP_OVERLAY_MAX_DURATION, max(TOP_OVERLAY_MIN_DURATION, video_duration * 0.36))
+
+
+def _smooth_word_window(word_start, word_end, video_duration):
+    start = max(0.0, word_start - WORD_HIGHLIGHT_LEAD)
+    end = min(video_duration, word_end + WORD_HIGHLIGHT_TAIL)
+    if end - start < 0.12:
+        end = min(video_duration, start + 0.12)
+    return start, end
 
 
 def _create_caption_text_clip(text, font, font_size, color, stroke_color, stroke_width, width, interline):
@@ -425,8 +442,9 @@ def create_highlighted_chunk_variants(chunk_words, video_clip, subtitle_style):
                     )
                     active_face = active_face.with_position(positions[index])
                     variant = CompositeVideoClip([base_clip, active_shadow, active_face], size=(caption_width, canvas_height))
-                    variant = _prime_clip_duration(variant, word["end"] - word["start"])
-                    variants.append(((word["start"], word["end"]), variant))
+                    highlight_start, highlight_end = _smooth_word_window(word["start"], word["end"], _safe_duration(video_clip.duration))
+                    variant = _prime_clip_duration(variant, highlight_end - highlight_start)
+                    variants.append(((highlight_start, highlight_end), variant))
 
                 return variants
             except Exception as error:
@@ -538,9 +556,10 @@ def create_top_description_overlay(video_clip, title, reason, subtitle_style):
     font_candidates = list(dict.fromkeys([*get_font_candidates(subtitle_style["fontPreset"]), *TITLE_FONT_PRESETS]))
     overlays = []
     video_duration = _safe_duration(video_clip.duration)
+    overlay_duration = _intro_overlay_duration(video_duration)
     top_bar_height = int(video_clip.h * 0.12)
     top_bar = ColorClip(size=(video_clip.w, top_bar_height), color=(6, 10, 18))
-    top_bar = top_bar.with_opacity(0.16).with_position((0, 0)).with_duration(video_duration)
+    top_bar = top_bar.with_opacity(0.16).with_position((0, 0)).with_duration(overlay_duration)
     overlays.append(top_bar)
 
     current_y = int(video_clip.h * 0.028)
@@ -558,7 +577,7 @@ def create_top_description_overlay(video_clip, title, reason, subtitle_style):
                 width_ratio=0.76,
                 max_height_ratio=0.05,
             )
-            title_clip = title_clip.with_position(("center", current_y)).with_duration(video_duration)
+            title_clip = title_clip.with_position(("center", current_y)).with_duration(overlay_duration)
             overlays.append(title_clip)
             current_y += title_clip.h + int(video_clip.h * 0.005)
         except Exception:
@@ -578,7 +597,7 @@ def create_top_description_overlay(video_clip, title, reason, subtitle_style):
                 max_height_ratio=0.045,
                 opacity=0.88,
             )
-            reason_clip = reason_clip.with_position(("center", current_y)).with_duration(video_duration)
+            reason_clip = reason_clip.with_position(("center", current_y)).with_duration(overlay_duration)
             overlays.append(reason_clip)
         except Exception:
             pass

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import threading
 import uuid
 from pathlib import Path
 from typing import Callable
@@ -18,11 +19,14 @@ ProgressCallback = Callable[[str, str], None]
 OUTPUT_WIDTH = 1080
 OUTPUT_HEIGHT = 1920
 VIDEO_CRF = "18"
-VIDEO_BITRATE = "10M"
-VIDEO_AUDIO_BITRATE = "192k"
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
-RENDER_THREADS = max(4, min(8, os.cpu_count() or 4))
+VIDEO_BITRATE = "9M"
+VIDEO_AUDIO_BITRATE = "160k"
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "turbo,base")
+RENDER_THREADS = max(4, min(12, os.cpu_count() or 4))
 DEFAULT_CLIP_COUNT = 3
+
+_whisper_model_cache: dict[str, object] = {}
+_whisper_model_lock = threading.Lock()
 
 
 def _emit(callback: ProgressCallback | None, stage: str, message: str) -> None:
@@ -37,6 +41,59 @@ def ensure_dependencies() -> None:
     raise EnvironmentError(
         "FFmpeg is not installed or not available in PATH. On Windows, install it with 'winget install Gyan.FFmpeg'."
     )
+
+
+def _get_whisper_model_candidates() -> list[str]:
+    return [candidate.strip() for candidate in WHISPER_MODEL.split(",") if candidate.strip()] or ["base"]
+
+
+def load_whisper_model() -> tuple[str, object]:
+    last_error = None
+    with _whisper_model_lock:
+        for model_name in _get_whisper_model_candidates():
+            cached_model = _whisper_model_cache.get(model_name)
+            if cached_model is not None:
+                return model_name, cached_model
+
+            try:
+                model = whisper.load_model(model_name)
+                _whisper_model_cache[model_name] = model
+                return model_name, model
+            except Exception as error:
+                last_error = error
+
+    raise RuntimeError("Could not load any configured Whisper model.") from last_error
+
+
+def transcribe_video(video_path: Path) -> dict:
+    model_name, model = load_whisper_model()
+    transcribe_options = {
+        "fp16": False,
+        "verbose": False,
+        "word_timestamps": True,
+    }
+
+    try:
+        return model.transcribe(str(video_path), **transcribe_options)
+    except TypeError:
+        fallback_options = dict(transcribe_options)
+        fallback_options.pop("word_timestamps", None)
+        return model.transcribe(str(video_path), **fallback_options)
+    except Exception as error:
+        if model_name != "base":
+            with _whisper_model_lock:
+                _whisper_model_cache.pop(model_name, None)
+                base_model = _whisper_model_cache.get("base")
+                if base_model is None:
+                    base_model = whisper.load_model("base")
+                    _whisper_model_cache["base"] = base_model
+            fallback_options = dict(transcribe_options)
+            try:
+                return base_model.transcribe(str(video_path), **fallback_options)
+            except TypeError:
+                fallback_options.pop("word_timestamps", None)
+                return base_model.transcribe(str(video_path), **fallback_options)
+        raise RuntimeError("Whisper transcription failed.") from error
 
 
 def download_video(url: str, destination_base: Path) -> Path:
@@ -146,13 +203,7 @@ def create_short_from_url(
         video_path = download_video(video_url, temp_base)
 
         _emit(progress_callback, "transcribing", "Transcribing audio with Whisper...")
-        model = whisper.load_model(WHISPER_MODEL)
-        result = model.transcribe(
-            str(video_path),
-            word_timestamps=True,
-            fp16=False,
-            verbose=False,
-        )
+        result = transcribe_video(video_path)
 
         transcript_path.write_text(
             f"URL: {video_url}\n{result['text']}", encoding="utf-8"
@@ -209,7 +260,7 @@ def create_short_from_url(
                 bitrate=VIDEO_BITRATE,
                 audio_bitrate=VIDEO_AUDIO_BITRATE,
                 threads=RENDER_THREADS,
-                preset="medium",
+                preset="fast",
                 ffmpeg_params=["-crf", VIDEO_CRF, "-movflags", "+faststart", "-pix_fmt", "yuv420p", "-profile:v", "high"],
                 logger=None,
             )
