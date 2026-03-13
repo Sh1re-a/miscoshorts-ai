@@ -17,9 +17,11 @@ import subtitles
 ProgressCallback = Callable[[str, str], None]
 OUTPUT_WIDTH = 1080
 OUTPUT_HEIGHT = 1920
-VIDEO_CRF = "19"
-VIDEO_BITRATE = "8M"
-VIDEO_AUDIO_BITRATE = "160k"
+VIDEO_CRF = "18"
+VIDEO_BITRATE = "10M"
+VIDEO_AUDIO_BITRATE = "192k"
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
+RENDER_THREADS = max(4, min(8, os.cpu_count() or 4))
 DEFAULT_CLIP_COUNT = 3
 
 
@@ -144,8 +146,13 @@ def create_short_from_url(
         video_path = download_video(video_url, temp_base)
 
         _emit(progress_callback, "transcribing", "Transcribing audio with Whisper...")
-        model = whisper.load_model("base")
-        result = model.transcribe(str(video_path))
+        model = whisper.load_model(WHISPER_MODEL)
+        result = model.transcribe(
+            str(video_path),
+            word_timestamps=True,
+            fp16=False,
+            verbose=False,
+        )
 
         transcript_path.write_text(
             f"URL: {video_url}\n{result['text']}", encoding="utf-8"
@@ -201,9 +208,9 @@ def create_short_from_url(
                 fps=max(24, round(clip.fps or 24)),
                 bitrate=VIDEO_BITRATE,
                 audio_bitrate=VIDEO_AUDIO_BITRATE,
-                threads=4,
-                preset="slow",
-                ffmpeg_params=["-crf", VIDEO_CRF, "-movflags", "+faststart", "-pix_fmt", "yuv420p"],
+                threads=RENDER_THREADS,
+                preset="medium",
+                ffmpeg_params=["-crf", VIDEO_CRF, "-movflags", "+faststart", "-pix_fmt", "yuv420p", "-profile:v", "high"],
                 logger=None,
             )
 

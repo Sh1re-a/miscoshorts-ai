@@ -32,9 +32,9 @@ FONT_PRESETS = {
 }
 
 COLOR_PRESETS = {
-    "sun": {"color": "#f6d34a", "stroke_color": "#111111"},
-    "ivory": {"color": "#fff7e8", "stroke_color": "#111111"},
-    "mint": {"color": "#d8fff3", "stroke_color": "#102a43"},
+    "sun": {"base_color": "#fff7e8", "active_color": "#f6d34a", "stroke_color": "#111111"},
+    "ivory": {"base_color": "#fff7e8", "active_color": "#f6d34a", "stroke_color": "#111111"},
+    "mint": {"base_color": "#effff8", "active_color": "#8af5c7", "stroke_color": "#102a43"},
 }
 
 DEFAULT_STYLE = {
@@ -207,6 +207,242 @@ def _prime_clip_duration(clip, duration=1.0):
     return clip.with_duration(_safe_duration(duration, fallback=1.0))
 
 
+def _create_caption_text_clip(text, font, font_size, color, stroke_color, stroke_width, width, interline):
+    clip = TextClip(
+        text=text,
+        font=font,
+        font_size=font_size,
+        color=color,
+        stroke_color=stroke_color,
+        stroke_width=stroke_width,
+        method='caption',
+        size=(width, None),
+        interline=interline,
+        text_align='center',
+    )
+    return _prime_clip_duration(clip)
+
+
+def _create_label_text_clip(text, font, font_size, color, stroke_color, stroke_width):
+    clip = TextClip(
+        text=text,
+        font=font,
+        font_size=font_size,
+        color=color,
+        stroke_color=stroke_color,
+        stroke_width=stroke_width,
+    )
+    return _prime_clip_duration(clip)
+
+
+def _normalize_word_text(text):
+    cleaned = re.sub(r"\s+", " ", (text or "")).strip()
+    return cleaned
+
+
+def split_word_entries(word_entries):
+    if not word_entries:
+        return []
+
+    chunks = []
+    current_chunk = []
+
+    for entry in word_entries:
+        proposed_words = [*current_chunk, entry]
+        proposed_text = " ".join(word["text"] for word in proposed_words)
+        proposed_duration = proposed_words[-1]["end"] - proposed_words[0]["start"]
+        hit_limit = bool(current_chunk) and (
+            len(current_chunk) >= 4
+            or len(proposed_text) > 24
+            or proposed_duration > 2.4
+        )
+        punctuation_break = bool(current_chunk) and current_chunk[-1]["text"][-1:] in ",.!?:;"
+
+        if hit_limit or punctuation_break:
+            chunks.append(current_chunk)
+            current_chunk = [entry]
+        else:
+            current_chunk = proposed_words
+
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    return chunks
+
+
+def extract_word_entries(segment, clip_start_time, video_duration):
+    words = segment.get("words") or []
+    extracted = []
+
+    for word in words:
+        raw_text = _normalize_word_text(word.get("word"))
+        start = word.get("start")
+        end = word.get("end")
+        if not raw_text or start is None or end is None:
+            continue
+
+        relative_start = max(0.0, float(start) - clip_start_time)
+        relative_end = min(video_duration, float(end) - clip_start_time)
+        if relative_end <= 0 or relative_start >= video_duration:
+            continue
+
+        if relative_end - relative_start < 0.06:
+            relative_end = min(video_duration, relative_start + 0.12)
+
+        extracted.append(
+            {
+                "text": raw_text,
+                "start": relative_start,
+                "end": relative_end,
+            }
+        )
+
+    return extracted
+
+
+def _layout_word_clips(word_clips, caption_width, space_width, line_gap):
+    if not word_clips:
+        return None
+
+    lines = []
+    current_line = []
+    current_width = 0
+
+    for index, clip in enumerate(word_clips):
+        proposed_width = clip.w if not current_line else current_width + space_width + clip.w
+        if current_line and proposed_width > caption_width:
+            lines.append((current_line, current_width))
+            current_line = [index]
+            current_width = clip.w
+        else:
+            current_line.append(index)
+            current_width = proposed_width
+
+    if current_line:
+        lines.append((current_line, current_width))
+
+    positions = {}
+    current_y = 0
+    total_height = 0
+
+    for line_indexes, line_width in lines:
+        line_height = max(word_clips[index].h for index in line_indexes)
+        start_x = max(0, round((caption_width - line_width) / 2))
+        current_x = start_x
+        for line_index, word_index in enumerate(line_indexes):
+            positions[word_index] = (current_x, current_y)
+            current_x += word_clips[word_index].w
+            if line_index < len(line_indexes) - 1:
+                current_x += space_width
+        current_y += line_height + line_gap
+        total_height = current_y - line_gap
+
+    return positions, total_height
+
+
+def create_highlighted_chunk_variants(chunk_words, video_clip, subtitle_style):
+    if not chunk_words:
+        return []
+
+    last_error = None
+    palette = COLOR_PRESETS[subtitle_style["colorPreset"]]
+    chunk_text = " ".join(word["text"] for word in chunk_words)
+    preferred_font_size = resolve_font_size(video_clip, chunk_text)
+    caption_width = int(video_clip.w * 0.62)
+    max_text_height = int(video_clip.h * 0.17)
+
+    for font in get_font_candidates(subtitle_style["fontPreset"]):
+        for font_size in range(preferred_font_size, 23, -2):
+            stroke_width = max(2, round(font_size * 0.11))
+            shadow_stroke_width = max(1, round(font_size * 0.055))
+            shadow_y = max(2, round(font_size * 0.08))
+            line_gap = max(4, round(font_size * 0.12))
+            space_width = max(round(font_size * 0.32), 10)
+
+            base_word_clips = []
+            try:
+                for word in chunk_words:
+                    base_word_clips.append(
+                        _create_label_text_clip(
+                            word["text"],
+                            font,
+                            font_size,
+                            palette["base_color"],
+                            palette["stroke_color"],
+                            stroke_width,
+                        )
+                    )
+
+                layout = _layout_word_clips(base_word_clips, caption_width, space_width, line_gap)
+                if layout is None:
+                    for clip in base_word_clips:
+                        clip.close()
+                    continue
+
+                positions, total_height = layout
+                canvas_height = total_height + max(8, round(font_size * 0.12))
+                if canvas_height > max_text_height:
+                    for clip in base_word_clips:
+                        clip.close()
+                    continue
+
+                base_layers = []
+                for index, word in enumerate(chunk_words):
+                    position_x, position_y = positions[index]
+                    shadow = _create_label_text_clip(
+                        word["text"],
+                        font,
+                        font_size,
+                        "#000000",
+                        "#000000",
+                        shadow_stroke_width,
+                    )
+                    shadow = shadow.with_opacity(0.24).with_position((position_x, position_y + shadow_y))
+                    face = base_word_clips[index].with_position((position_x, position_y))
+                    base_layers.extend([shadow, face])
+
+                base_clip = CompositeVideoClip(base_layers, size=(caption_width, canvas_height))
+                base_clip = _prime_clip_duration(base_clip)
+
+                variants = []
+                for index, word in enumerate(chunk_words):
+                    active_shadow = _create_label_text_clip(
+                        word["text"],
+                        font,
+                        font_size,
+                        "#000000",
+                        "#000000",
+                        shadow_stroke_width,
+                    )
+                    active_shadow = active_shadow.with_opacity(0.26).with_position((positions[index][0], positions[index][1] + shadow_y))
+                    active_face = _create_label_text_clip(
+                        word["text"],
+                        font,
+                        font_size,
+                        palette["active_color"],
+                        palette["stroke_color"],
+                        stroke_width,
+                    )
+                    active_face = active_face.with_position(positions[index])
+                    variant = CompositeVideoClip([base_clip, active_shadow, active_face], size=(caption_width, canvas_height))
+                    variant = _prime_clip_duration(variant, word["end"] - word["start"])
+                    variants.append(((word["start"], word["end"]), variant))
+
+                return variants
+            except Exception as error:
+                last_error = error
+            finally:
+                for clip in base_word_clips:
+                    try:
+                        clip.close()
+                    except Exception:
+                        pass
+
+    if last_error is not None:
+        raise RuntimeError("Could not render highlighted word subtitles with any compatible font.") from last_error
+    return []
+
+
 def create_textclip_with_fallback(text, video_clip, subtitle_style):
     last_error = None
     colors = COLOR_PRESETS[subtitle_style["colorPreset"]]
@@ -219,29 +455,27 @@ def create_textclip_with_fallback(text, video_clip, subtitle_style):
             stroke_width = max(2, round(font_size * 0.12))
 
             try:
-                shadow = TextClip(text=text,
-                                  font=font,
-                                  font_size=font_size,
-                                  color="#000000",
-                                  stroke_color="#000000",
-                                  stroke_width=max(1, round(font_size * 0.06)),
-                                  method='caption',
-                                  size=(caption_width, None),
-                                  interline=max(2, round(font_size * 0.1)),
-                                  text_align='center')
-                shadow = _prime_clip_duration(shadow)
+                shadow = _create_caption_text_clip(
+                    text,
+                    font,
+                    font_size,
+                    "#000000",
+                    "#000000",
+                    max(1, round(font_size * 0.06)),
+                    caption_width,
+                    max(2, round(font_size * 0.1)),
+                )
 
-                face = TextClip(text=text,
-                                font=font,
-                                font_size=font_size,
-                                color=colors["color"],
-                                stroke_color=colors["stroke_color"],
-                                stroke_width=stroke_width,
-                                method='caption',
-                                size=(caption_width, None),
-                                interline=max(2, round(font_size * 0.1)),
-                                text_align='center')
-                face = _prime_clip_duration(face)
+                face = _create_caption_text_clip(
+                    text,
+                    font,
+                    font_size,
+                    colors["base_color"],
+                    colors["stroke_color"],
+                    stroke_width,
+                    caption_width,
+                    max(2, round(font_size * 0.1)),
+                )
 
                 if max(shadow.h, face.h) > max_text_height:
                     shadow.close()
@@ -358,6 +592,7 @@ def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_sty
     video_duration = _safe_duration(video_clip.duration)
 
     subtitles_data = []
+    highlighted_subtitle_layers = []
     for segment in whisper_segments:
         start = segment['start'] - clip_start_time
         end = segment['end'] - clip_start_time
@@ -366,7 +601,23 @@ def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_sty
         if end > 0 and start < video_duration:
             start = max(0, start)
             end = min(video_duration, end)
-            subtitles_data.extend(split_subtitle_text(text, start, end))
+            word_entries = extract_word_entries(segment, clip_start_time, video_duration)
+            if word_entries:
+                for chunk_words in split_word_entries(word_entries):
+                    try:
+                        variants = create_highlighted_chunk_variants(chunk_words, video_clip, resolved_style)
+                    except Exception:
+                        variants = []
+
+                    if variants:
+                        for (variant_start, variant_end), variant in variants:
+                            variant = _with_clip_timing(variant, variant_start, variant_end)
+                            highlighted_subtitle_layers.append(variant.with_position(("center", int(video_clip.h * 0.78))))
+                    else:
+                        chunk_text = " ".join(word["text"] for word in chunk_words)
+                        subtitles_data.append(((chunk_words[0]["start"], chunk_words[-1]["end"]), chunk_text))
+            else:
+                subtitles_data.extend(split_subtitle_text(text, start, end))
 
     subtitle_layers = []
     subtitle_y = int(video_clip.h * 0.78)
@@ -383,7 +634,7 @@ def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_sty
     focus_shade = focus_shade.with_opacity(0.08).with_position((0, int(video_clip.h * 0.74))).with_duration(video_duration)
     top_description_layers = create_top_description_overlay(video_clip, clip_title, clip_reason, resolved_style)
 
-    layers = [video_clip, bottom_shade, focus_shade, *top_description_layers, *subtitle_layers]
+    layers = [video_clip, bottom_shade, focus_shade, *top_description_layers, *subtitle_layers, *highlighted_subtitle_layers]
     final_clip = CompositeVideoClip(layers, size=video_clip.size).with_duration(video_duration)
     if video_clip.audio is not None:
         final_clip = final_clip.with_audio(video_clip.audio.with_duration(video_duration))
