@@ -19,17 +19,29 @@ jobs: dict[str, dict] = {}
 jobs_lock = threading.Lock()
 
 
+def _append_job_log(job_id: str, stage: str, message: str) -> None:
+    entry = {"time": time.time(), "stage": stage, "message": message}
+    with jobs_lock:
+        job = jobs.setdefault(job_id, {})
+        logs = job.setdefault("logs", [])
+        logs.append(entry)
+        if len(logs) > 120:
+            del logs[:-120]
+
+
 def _set_job(job_id: str, **fields) -> None:
     with jobs_lock:
         jobs.setdefault(job_id, {}).update(fields)
 
 
 def _job_progress(job_id: str, stage: str, message: str) -> None:
+    print(f"[{stage}] {message}", flush=True)
+    _append_job_log(job_id, stage, message)
     _set_job(job_id, status=stage, message=message, updatedAt=time.time())
 
 
 def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, clip_count: int) -> None:
-    _set_job(job_id, status="queued", message="The job is queued.", updatedAt=time.time())
+    _job_progress(job_id, "queued", "The job is queued.")
     try:
         result = create_short_from_url(
             video_url=video_url,
@@ -40,8 +52,11 @@ def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, cl
             progress_callback=lambda stage, message: _job_progress(job_id, stage, message),
             subtitle_style=jobs[job_id].get("subtitleStyle"),
         )
+        _append_job_log(job_id, "completed", "Render finished successfully.")
         _set_job(job_id, status="completed", result=result, updatedAt=time.time())
     except Exception as error:
+        print(traceback.format_exc(), flush=True)
+        _append_job_log(job_id, "failed", str(error))
         _set_job(
             job_id,
             status="failed",
@@ -77,6 +92,7 @@ def process_video():
 
     job_id = uuid.uuid4().hex[:10]
     _set_job(job_id, status="queued", subtitleStyle=subtitle_style, clipCount=clip_count, createdAt=time.time(), updatedAt=time.time())
+    _append_job_log(job_id, "queued", "The job was created and is waiting for the worker thread.")
 
     worker = threading.Thread(
         target=_run_job,

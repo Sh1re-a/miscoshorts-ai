@@ -6,40 +6,57 @@ from moviepy import ColorClip, CompositeVideoClip, TextClip
 
 FONT_PRESETS = {
     "clean": [
+        "SF Pro Display Semibold",
+        "Avenir Next Bold",
         "Avenir Next Demi Bold",
         "Helvetica Neue Bold",
+        "Helvetica Neue Medium",
+        "Aptos Display Bold",
         "Segoe UI Bold",
+        "Segoe UI Semibold",
         "Arial-Bold",
         "Helvetica-Bold",
+        "NotoSans-Bold",
         "DejaVuSans-Bold",
     ],
     "bold": [
+        "SF Pro Display Bold",
         "Avenir Next Heavy",
+        "Avenir Next Bold",
+        "Aptos Display Bold",
         "Bahnschrift SemiBold",
+        "Segoe UI Bold",
         "Arial-Bold",
         "Impact",
         "Helvetica-Bold",
+        "NotoSans-Bold",
         "DejaVuSans-Bold",
     ],
     "soft": [
+        "SF Pro Rounded Semibold",
+        "Avenir Next Medium",
         "Avenir Next Demi Bold",
+        "Helvetica Neue Medium",
+        "Aptos Bold",
         "TrebuchetMS-Bold",
         "Gill Sans Bold",
         "Calibri",
+        "Segoe UI Semibold",
         "Arial-Bold",
+        "NotoSans-Bold",
         "DejaVuSans-Bold",
     ],
 }
 
 COLOR_PRESETS = {
-    "sun": {"base_color": "#fff7e8", "active_color": "#f6d34a", "stroke_color": "#111111"},
-    "ivory": {"base_color": "#fff7e8", "active_color": "#f6d34a", "stroke_color": "#111111"},
-    "mint": {"base_color": "#effff8", "active_color": "#8af5c7", "stroke_color": "#102a43"},
+    "sun": {"base_color": "#fffaf0", "active_color": "#ffe07a", "stroke_color": "#101820"},
+    "ivory": {"base_color": "#fffdf8", "active_color": "#f7d98a", "stroke_color": "#111827"},
+    "mint": {"base_color": "#f5fffb", "active_color": "#9ae8c6", "stroke_color": "#18324a"},
 }
 
 DEFAULT_STYLE = {
     "fontPreset": "clean",
-    "colorPreset": "sun",
+    "colorPreset": "ivory",
 }
 
 TOP_OVERLAY_MIN_DURATION = 1.8
@@ -48,8 +65,11 @@ WORD_HIGHLIGHT_LEAD = 0.03
 WORD_HIGHLIGHT_TAIL = 0.05
 
 TITLE_FONT_PRESETS = [
+    "SF Pro Display Semibold",
+    "Avenir Next Bold",
     "Avenir Next Demi Bold",
     "Helvetica Neue Medium",
+    "Aptos Display Bold",
     "Arial-Bold",
     "Helvetica-Bold",
     "DejaVuSans-Bold",
@@ -60,10 +80,10 @@ def get_preferred_fonts():
     system_name = platform.system().lower()
 
     if system_name == 'windows':
-        return ['Arial-Bold', 'Arial', 'Calibri', 'DejaVuSans-Bold']
+        return ['Aptos Display Bold', 'Aptos Bold', 'Segoe UI Semibold', 'Segoe UI Bold', 'Arial-Bold', 'Arial', 'Calibri', 'NotoSans-Bold', 'DejaVuSans-Bold']
     if system_name == 'darwin':
-        return ['Arial-Bold', 'Helvetica-Bold', 'Arial', 'DejaVuSans-Bold']
-    return ['DejaVuSans-Bold', 'LiberationSans-Bold', 'Arial-Bold', 'Arial']
+        return ['SF Pro Display Semibold', 'SF Pro Display Bold', 'Avenir Next Bold', 'Avenir Next Demi Bold', 'Helvetica Neue Medium', 'Helvetica Neue Bold', 'Helvetica-Bold', 'Arial-Bold', 'Arial', 'DejaVuSans-Bold']
+    return ['NotoSans-Bold', 'Inter-SemiBold', 'DejaVuSans-Bold', 'LiberationSans-Bold', 'Arial-Bold', 'Arial']
 
 
 def normalize_subtitle_style(style=None):
@@ -160,7 +180,7 @@ def split_subtitle_text(text, start_time, end_time):
 
 
 def resolve_font_size(video_clip, text):
-    base_size = int(video_clip.h * 0.049)
+    base_size = int(video_clip.h * 0.05)
     text_length = len(text)
 
     if text_length >= 55:
@@ -212,6 +232,14 @@ def _prime_clip_duration(clip, duration=1.0):
     return clip.with_duration(_safe_duration(duration, fallback=1.0))
 
 
+def _expand_clip_canvas(clip, pad_x=0, pad_y=0):
+    expanded = CompositeVideoClip(
+        [clip.with_position((pad_x, pad_y))],
+        size=(clip.w + pad_x * 2, clip.h + pad_y * 2),
+    )
+    return _prime_clip_duration(expanded, getattr(clip, "duration", 1.0))
+
+
 def _intro_overlay_duration(video_duration):
     return min(TOP_OVERLAY_MAX_DURATION, max(TOP_OVERLAY_MIN_DURATION, video_duration * 0.36))
 
@@ -237,7 +265,9 @@ def _create_caption_text_clip(text, font, font_size, color, stroke_color, stroke
         interline=interline,
         text_align='center',
     )
-    return _prime_clip_duration(clip)
+    clip = _prime_clip_duration(clip)
+    vertical_pad = max(6, round(font_size * 0.18) + stroke_width)
+    return _expand_clip_canvas(clip, pad_y=vertical_pad)
 
 
 def _create_label_text_clip(text, font, font_size, color, stroke_color, stroke_width):
@@ -249,7 +279,10 @@ def _create_label_text_clip(text, font, font_size, color, stroke_color, stroke_w
         stroke_color=stroke_color,
         stroke_width=stroke_width,
     )
-    return _prime_clip_duration(clip)
+    clip = _prime_clip_duration(clip)
+    horizontal_pad = max(6, round(font_size * 0.12) + stroke_width)
+    vertical_pad = max(6, round(font_size * 0.18) + stroke_width)
+    return _expand_clip_canvas(clip, pad_x=horizontal_pad, pad_y=vertical_pad)
 
 
 def _normalize_word_text(text):
@@ -365,16 +398,16 @@ def create_highlighted_chunk_variants(chunk_words, video_clip, subtitle_style):
     palette = COLOR_PRESETS[subtitle_style["colorPreset"]]
     chunk_text = " ".join(word["text"] for word in chunk_words)
     preferred_font_size = resolve_font_size(video_clip, chunk_text)
-    caption_width = int(video_clip.w * 0.62)
-    max_text_height = int(video_clip.h * 0.17)
+    caption_width = int(video_clip.w * 0.68)
+    max_text_height = int(video_clip.h * 0.22)
 
     for font in get_font_candidates(subtitle_style["fontPreset"]):
         for font_size in range(preferred_font_size, 23, -2):
-            stroke_width = max(2, round(font_size * 0.11))
-            shadow_stroke_width = max(1, round(font_size * 0.055))
-            shadow_y = max(2, round(font_size * 0.08))
-            line_gap = max(4, round(font_size * 0.12))
-            space_width = max(round(font_size * 0.32), 10)
+            stroke_width = max(2, round(font_size * 0.1))
+            shadow_stroke_width = max(1, round(font_size * 0.05))
+            shadow_y = max(2, round(font_size * 0.07))
+            line_gap = max(4, round(font_size * 0.08))
+            space_width = max(round(font_size * 0.18), 8)
 
             base_word_clips = []
             try:
@@ -397,7 +430,7 @@ def create_highlighted_chunk_variants(chunk_words, video_clip, subtitle_style):
                     continue
 
                 positions, total_height = layout
-                canvas_height = total_height + max(8, round(font_size * 0.12))
+                canvas_height = total_height + max(10, round(font_size * 0.14))
                 if canvas_height > max_text_height:
                     for clip in base_word_clips:
                         clip.close()
@@ -414,7 +447,7 @@ def create_highlighted_chunk_variants(chunk_words, video_clip, subtitle_style):
                         "#000000",
                         shadow_stroke_width,
                     )
-                    shadow = shadow.with_opacity(0.24).with_position((position_x, position_y + shadow_y))
+                    shadow = shadow.with_opacity(0.16).with_position((position_x, position_y + shadow_y))
                     face = base_word_clips[index].with_position((position_x, position_y))
                     base_layers.extend([shadow, face])
 
@@ -431,7 +464,7 @@ def create_highlighted_chunk_variants(chunk_words, video_clip, subtitle_style):
                         "#000000",
                         shadow_stroke_width,
                     )
-                    active_shadow = active_shadow.with_opacity(0.26).with_position((positions[index][0], positions[index][1] + shadow_y))
+                    active_shadow = active_shadow.with_opacity(0.18).with_position((positions[index][0], positions[index][1] + shadow_y))
                     active_face = _create_label_text_clip(
                         word["text"],
                         font,
@@ -465,12 +498,12 @@ def create_textclip_with_fallback(text, video_clip, subtitle_style):
     last_error = None
     colors = COLOR_PRESETS[subtitle_style["colorPreset"]]
     preferred_font_size = resolve_font_size(video_clip, text)
-    caption_width = int(video_clip.w * 0.58)
-    max_text_height = int(video_clip.h * 0.17)
+    caption_width = int(video_clip.w * 0.64)
+    max_text_height = int(video_clip.h * 0.2)
 
     for font in get_font_candidates(subtitle_style["fontPreset"]):
         for font_size in range(preferred_font_size, 23, -2):
-            stroke_width = max(2, round(font_size * 0.12))
+            stroke_width = max(2, round(font_size * 0.11))
 
             try:
                 shadow = _create_caption_text_clip(
@@ -479,7 +512,7 @@ def create_textclip_with_fallback(text, video_clip, subtitle_style):
                     font_size,
                     "#000000",
                     "#000000",
-                    max(1, round(font_size * 0.06)),
+                    max(1, round(font_size * 0.05)),
                     caption_width,
                     max(2, round(font_size * 0.1)),
                 )
@@ -500,9 +533,12 @@ def create_textclip_with_fallback(text, video_clip, subtitle_style):
                     face.close()
                     continue
 
-                shadow = shadow.with_opacity(0.24).with_position((0, max(2, round(font_size * 0.08))))
+                shadow = shadow.with_opacity(0.18).with_position((0, max(2, round(font_size * 0.07))))
                 face = face.with_position((0, 0))
-                clip = CompositeVideoClip([shadow, face], size=(caption_width, face.h + max(6, round(font_size * 0.1))))
+                clip = CompositeVideoClip(
+                    [shadow, face],
+                    size=(max(shadow.w, face.w), max(shadow.h, face.h) + max(8, round(font_size * 0.12))),
+                )
                 clip = _prime_clip_duration(clip)
 
                 return clip
@@ -522,6 +558,21 @@ def create_header_text_clip(text, video_clip, *, font_candidates, font_size, col
     for font in font_candidates:
         for candidate_size in range(font_size, max(font_size - 10, 11), -2):
             try:
+                shadow = TextClip(
+                    text=text,
+                    font=font,
+                    font_size=candidate_size,
+                    color="#000000",
+                    stroke_color="#000000",
+                    stroke_width=max(1, stroke_width),
+                    method="caption",
+                    size=(width, None),
+                    interline=max(2, round(candidate_size * 0.1)),
+                    text_align="center",
+                )
+                shadow = _prime_clip_duration(shadow)
+                shadow = _expand_clip_canvas(shadow, pad_x=max(8, round(candidate_size * 0.08)), pad_y=max(8, round(candidate_size * 0.14)))
+
                 clip = TextClip(
                     text=text,
                     font=font,
@@ -535,12 +586,17 @@ def create_header_text_clip(text, video_clip, *, font_candidates, font_size, col
                     text_align="center",
                 )
                 clip = _prime_clip_duration(clip)
+                clip = _expand_clip_canvas(clip, pad_x=max(8, round(candidate_size * 0.08)), pad_y=max(8, round(candidate_size * 0.14)))
                 if clip.h > max_height:
+                    shadow.close()
                     clip.close()
                     continue
+                shadow = shadow.with_opacity(0.18).with_position((0, max(2, round(candidate_size * 0.08))))
                 if opacity != 1.0:
                     clip = clip.with_opacity(opacity)
-                return clip
+                layered = CompositeVideoClip([shadow, clip], size=(max(shadow.w, clip.w), max(shadow.h, clip.h) + max(4, round(candidate_size * 0.08))))
+                layered = _prime_clip_duration(layered)
+                return layered
             except Exception as error:
                 last_error = error
 
@@ -570,12 +626,12 @@ def create_top_description_overlay(video_clip, title, reason, subtitle_style):
                 title_text,
                 video_clip,
                 font_candidates=font_candidates,
-                font_size=resolve_top_text_size(video_clip, title_text, minimum=24, maximum=38, ratio=0.022),
-                color="#f8fafc",
-                stroke_color="#09111c",
+                font_size=resolve_top_text_size(video_clip, title_text, minimum=22, maximum=34, ratio=0.02),
+                color="#f8fbff",
+                stroke_color="#0f172a",
                 stroke_width=1,
-                width_ratio=0.76,
-                max_height_ratio=0.05,
+                width_ratio=0.74,
+                max_height_ratio=0.042,
             )
             title_clip = title_clip.with_position(("center", current_y)).with_duration(overlay_duration)
             overlays.append(title_clip)
@@ -589,13 +645,13 @@ def create_top_description_overlay(video_clip, title, reason, subtitle_style):
                 reason_text,
                 video_clip,
                 font_candidates=font_candidates,
-                font_size=resolve_top_text_size(video_clip, reason_text, minimum=17, maximum=24, ratio=0.015),
-                color="#dbe7f3",
-                stroke_color="#09111c",
+                font_size=resolve_top_text_size(video_clip, reason_text, minimum=15, maximum=20, ratio=0.013),
+                color="#dce7f4",
+                stroke_color="#0f172a",
                 stroke_width=1,
-                width_ratio=0.78,
-                max_height_ratio=0.045,
-                opacity=0.88,
+                width_ratio=0.74,
+                max_height_ratio=0.035,
+                opacity=0.82,
             )
             reason_clip = reason_clip.with_position(("center", current_y)).with_duration(overlay_duration)
             overlays.append(reason_clip)

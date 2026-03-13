@@ -65,20 +65,23 @@ def load_whisper_model() -> tuple[str, object]:
     raise RuntimeError("Could not load any configured Whisper model.") from last_error
 
 
-def transcribe_video(video_path: Path) -> dict:
+def transcribe_media(media_path: Path, *, word_timestamps: bool) -> dict:
     model_name, model = load_whisper_model()
     transcribe_options = {
         "fp16": False,
         "verbose": False,
-        "word_timestamps": True,
+        "condition_on_previous_text": False,
+        "temperature": 0.0,
     }
+    if word_timestamps:
+        transcribe_options["word_timestamps"] = True
 
     try:
-        return model.transcribe(str(video_path), **transcribe_options)
+        return model.transcribe(str(media_path), **transcribe_options)
     except TypeError:
         fallback_options = dict(transcribe_options)
         fallback_options.pop("word_timestamps", None)
-        return model.transcribe(str(video_path), **fallback_options)
+        return model.transcribe(str(media_path), **fallback_options)
     except Exception as error:
         if model_name != "base":
             with _whisper_model_lock:
@@ -89,11 +92,34 @@ def transcribe_video(video_path: Path) -> dict:
                     _whisper_model_cache["base"] = base_model
             fallback_options = dict(transcribe_options)
             try:
-                return base_model.transcribe(str(video_path), **fallback_options)
+                return base_model.transcribe(str(media_path), **fallback_options)
             except TypeError:
                 fallback_options.pop("word_timestamps", None)
-                return base_model.transcribe(str(video_path), **fallback_options)
+                return base_model.transcribe(str(media_path), **fallback_options)
         raise RuntimeError("Whisper transcription failed.") from error
+
+
+def transcribe_video_fast(video_path: Path) -> dict:
+    return transcribe_media(video_path, word_timestamps=False)
+
+
+def transcribe_clip_for_subtitles(clip: VideoFileClip, output_dir: Path, clip_index: int) -> dict:
+    if clip.audio is None:
+        return {"text": "", "segments": []}
+
+    audio_path = output_dir / f"clip_audio_{clip_index:02d}.wav"
+    try:
+        clip.audio.write_audiofile(
+            str(audio_path),
+            fps=16000,
+            nbytes=2,
+            ffmpeg_params=["-ac", "1"],
+            logger=None,
+        )
+        return transcribe_media(audio_path, word_timestamps=True)
+    finally:
+        if audio_path.exists():
+            audio_path.unlink()
 
 
 def download_video(url: str, destination_base: Path) -> Path:
@@ -202,8 +228,9 @@ def create_short_from_url(
         _emit(progress_callback, "downloading", "Downloading video from YouTube...")
         video_path = download_video(video_url, temp_base)
 
-        _emit(progress_callback, "transcribing", "Transcribing audio with Whisper...")
-        result = transcribe_video(video_path)
+        _emit(progress_callback, "transcribing", f"Fast transcribing full video with Whisper ({_get_whisper_model_candidates()[0]})...")
+        result = transcribe_video_fast(video_path)
+        _emit(progress_callback, "transcribing", f"Transcription complete. Found {len(result.get('segments') or [])} segments.")
 
         transcript_path.write_text(
             f"URL: {video_url}\n{result['text']}", encoding="utf-8"
@@ -244,10 +271,13 @@ def create_short_from_url(
             if clip.audio is not None:
                 clip_vertical = clip_vertical.with_audio(clip.audio.with_duration(clip.duration))
 
+            _emit(progress_callback, "rendering", f"Preparing subtitle timing for clip {index}...")
+            clip_transcript = transcribe_clip_for_subtitles(clip, output_dir, index)
+
             clip_final = subtitles.create_subtitles(
                 clip_vertical,
-                result["segments"],
-                start,
+                clip_transcript.get("segments") or [],
+                0,
                 subtitle_style,
                 clip_title=clip_data.get("title"),
                 clip_reason=clip_data.get("reason"),

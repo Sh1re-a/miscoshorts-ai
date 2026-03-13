@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Cormorant+Garamond:wght@600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Sora:wght@500;600;700;800&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -38,9 +38,12 @@
 
   body {
     @apply bg-background text-foreground antialiased;
-    font-family: 'Instrument Sans', sans-serif;
+    font-family: 'Manrope', sans-serif;
     min-width: 320px;
     min-height: 100vh;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
 
   a {
@@ -50,6 +53,27 @@
   #root {
     min-height: 100vh;
   }
+}
+
+.app-display {
+  font-family: 'Sora', sans-serif;
+  letter-spacing: -0.045em;
+}
+
+.app-heading {
+  font-family: 'Sora', sans-serif;
+  letter-spacing: -0.035em;
+}
+
+.app-copy {
+  font-family: 'Manrope', sans-serif;
+  letter-spacing: -0.012em;
+}
+
+.app-kicker {
+  font-family: 'Sora', sans-serif;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
 }
 
 @layer utilities {
