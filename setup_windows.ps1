@@ -1,3 +1,11 @@
+$paramBlock = @"
+param(
+    [switch]$SkipLaunch,
+    [switch]$NonInteractive
+)
+"@
+Invoke-Expression $paramBlock
+
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -38,7 +46,9 @@ function Show-FailureAndExit($message) {
     Write-Host $message -ForegroundColor Red
     Write-Host ""
     Write-Host "Log file: $logPath"
-    [void](Read-Host "Press Enter to close this window")
+    if (-not $NonInteractive) {
+        [void](Read-Host "Press Enter to close this window")
+    }
     exit 1
 }
 
@@ -526,6 +536,11 @@ function Invoke-Setup {
         if (-not (Test-FrontendBuildReady)) {
             throw "The frontend build finished without creating frontend/dist/index.html. Check the npm build output above and the setup log for details."
         }
+    }
+
+    if ($SkipLaunch) {
+        Write-Host "Skipping app launch because -SkipLaunch was requested."
+        return
     }
 
     Write-Host "Launching app ..."

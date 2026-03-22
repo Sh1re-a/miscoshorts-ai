@@ -1,0 +1,84 @@
+name: Windows Launch Smoke Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  windows-launch-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install FFmpeg
+        shell: pwsh
+        run: choco install ffmpeg -y
+
+      - name: Run Windows setup script without browser launch
+        shell: pwsh
+        run: ./setup_windows.ps1 -SkipLaunch -NonInteractive
+
+      - name: Start local app
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath ".\.venv\Scripts\python.exe" -ArgumentList "app_launcher.py" -PassThru
+          "APP_PID=$($process.Id)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Wait for health endpoint
+        shell: pwsh
+        run: |
+          $deadline = (Get-Date).AddSeconds(90)
+          do {
+            try {
+              $response = Invoke-RestMethod -Uri "http://127.0.0.1:5001/api/health" -TimeoutSec 5
+              if ($response.status -eq "ok") {
+                exit 0
+              }
+            }
+            catch {
+            }
+            Start-Sleep -Seconds 2
+          } while ((Get-Date) -lt $deadline)
+
+          throw "Timed out waiting for the local app health endpoint on Windows."
+
+      - name: Verify bootstrap endpoint
+        shell: pwsh
+        run: |
+          $response = Invoke-RestMethod -Uri "http://127.0.0.1:5001/api/bootstrap" -TimeoutSec 5
+          if ($response.frontendBuilt -ne $true) {
+            throw "frontendBuilt was false after Windows setup completed."
+          }
+
+      - name: Stop local app
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:APP_PID) {
+            Stop-Process -Id ([int]$env:APP_PID) -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload Windows setup log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-setup-log
+          path: .setup-state/windows-setup.log
+          if-no-files-found: ignore
