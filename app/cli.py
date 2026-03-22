@@ -4,24 +4,25 @@ import os
 import shutil
 import whisper
 import warnings
+from pathlib import Path
+
 from dotenv import load_dotenv
 
-# local modules
-import gemini_analyzer
-import subtitles
+from app import gemini_analyzer, shorts_service, subtitles
+from app.paths import ENV_FILE, OUTPUTS_DIR
 
 warnings.filterwarnings("ignore")
-load_dotenv()
+load_dotenv(dotenv_path=ENV_FILE)
 
 URL_VIDEO = os.getenv("URL_VIDEO", "").strip()
 OUTPUT_FILENAME = os.getenv("OUTPUT_FILENAME", "short_con_subs.mp4").strip() or "short_con_subs.mp4"
-ENV_PATH = ".env"
+ENV_PATH = ENV_FILE
 
 
 def update_env_file(key, value):
     lines = []
-    if os.path.exists(ENV_PATH):
-        with open(ENV_PATH, "r", encoding="utf-8") as file_handle:
+    if ENV_PATH.exists():
+        with ENV_PATH.open("r", encoding="utf-8") as file_handle:
             lines = file_handle.readlines()
 
     new_line = f"{key}={value}\n"
@@ -36,7 +37,7 @@ def update_env_file(key, value):
     if not replaced:
         lines.append(new_line)
 
-    with open(ENV_PATH, "w", encoding="utf-8") as file_handle:
+    with ENV_PATH.open("w", encoding="utf-8") as file_handle:
         file_handle.writelines(lines)
 
 
@@ -95,10 +96,17 @@ def get_api_key():
 
 def download_video(url):
     print(f"📥 Downloading video: {url}...")
-    ydl_opts = {'format': 'best[ext=mp4]', 'outtmpl': 'video_temp.%(ext)s', 'quiet': True, 'no_warnings': True}
+    ydl_opts = {
+        'format': shorts_service.DOWNLOAD_FORMAT,
+        'outtmpl': 'video_temp.%(ext)s',
+        'merge_output_format': 'mp4',
+        'noplaylist': True,
+        'quiet': True,
+        'no_warnings': True,
+    }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
-    return "video_temp.mp4"
+    return str(shorts_service._resolve_downloaded_video_path(Path("video_temp")))
 
 def parse_gemini_response(text):
     """Extract structured fields from Gemini's plain-text response."""
@@ -117,7 +125,9 @@ def parse_gemini_response(text):
 def main():
     video_path = None
     clip = None
+    clip_vertical = None
     clip_final = None
+    transcript_path = OUTPUTS_DIR / "transcripcion_completa.txt"
 
     try:
         ensure_dependencies()
@@ -130,7 +140,8 @@ def main():
         print("🔍 Transcribing audio to get timestamps...")
         model = whisper.load_model("base")
         result = model.transcribe(video_path)
-        with open("transcripcion_completa.txt", "w", encoding="utf-8") as f:
+        OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+        with transcript_path.open("w", encoding="utf-8") as f:
             f.write(f"URL: {video_url}\n")
             f.write(result['text'])
 
@@ -159,24 +170,22 @@ def main():
             print("Cancelled.")
             return
 
-        print(f"🚀 Rendering the short ({start}s to {end}s)...")
+        print(f"🚀 Rendering the short ({start}s to {end}s) in {shorts_service.RENDER_PROFILE_LABEL}...")
         clip = VideoFileClip(video_path).subclipped(start, end)
 
-        w, h = clip.size
-        new_width = h * (9/16)
-        clip_vertical = clip.cropped(x1=w/2 - new_width/2, y1=0, x2=w/2 + new_width/2, y2=h)
+        clip_vertical = shorts_service.build_vertical_master_clip(clip)
+        if clip.audio is not None:
+            clip_vertical = clip_vertical.with_audio(clip.audio.with_duration(clip_vertical.duration))
 
         clip_final = subtitles.create_subtitles(clip_vertical, result['segments'], start)
-        clip_final.write_videofile(output_filename,
-                                   codec='libx264',
-                                   audio_codec='aac',
-                                   fps=24,
-                                   threads=4)
+        shorts_service.write_high_quality_video(clip_final, output_filename)
 
         print(f"🎉 Video ready: {output_filename}!")
     finally:
         if clip_final is not None:
             clip_final.close()
+        if clip_vertical is not None:
+            clip_vertical.close()
         if clip is not None:
             clip.close()
         if video_path and os.path.exists(video_path):

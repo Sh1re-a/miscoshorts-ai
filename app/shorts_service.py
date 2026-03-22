@@ -11,19 +11,28 @@ import whisper
 import yt_dlp
 from moviepy import VideoFileClip
 
-import gemini_analyzer
-import subtitles
+from app import gemini_analyzer, subtitles
+from app.paths import OUTPUTS_DIR
 
 
 ProgressCallback = Callable[[str, str], None]
 OUTPUT_WIDTH = 1080
 OUTPUT_HEIGHT = 1920
-VIDEO_CRF = "18"
-VIDEO_BITRATE = "9M"
-VIDEO_AUDIO_BITRATE = "160k"
+TARGET_ASPECT_RATIO = OUTPUT_WIDTH / OUTPUT_HEIGHT
+VIDEO_CRF = os.getenv("VIDEO_CRF", "15")
+VIDEO_PRESET = os.getenv("VIDEO_PRESET", "medium")
+VIDEO_BITRATE = os.getenv("VIDEO_BITRATE", "12M")
+VIDEO_MAXRATE = os.getenv("VIDEO_MAXRATE", "18M")
+VIDEO_BUFSIZE = os.getenv("VIDEO_BUFSIZE", "24M")
+VIDEO_AUDIO_BITRATE = os.getenv("VIDEO_AUDIO_BITRATE", "192k")
+DOWNLOAD_FORMAT = os.getenv(
+    "YTDLP_FORMAT",
+    "bestvideo*[height<=2160]+bestaudio/best[height<=2160]/best",
+)
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "turbo,base")
 RENDER_THREADS = max(4, min(12, os.cpu_count() or 4))
 DEFAULT_CLIP_COUNT = 3
+RENDER_PROFILE_LABEL = "Studio HQ 1080x1920 MP4"
 
 _whisper_model_cache: dict[str, object] = {}
 _whisper_model_lock = threading.Lock()
@@ -32,6 +41,79 @@ _whisper_model_lock = threading.Lock()
 def _emit(callback: ProgressCallback | None, stage: str, message: str) -> None:
     if callback is not None:
         callback(stage, message)
+
+
+def _make_even(value: float) -> int:
+    return max(2, int(round(value / 2) * 2))
+
+
+def _resolve_downloaded_video_path(destination_base: Path) -> Path:
+    preferred_extensions = (".mp4", ".mkv", ".mov", ".webm")
+    for extension in preferred_extensions:
+        candidate = destination_base.with_suffix(extension)
+        if candidate.exists():
+            return candidate
+
+    matches = sorted(destination_base.parent.glob(f"{destination_base.name}.*"))
+    if matches:
+        return matches[0]
+
+    raise FileNotFoundError("yt-dlp completed without producing a video file.")
+
+
+def get_render_fps(clip: VideoFileClip) -> int:
+    return max(24, round(clip.fps or 24))
+
+
+def build_vertical_master_clip(clip: VideoFileClip) -> VideoFileClip:
+    width, height = clip.size
+    source_ratio = width / height
+
+    if abs(source_ratio - TARGET_ASPECT_RATIO) < 0.001:
+        return clip.resized(new_size=(OUTPUT_WIDTH, OUTPUT_HEIGHT))
+
+    if source_ratio > TARGET_ASPECT_RATIO:
+        crop_width = min(width, _make_even(height * TARGET_ASPECT_RATIO))
+        x1 = max(0, int(round((width - crop_width) / 2)))
+        x2 = min(width, x1 + crop_width)
+        cropped_clip = clip.cropped(x1=x1, y1=0, x2=x2, y2=height)
+    else:
+        crop_height = min(height, _make_even(width / TARGET_ASPECT_RATIO))
+        y1 = max(0, int(round((height - crop_height) / 2)))
+        y2 = min(height, y1 + crop_height)
+        cropped_clip = clip.cropped(x1=0, y1=y1, x2=width, y2=y2)
+
+    return cropped_clip.resized(new_size=(OUTPUT_WIDTH, OUTPUT_HEIGHT))
+
+
+def write_high_quality_video(clip: VideoFileClip, output_path: str | Path) -> None:
+    clip.write_videofile(
+        str(output_path),
+        codec="libx264",
+        audio_codec="aac",
+        fps=get_render_fps(clip),
+        bitrate=VIDEO_BITRATE,
+        audio_bitrate=VIDEO_AUDIO_BITRATE,
+        threads=RENDER_THREADS,
+        preset=VIDEO_PRESET,
+        ffmpeg_params=[
+            "-crf",
+            VIDEO_CRF,
+            "-maxrate",
+            VIDEO_MAXRATE,
+            "-bufsize",
+            VIDEO_BUFSIZE,
+            "-movflags",
+            "+faststart",
+            "-pix_fmt",
+            "yuv420p",
+            "-profile:v",
+            "high",
+            "-level:v",
+            "4.2",
+        ],
+        logger=None,
+    )
 
 
 def ensure_dependencies() -> None:
@@ -124,14 +206,16 @@ def transcribe_clip_for_subtitles(clip: VideoFileClip, output_dir: Path, clip_in
 
 def download_video(url: str, destination_base: Path) -> Path:
     ydl_opts = {
-        "format": "best[ext=mp4]",
+        "format": DOWNLOAD_FORMAT,
         "outtmpl": str(destination_base.with_suffix(".%(ext)s")),
+        "merge_output_format": "mp4",
+        "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
-    return destination_base.with_suffix(".mp4")
+    return _resolve_downloaded_video_path(destination_base)
 
 
 def parse_gemini_response(text: str) -> dict:
@@ -196,7 +280,7 @@ def parse_gemini_responses(text: str) -> list[dict]:
     return normalized
 
 
-def create_output_dir(base_dir: str | Path = "outputs", job_id: str | None = None) -> tuple[str, Path]:
+def create_output_dir(base_dir: str | Path = OUTPUTS_DIR, job_id: str | None = None) -> tuple[str, Path]:
     job_id = job_id or uuid.uuid4().hex[:10]
     output_dir = Path(base_dir) / job_id
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -207,7 +291,7 @@ def create_short_from_url(
     video_url: str,
     api_key: str,
     output_filename: str = "short_con_subs.mp4",
-    base_dir: str | Path = "outputs",
+    base_dir: str | Path = OUTPUTS_DIR,
     job_id: str | None = None,
     progress_callback: ProgressCallback | None = None,
     subtitle_style: dict | None = None,
@@ -227,7 +311,7 @@ def create_short_from_url(
     clip_final = None
 
     try:
-        _emit(progress_callback, "downloading", "Downloading video from YouTube...")
+        _emit(progress_callback, "downloading", "Downloading the highest-quality source video and audio from YouTube...")
         video_path = download_video(video_url, temp_base)
 
         _emit(progress_callback, "transcribing", f"Fast transcribing full video with Whisper ({_get_whisper_model_candidates()[0]})...")
@@ -261,17 +345,9 @@ def create_short_from_url(
             _emit(progress_callback, "rendering", f"Rendering clip {index} of {len(clip_candidates)}...")
             clip = VideoFileClip(str(video_path)).subclipped(start, end)
 
-            width, height = clip.size
-            new_width = height * (9 / 16)
-            clip_vertical = clip.cropped(
-                x1=width / 2 - new_width / 2,
-                y1=0,
-                x2=width / 2 + new_width / 2,
-                y2=height,
-            )
-            clip_vertical = clip_vertical.resized(new_size=(OUTPUT_WIDTH, OUTPUT_HEIGHT))
+            clip_vertical = build_vertical_master_clip(clip)
             if clip.audio is not None:
-                clip_vertical = clip_vertical.with_audio(clip.audio.with_duration(clip.duration))
+                clip_vertical = clip_vertical.with_audio(clip.audio.with_duration(clip_vertical.duration))
 
             _emit(progress_callback, "rendering", f"Preparing subtitle timing for clip {index}...")
             clip_transcript = transcribe_clip_for_subtitles(clip, output_dir, index)
@@ -284,18 +360,7 @@ def create_short_from_url(
                 clip_title=clip_data.get("title"),
                 clip_reason=clip_data.get("reason"),
             )
-            clip_final.write_videofile(
-                str(output_path),
-                codec="libx264",
-                audio_codec="aac",
-                fps=max(24, round(clip.fps or 24)),
-                bitrate=VIDEO_BITRATE,
-                audio_bitrate=VIDEO_AUDIO_BITRATE,
-                threads=RENDER_THREADS,
-                preset="fast",
-                ffmpeg_params=["-crf", VIDEO_CRF, "-movflags", "+faststart", "-pix_fmt", "yuv420p", "-profile:v", "high"],
-                logger=None,
-            )
+            write_high_quality_video(clip_final, output_path)
 
             clips_output.append(
                 {
@@ -316,7 +381,7 @@ def create_short_from_url(
             clip.close()
             clip = None
 
-        _emit(progress_callback, "completed", f"{len(clips_output)} clips are ready to download.")
+        _emit(progress_callback, "completed", f"{len(clips_output)} high-quality clips are ready to download.")
         first_clip = clips_output[0]
         return {
             "jobId": job_id,
@@ -330,6 +395,7 @@ def create_short_from_url(
             "outputPath": first_clip["outputPath"],
             "transcriptPath": str(transcript_path),
             "outputDir": str(output_dir),
+            "renderProfile": RENDER_PROFILE_LABEL,
             "clips": clips_output,
             "clipCount": len(clips_output),
         }
