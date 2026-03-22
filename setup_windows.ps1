@@ -33,9 +33,9 @@ $ffmpegArchiveUrl = "https://www.gyan.dev/ffmpeg/builds/$ffmpegArchiveName"
 $ffmpegInstallRoot = Join-Path $stateDir "ffmpeg"
 $ffmpegCurrentDir = Join-Path $ffmpegInstallRoot "current"
 $ffmpegBinDir = Join-Path $ffmpegCurrentDir "bin"
-$pythonDepsStamp = Join-Path $stateDir "python-deps.stamp"
-$frontendDepsStamp = Join-Path $stateDir "frontend-deps.stamp"
-$frontendBuildStamp = Join-Path $stateDir "frontend-build.stamp"
+$pythonDepsStamp = Join-Path $stateDir "python-deps.state"
+$frontendDepsStamp = Join-Path $stateDir "frontend-deps.state"
+$frontendBuildStamp = Join-Path $stateDir "frontend-build.state"
 
 function Show-FailureAndExit($message) {
     Write-Host ""
@@ -413,40 +413,59 @@ function Ensure-StateDir {
     }
 }
 
-function Update-Stamp($stampPath) {
-    if (Test-Path $stampPath) {
-        (Get-Item $stampPath).LastWriteTimeUtc = [DateTime]::UtcNow
-        return
+function Get-StringHash($value) {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($value)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace("-", "")
     }
-
-    New-Item -ItemType File -Path $stampPath | Out-Null
+    finally {
+        $sha.Dispose()
+    }
 }
 
-function Test-Stale($stampPath, $paths) {
-    if (-not (Test-Path $stampPath)) {
-        return $true
+function Get-PathFingerprint($path) {
+    if (-not (Test-Path $path)) {
+        return "missing"
     }
 
-    $stampTime = (Get-Item $stampPath).LastWriteTimeUtc
-
-    foreach ($path in $paths) {
-        if (-not (Test-Path $path)) {
-            return $true
-        }
-
-        $item = Get-Item $path
-        if ($item.PSIsContainer) {
-            $newestChild = Get-ChildItem -Path $path -Recurse -File | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
-            if ($null -ne $newestChild -and $newestChild.LastWriteTimeUtc -gt $stampTime) {
-                return $true
-            }
-        }
-        elseif ($item.LastWriteTimeUtc -gt $stampTime) {
-            return $true
-        }
+    $item = Get-Item $path
+    if (-not $item.PSIsContainer) {
+        return "file:$((Get-FileHash -Algorithm SHA256 -Path $item.FullName).Hash)"
     }
 
-    return $false
+    $entries = Get-ChildItem -Path $item.FullName -Recurse -File | Sort-Object FullName | ForEach-Object {
+        $relativePath = [System.IO.Path]::GetRelativePath($root, $_.FullName).Replace("\", "/")
+        "$relativePath|$((Get-FileHash -Algorithm SHA256 -Path $_.FullName).Hash)"
+    }
+
+    return "dir:$(Get-StringHash ($entries -join "`n"))"
+}
+
+function Get-StateSignature($paths) {
+    $parts = foreach ($path in $paths) {
+        $resolvedPath = if ([System.IO.Path]::IsPathRooted($path)) { $path } else { Join-Path $root $path }
+        "$path=$(Get-PathFingerprint $resolvedPath)"
+    }
+
+    return Get-StringHash ($parts -join "`n")
+}
+
+function Read-StateValue($statePath) {
+    if (-not (Test-Path $statePath)) {
+        return $null
+    }
+
+    return (Get-Content -Path $statePath -Raw).Trim()
+}
+
+function Write-StateValue($statePath, $value) {
+    Set-Content -Path $statePath -Value $value -NoNewline
+}
+
+function Test-StateMatch($statePath, $expectedValue) {
+    $currentValue = Read-StateValue $statePath
+    return $null -ne $currentValue -and $currentValue -eq $expectedValue
 }
 
 function Invoke-CheckedCommand($command, $arguments, $failureMessage) {
@@ -468,6 +487,9 @@ function Invoke-Setup {
     Ensure-StateDir
     $pythonSpec = Ensure-Python
     $null = Ensure-Ffmpeg
+    $pythonDepsSignature = Get-StateSignature @("requirements.txt")
+    $frontendDepsSignature = Get-StateSignature @("frontend/package.json", "frontend/package-lock.json")
+    $frontendBuildSignature = Get-StateSignature @("frontend/src", "frontend/index.html", "frontend/package.json", "frontend/vite.config.ts")
 
     if ((Test-Path $venvDir) -and (-not (Test-UsableVenv))) {
         Write-Host "Existing virtual environment is invalid. Recreating it ..."
@@ -479,11 +501,10 @@ function Invoke-Setup {
         Invoke-CheckedCommand $pythonSpec.Command ($pythonSpec.Arguments + @("-m", "venv", ".venv")) "Creating the Python virtual environment failed."
     }
 
-    if (Test-Stale $pythonDepsStamp @((Join-Path $root "requirements.txt"), $venvPython)) {
+    if (-not (Test-StateMatch $pythonDepsStamp $pythonDepsSignature)) {
         Write-Host "Installing Python packages ..."
-        Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--upgrade", "pip") "Updating pip failed."
-        Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "-r", "requirements.txt") "Installing Python dependencies failed."
-        Update-Stamp $pythonDepsStamp
+        Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "-r", "requirements.txt") "Installing Python dependencies failed."
+        Write-StateValue $pythonDepsStamp $pythonDepsSignature
     }
     else {
         Write-Host "Python packages are already installed. Skipping reinstall."
@@ -500,22 +521,22 @@ function Invoke-Setup {
 
         $nodeCommand = Ensure-Node
 
-        if (Test-Stale $frontendDepsStamp @($frontendPackageJson, (Join-Path $frontendDir "package-lock.json"))) {
+        if (-not (Test-StateMatch $frontendDepsStamp $frontendDepsSignature)) {
             Write-Host "Installing frontend packages ..."
             Push-Location $frontendDir
             try {
-                Invoke-CheckedCommand $nodeCommand @("install") "Installing frontend packages failed."
+                Invoke-CheckedCommand $nodeCommand @("ci") "Installing frontend packages failed."
             }
             finally {
                 Pop-Location
             }
-            Update-Stamp $frontendDepsStamp
+            Write-StateValue $frontendDepsStamp $frontendDepsSignature
         }
         else {
             Write-Host "Frontend packages are already installed. Skipping npm install."
         }
 
-        if (Test-Stale $frontendBuildStamp @((Join-Path $frontendDir "src"), (Join-Path $frontendDir "index.html"), $frontendPackageJson, (Join-Path $frontendDir "vite.config.ts"))) {
+        if (-not (Test-StateMatch $frontendBuildStamp $frontendBuildSignature)) {
             Write-Host "Building frontend ..."
             Push-Location $frontendDir
             try {
@@ -524,7 +545,7 @@ function Invoke-Setup {
             finally {
                 Pop-Location
             }
-            Update-Stamp $frontendBuildStamp
+            Write-StateValue $frontendBuildStamp $frontendBuildSignature
         }
         else {
             Write-Host "Frontend build is up to date. Skipping build."

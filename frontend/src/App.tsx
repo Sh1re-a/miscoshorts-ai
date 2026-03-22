@@ -51,6 +51,9 @@ type JobPayload = {
   error?: string
   logs?: JobLog[]
   result?: JobResult
+  clipCount?: number
+  createdAt?: number
+  updatedAt?: number
 }
 
 type BootstrapPayload = {
@@ -112,6 +115,42 @@ function formatLogTime(timestamp: number) {
   }).format(new Date(timestamp * 1000))
 }
 
+function formatEta(seconds: number) {
+  if (seconds <= 45) {
+    return 'under 1 min'
+  }
+
+  const minutes = Math.ceil(seconds / 60)
+  if (minutes < 60) {
+    return `${minutes} min`
+  }
+
+  const hours = Math.floor(minutes / 60)
+  const remainingMinutes = minutes % 60
+  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`
+}
+
+function getEtaWindow(job: JobPayload, selectedClipCount: number, nowMs: number) {
+  const effectiveClipCount = job.result?.clipCount ?? job.clipCount ?? selectedClipCount
+  const stageStartedAt = (job.updatedAt ?? job.createdAt ?? nowMs / 1000) * 1000
+  const elapsedSeconds = Math.max(0, Math.round((nowMs - stageStartedAt) / 1000))
+
+  switch (job.status) {
+    case 'queued':
+      return [Math.max(0, 20 - elapsedSeconds), Math.max(0, 60 - elapsedSeconds)]
+    case 'downloading':
+      return [Math.max(0, 40 - elapsedSeconds), Math.max(0, 150 - elapsedSeconds)]
+    case 'transcribing':
+      return [Math.max(0, 150 - elapsedSeconds), Math.max(0, 540 - elapsedSeconds)]
+    case 'analyzing':
+      return [Math.max(0, 20 - elapsedSeconds), Math.max(0, 120 - elapsedSeconds)]
+    case 'rendering':
+      return [Math.max(0, 90 * effectiveClipCount - elapsedSeconds), Math.max(0, 240 * effectiveClipCount - elapsedSeconds)]
+    default:
+      return null
+  }
+}
+
 function App() {
   const [videoUrl, setVideoUrl] = useState('')
   const [apiKey, setApiKey] = useState(loadSavedApiKey)
@@ -123,6 +162,7 @@ function App() {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [apiKeyNotice, setApiKeyNotice] = useState(apiKey ? 'Saved locally in this browser.' : 'Not saved yet.')
   const [clipCount, setClipCount] = useState<ClipCountOption>(3)
+  const [nowMs, setNowMs] = useState(() => Date.now())
 
   useEffect(() => {
     let cancelled = false
@@ -180,6 +220,18 @@ function App() {
   }, [jobId, pollJob])
 
   useEffect(() => {
+    if (['idle', 'completed', 'failed'].includes(job.status)) {
+      return
+    }
+
+    const intervalId = window.setInterval(() => {
+      setNowMs(Date.now())
+    }, 1000)
+
+    return () => window.clearInterval(intervalId)
+  }, [job.status])
+
+  useEffect(() => {
     try {
       const trimmedKey = apiKey.trim()
       if (!trimmedKey) {
@@ -200,6 +252,8 @@ function App() {
   const hasAvailableApiKey = Boolean(apiKey.trim()) || hasConfiguredApiKey
   const canSubmit = Boolean(videoUrl.trim()) && hasAvailableApiKey && !isSubmitting && !isWorking
   const startButtonLabel = isSubmitting || isWorking ? 'Job running' : `Render ${clipCount} clip${clipCount > 1 ? 's' : ''}`
+  const etaWindow = useMemo(() => getEtaWindow(job, clipCount, nowMs), [job, clipCount, nowMs])
+  const etaLabel = etaWindow ? `${formatEta(etaWindow[0])} to ${formatEta(etaWindow[1])}` : null
 
   function clearSavedApiKey() {
     try {
@@ -378,6 +432,10 @@ function App() {
                   </div>
                 </div>
 
+                <div className="rounded-[24px] border border-sky-200 bg-sky-50 px-4 py-4 text-sm leading-6 text-sky-950">
+                  First launch can take longer while Windows prepares Python and FFmpeg. Later launches should usually reuse the same setup and open much faster.
+                </div>
+
                 <div className="space-y-3">
                   <Label>How many clips</Label>
                   <div className="grid gap-3 sm:grid-cols-2">
@@ -519,6 +577,12 @@ function App() {
                   </div>
                   <Progress value={progressByStatus[job.status]} />
                 </div>
+
+                {etaLabel ? (
+                  <div className="rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-950">
+                    Estimated time left: {etaLabel}
+                  </div>
+                ) : null}
 
                 <div className="grid gap-3 sm:grid-cols-2">
                   {Object.entries(statusTitles)
