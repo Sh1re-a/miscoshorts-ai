@@ -2,6 +2,8 @@ $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $frontendDir = Join-Path $root "frontend"
+$frontendDistDir = Join-Path $frontendDir "dist"
+$frontendEntry = Join-Path $frontendDistDir "index.html"
 $venvDir = Join-Path $root ".venv"
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
 $stateDir = Join-Path $root ".setup-state"
@@ -440,6 +442,10 @@ function Test-Stale($stampPath, $paths) {
     return $false
 }
 
+function Test-FrontendBuildReady {
+    return Test-Path $frontendEntry
+}
+
 function Invoke-Setup {
     Set-Location $root
 
@@ -447,7 +453,6 @@ function Invoke-Setup {
     Refresh-SessionPath
     Ensure-StateDir
     $pythonSpec = Ensure-Python
-    $null = Ensure-Node
     $null = Ensure-Ffmpeg
 
     if ((Test-Path $venvDir) -and (-not (Test-UsableVenv))) {
@@ -470,34 +475,50 @@ function Invoke-Setup {
         Write-Host "Python packages are already installed. Skipping reinstall."
     }
 
-    if (Test-Stale $frontendDepsStamp @((Join-Path $frontendDir "package.json"), (Join-Path $frontendDir "package-lock.json"))) {
-        Write-Host "Installing frontend packages ..."
-        Push-Location $frontendDir
-        try {
-            npm install
-        }
-        finally {
-            Pop-Location
-        }
-        Update-Stamp $frontendDepsStamp
+    if (Test-FrontendBuildReady) {
+        Write-Host "Prebuilt frontend found. Skipping Node.js setup and frontend build."
     }
     else {
-        Write-Host "Frontend packages are already installed. Skipping npm install."
-    }
+        $frontendPackageJson = Join-Path $frontendDir "package.json"
+        if (-not (Test-Path $frontendPackageJson)) {
+            throw "The prebuilt frontend is missing and frontend source files were not found. Re-extract the full release zip and try again."
+        }
 
-    if (Test-Stale $frontendBuildStamp @((Join-Path $frontendDir "src"), (Join-Path $frontendDir "index.html"), (Join-Path $frontendDir "package.json"), (Join-Path $frontendDir "vite.config.ts"))) {
-        Write-Host "Building frontend ..."
-        Push-Location $frontendDir
-        try {
-            npm run build
+        $nodeCommand = Ensure-Node
+
+        if (Test-Stale $frontendDepsStamp @($frontendPackageJson, (Join-Path $frontendDir "package-lock.json"))) {
+            Write-Host "Installing frontend packages ..."
+            Push-Location $frontendDir
+            try {
+                & $nodeCommand install
+            }
+            finally {
+                Pop-Location
+            }
+            Update-Stamp $frontendDepsStamp
         }
-        finally {
-            Pop-Location
+        else {
+            Write-Host "Frontend packages are already installed. Skipping npm install."
         }
-        Update-Stamp $frontendBuildStamp
-    }
-    else {
-        Write-Host "Frontend build is up to date. Skipping build."
+
+        if (Test-Stale $frontendBuildStamp @((Join-Path $frontendDir "src"), (Join-Path $frontendDir "index.html"), $frontendPackageJson, (Join-Path $frontendDir "vite.config.ts"))) {
+            Write-Host "Building frontend ..."
+            Push-Location $frontendDir
+            try {
+                & $nodeCommand run build
+            }
+            finally {
+                Pop-Location
+            }
+            Update-Stamp $frontendBuildStamp
+        }
+        else {
+            Write-Host "Frontend build is up to date. Skipping build."
+        }
+
+        if (-not (Test-FrontendBuildReady)) {
+            throw "Frontend build completed but frontend/dist/index.html is still missing."
+        }
     }
 
     Write-Host "Launching app ..."

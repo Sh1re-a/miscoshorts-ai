@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 import time
 import traceback
@@ -71,6 +72,16 @@ def healthcheck():
     return jsonify({"status": "ok"})
 
 
+@app.get("/api/bootstrap")
+def bootstrap():
+    return jsonify(
+        {
+            "hasConfiguredApiKey": bool((os.getenv("GEMINI_API_KEY") or "").strip()),
+            "frontendBuilt": FRONTEND_DIST_DIR.exists(),
+        }
+    )
+
+
 @app.post("/api/process")
 def process_video():
     payload = request.get_json(silent=True) or {}
@@ -82,8 +93,8 @@ def process_video():
 
     if not video_url:
         return jsonify({"error": "videoUrl is required"}), 400
-    if not api_key:
-        return jsonify({"error": "apiKey is required"}), 400
+    if not api_key and not (os.getenv("GEMINI_API_KEY") or "").strip():
+        return jsonify({"error": "Gemini API key is required. Paste it in the app or add GEMINI_API_KEY to .env."}), 400
 
     try:
         clip_count = max(1, min(5, int(clip_count)))

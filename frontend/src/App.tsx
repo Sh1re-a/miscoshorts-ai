@@ -53,6 +53,11 @@ type JobPayload = {
   result?: JobResult
 }
 
+type BootstrapPayload = {
+  hasConfiguredApiKey: boolean
+  frontendBuilt: boolean
+}
+
 type ClipCountOption = 1 | 3 | 5
 
 const progressByStatus: Record<JobStatus, number> = {
@@ -110,6 +115,7 @@ function formatLogTime(timestamp: number) {
 function App() {
   const [videoUrl, setVideoUrl] = useState('')
   const [apiKey, setApiKey] = useState(loadSavedApiKey)
+  const [hasConfiguredApiKey, setHasConfiguredApiKey] = useState(false)
   const [outputFilename, setOutputFilename] = useState('short_con_subs.mp4')
   const [jobId, setJobId] = useState<string | null>(null)
   const [job, setJob] = useState<JobPayload>({ status: 'idle' })
@@ -117,6 +123,32 @@ function App() {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [apiKeyNotice, setApiKeyNotice] = useState(apiKey ? 'Saved locally in this browser.' : 'Not saved yet.')
   const [clipCount, setClipCount] = useState<ClipCountOption>(3)
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadBootstrap() {
+      try {
+        const response = await fetch('/api/bootstrap')
+        if (!response.ok) {
+          return
+        }
+
+        const payload = (await response.json()) as BootstrapPayload
+        if (!cancelled) {
+          setHasConfiguredApiKey(payload.hasConfiguredApiKey)
+        }
+      } catch {
+        // Keep the app usable even if the bootstrap request fails.
+      }
+    }
+
+    void loadBootstrap()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const pollJob = useEffectEvent(async () => {
     if (!jobId) {
@@ -165,6 +197,9 @@ function App() {
 
   const isWorking = !['idle', 'completed', 'failed'].includes(job.status)
   const recentLogs = useMemo(() => (job.logs ?? []).slice(-8).reverse(), [job.logs])
+  const hasAvailableApiKey = Boolean(apiKey.trim()) || hasConfiguredApiKey
+  const canSubmit = Boolean(videoUrl.trim()) && hasAvailableApiKey && !isSubmitting && !isWorking
+  const startButtonLabel = isSubmitting || isWorking ? 'Job running' : `Render ${clipCount} clip${clipCount > 1 ? 's' : ''}`
 
   function clearSavedApiKey() {
     try {
@@ -290,11 +325,14 @@ function App() {
                     type="password"
                     value={apiKey}
                     onChange={(event) => setApiKey(event.target.value)}
-                    placeholder="Paste your Gemini key"
+                    placeholder={hasConfiguredApiKey ? 'Optional if GEMINI_API_KEY is already set in .env' : 'Paste your Gemini key'}
                     autoComplete="off"
-                    required
                   />
-                  <p className="text-xs text-slate-500">{apiKeyNotice}</p>
+                  <p className="text-xs text-slate-500">
+                    {hasConfiguredApiKey
+                      ? 'A Gemini key is already configured on this machine. You can still paste another key here for this browser session.'
+                      : apiKeyNotice}
+                  </p>
                 </div>
 
                 <div className="space-y-2">
@@ -320,6 +358,23 @@ function App() {
                     <Badge variant="outline" className="border-stone-300 bg-white text-slate-700">
                       Fixed
                     </Badge>
+                  </div>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-[22px] border border-stone-200 bg-white px-4 py-4">
+                    <p className="app-kicker text-[0.65rem] text-slate-500">Before you render</p>
+                    <p className="mt-2 text-sm font-semibold text-slate-900">Keep the launcher window open</p>
+                    <p className="mt-2 text-sm leading-6 text-slate-600">
+                      The browser is only the interface. The launcher window keeps the local server and render process alive.
+                    </p>
+                  </div>
+                  <div className="rounded-[22px] border border-stone-200 bg-white px-4 py-4">
+                    <p className="app-kicker text-[0.65rem] text-slate-500">After render</p>
+                    <p className="mt-2 text-sm font-semibold text-slate-900">Download here, files also save locally</p>
+                    <p className="mt-2 text-sm leading-6 text-slate-600">
+                      Every finished render appears in the downloads panel and is also stored in a new folder inside outputs.
+                    </p>
                   </div>
                 </div>
 
@@ -351,17 +406,21 @@ function App() {
                   The render now uses one refined subtitle setup by default. You preview the exact direction on the right instead of choosing between multiple weaker presets.
                 </div>
 
-                <Button className="w-full bg-amber-600 text-white hover:bg-amber-700" type="submit" disabled={isSubmitting || isWorking}>
+                <Button className="w-full bg-amber-600 text-white hover:bg-amber-700" type="submit" disabled={!canSubmit}>
                   {isSubmitting || isWorking ? (
                     <>
                       <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> Job running
                     </>
                   ) : (
                     <>
-                      <PlaySquare className="mr-2 h-4 w-4" /> Start render
+                      <PlaySquare className="mr-2 h-4 w-4" /> {startButtonLabel}
                     </>
                   )}
                 </Button>
+
+                {!hasAvailableApiKey ? (
+                  <p className="text-sm text-amber-700">Add a Gemini key here or place `GEMINI_API_KEY` in `.env` before starting the render.</p>
+                ) : null}
 
                 {requestError ? <p className="text-sm text-rose-600">{requestError}</p> : null}
               </form>
@@ -513,6 +572,30 @@ function App() {
 
             <Card className="border-stone-200/80 bg-white/95 shadow-[0_20px_55px_rgba(62,43,24,0.08)] backdrop-blur-sm">
               <CardHeader>
+                <CardTitle className="app-heading text-xl text-slate-950">Customer flow</CardTitle>
+                <CardDescription className="text-slate-600">
+                  The app is now structured around one clean path from input to finished files.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {[
+                    'Paste the YouTube link.',
+                    'Use the saved Gemini key or add one now.',
+                    'Render 1 or 3 clips with the fixed subtitle style.',
+                    'Download the clips and transcript when the job completes.',
+                  ].map((step, index) => (
+                    <div key={step} className="rounded-[22px] border border-stone-200 bg-stone-50 px-4 py-4">
+                      <p className="app-kicker text-[0.65rem] text-slate-500">Step {index + 1}</p>
+                      <p className="mt-2 text-sm font-semibold leading-6 text-slate-900">{step}</p>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="border-stone-200/80 bg-white/95 shadow-[0_20px_55px_rgba(62,43,24,0.08)] backdrop-blur-sm">
+              <CardHeader>
                 <CardTitle className="app-heading text-xl text-slate-950">Downloads</CardTitle>
                 <CardDescription className="text-slate-600">
                   When the render finishes, the files appear here.
@@ -555,8 +638,11 @@ function App() {
                     </Button>
                   </>
                 ) : (
-                  <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-5 text-sm text-slate-500">
-                    Start a render to unlock downloads here.
+                  <div className="space-y-3 rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-5 text-sm text-slate-600">
+                    <p className="font-medium text-slate-900">What you get after each run</p>
+                    <p>- One or three finished vertical clips ready to download</p>
+                    <p>- A full transcript file for reference</p>
+                    <p>- A saved local folder inside outputs for the exact job</p>
                   </div>
                 )}
               </CardContent>

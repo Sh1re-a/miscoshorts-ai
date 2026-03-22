@@ -13,7 +13,23 @@ If you are not technical, use the app launch file and nothing else:
 
 That is the main way to run this project.
 
+## Recommended Customer Flow
+
+If someone is testing this from GitHub, the clean path is:
+
+1. Click `Code` on GitHub and choose `Download ZIP`
+2. Extract the full zip to a normal folder
+3. Open the extracted project folder
+4. Double-click `launch_app.bat` on Windows or `launch_app.command` on macOS
+5. Keep the launcher window open while the app runs
+6. Paste a YouTube URL, add a Gemini API key if needed, and start the render
+7. Download the finished clips and transcript from the browser
+
+The browser is just the interface. The launcher window is what keeps the local app alive.
+
 On Windows, the launcher can also handle first-time setup for you. It installs missing dependencies, prepares the app, and opens it in the browser. Later launches are faster and reuse the existing setup.
+
+If the folder already contains `frontend/dist`, the launcher uses that built app directly and skips Node.js completely.
 
 If you are sending this to a friend, send the full project folder, not just the launcher file.
 
@@ -50,12 +66,16 @@ The local app then:
 5. renders subtitles and exports the final MP4
 6. lets you download both the video and the transcript from the browser
 
+If `GEMINI_API_KEY` already exists in `.env`, the browser app can use that automatically. The user does not have to paste the key every time.
+
 ## Requirements
 
 - Python 3.12+
 - Node.js 20+
 - FFmpeg installed and available in `PATH`
 - A Gemini API key
+
+For packaged Windows releases that already include `frontend/dist`, Node.js is not required for the end user.
 
 ## Developer Setup
 
@@ -125,11 +145,10 @@ If you want the non-technical option instead of typing in the terminal:
 On Windows, `launch_app.bat` now does more than just start the app:
 
 - installs Python if missing
-- installs Node.js if missing
 - installs FFmpeg if missing
 - creates a local virtual environment
 - installs Python dependencies
-- builds the frontend
+- builds the frontend only when no prebuilt frontend is included
 - opens the local app in the browser
 
 On the first run it sets everything up. On later runs it reuses the existing setup and skips reinstalling or rebuilding unless something changed.
@@ -231,7 +250,7 @@ Typical artifacts:
 If the Windows launcher says Python could not be downloaded or still cannot find Python after install:
 
 1. run `launch_app.bat` again from the project folder
-2. the launcher now checks Python, Node.js, and FFmpeg automatically
+2. the launcher now checks Python, Node.js, and FFmpeg automatically when they are needed
 3. if `winget` is blocked or missing, it falls back to direct downloads for Python, Node.js, and FFmpeg
 4. if it still fails, leave the window open and read the exact error message shown there
 
@@ -303,6 +322,5 @@ miscoshorts-ai/
 ## Roadmap
 
 - Better job history in the browser UI
-- One-click packaging for non-technical users
 - More control over clip selection before render
 - Cleaner GitHub release workflow
