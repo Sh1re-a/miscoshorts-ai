@@ -8,11 +8,10 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
-from pathlib import Path
+
+from app.paths import FRONTEND_DIR, PROJECT_ROOT
 
 
-ROOT_DIR = Path(__file__).resolve().parent
-FRONTEND_DIR = ROOT_DIR / "frontend"
 BACKEND_HEALTH_URL = "http://127.0.0.1:5001/api/health"
 
 
@@ -86,8 +85,8 @@ def main() -> None:
     else:
         print("Starting local backend on http://127.0.0.1:5001 ...")
         backend_process = subprocess.Popen(
-            [sys.executable, "server.py"],
-            cwd=ROOT_DIR,
+            [sys.executable, "-m", "app.server"],
+            cwd=PROJECT_ROOT,
         )
 
     frontend_process = None

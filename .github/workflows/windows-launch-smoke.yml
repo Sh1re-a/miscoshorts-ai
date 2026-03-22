@@ -31,7 +31,7 @@ jobs:
       - name: Start local app
         shell: pwsh
         run: |
-          $process = Start-Process -FilePath ".\.venv\Scripts\python.exe" -ArgumentList "app_launcher.py" -PassThru
+          $process = Start-Process -FilePath ".\.miscoshorts\runtime\venv\Scripts\python.exe" -ArgumentList "-m", "app.app_launcher" -PassThru
           "APP_PID=$($process.Id)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Wait for health endpoint
@@ -73,5 +73,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-setup-log
-          path: .setup-state/windows-setup.log
+          path: .miscoshorts/setup/windows-setup.log
           if-no-files-found: ignore

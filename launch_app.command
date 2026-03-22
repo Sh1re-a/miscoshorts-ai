@@ -2,7 +2,7 @@
 
 cd "$(dirname "$0")" || exit 1
 
-python3 start_local.py
+python3 -m app.start_local
 status=$?
 
 if [[ $status -ne 0 ]]; then

@@ -2,7 +2,9 @@ import google.generativeai as genai
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+from app.paths import ENV_FILE
+
+load_dotenv(dotenv_path=ENV_FILE)
 
 
 def get_gemini_api_key(api_key=None):

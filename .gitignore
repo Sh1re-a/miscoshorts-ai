@@ -125,6 +125,7 @@ checkpoints/
 # Cache directories
 .cache/
 cache/
+.miscoshorts/
 .setup-state/
 
 # Node / frontend

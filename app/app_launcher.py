@@ -6,10 +6,10 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
-from pathlib import Path
+
+from app.paths import PROJECT_ROOT
 
 
-ROOT_DIR = Path(__file__).resolve().parent
 APP_URL = "http://127.0.0.1:5001"
 HEALTH_URL = f"{APP_URL}/api/health"
 
@@ -55,7 +55,7 @@ def main() -> None:
         print(f"A local app is already available on {APP_URL}. Reusing it.")
     else:
         print(f"Starting local app on {APP_URL} ...")
-        backend_process = subprocess.Popen([sys.executable, "server.py"], cwd=ROOT_DIR)
+        backend_process = subprocess.Popen([sys.executable, "-m", "app.server"], cwd=PROJECT_ROOT)
         wait_for_url(HEALTH_URL, timeout=20, process=backend_process, name="local app")
 
     print("Opening browser...")

@@ -6,15 +6,19 @@ param(
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$appDir = Join-Path $root "app"
 $frontendDir = Join-Path $root "frontend"
 $frontendDistDir = Join-Path $frontendDir "dist"
 $frontendEntry = Join-Path $frontendDistDir "index.html"
-$venvDir = Join-Path $root ".venv"
+$internalDir = Join-Path $root ".miscoshorts"
+$runtimeDir = Join-Path $internalDir "runtime"
+$setupDir = Join-Path $internalDir "setup"
+$venvDir = Join-Path $runtimeDir "venv"
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
-$stateDir = Join-Path $root ".setup-state"
+$stateDir = $setupDir
 $installerDir = Join-Path $stateDir "installers"
 $logPath = Join-Path $stateDir "windows-setup.log"
-$pythonInstallRoot = Join-Path $stateDir "python"
+$pythonInstallRoot = Join-Path $runtimeDir "python"
 $pythonCurrentDir = Join-Path $pythonInstallRoot "current"
 $pythonManagedExe = Join-Path $pythonCurrentDir "python.exe"
 $pythonInstallerVersion = "3.12.10"
@@ -30,12 +34,14 @@ $nodeInstallerUrl = "https://nodejs.org/dist/v$nodeInstallerVersion/$nodeInstall
 $ffmpegArchiveName = "ffmpeg-release-essentials.zip"
 $ffmpegArchivePath = Join-Path $installerDir $ffmpegArchiveName
 $ffmpegArchiveUrl = "https://www.gyan.dev/ffmpeg/builds/$ffmpegArchiveName"
-$ffmpegInstallRoot = Join-Path $stateDir "ffmpeg"
+$ffmpegInstallRoot = Join-Path $runtimeDir "ffmpeg"
 $ffmpegCurrentDir = Join-Path $ffmpegInstallRoot "current"
 $ffmpegBinDir = Join-Path $ffmpegCurrentDir "bin"
 $pythonDepsStamp = Join-Path $stateDir "python-deps.state"
 $frontendDepsStamp = Join-Path $stateDir "frontend-deps.state"
 $frontendBuildStamp = Join-Path $stateDir "frontend-build.state"
+$script:SetupStep = 0
+$script:SetupStartedAt = Get-Date
 
 function Show-FailureAndExit($message) {
     Write-Host ""
@@ -47,6 +53,61 @@ function Show-FailureAndExit($message) {
         [void](Read-Host "Press Enter to close this window")
     }
     exit 1
+}
+
+function Get-SetupStepCount {
+    if ($SkipLaunch) {
+        return 4
+    }
+
+    return 5
+}
+
+function Write-SetupBanner {
+    Write-Host ""
+    Write-Host "Miscoshorts AI" -ForegroundColor Cyan
+    Write-Host "Local setup and launch" -ForegroundColor DarkCyan
+    Write-Host ""
+    Write-Host "This window keeps the local app alive while it is running." -ForegroundColor DarkGray
+}
+
+function Start-SetupStep($title) {
+    $script:SetupStep += 1
+    Write-Host ""
+    Write-Host "[$($script:SetupStep)/$(Get-SetupStepCount)] $title" -ForegroundColor Cyan
+}
+
+function Write-SetupInfo($message) {
+    Write-Host "  $message" -ForegroundColor Gray
+}
+
+function Write-SetupReuse($message) {
+    Write-Host "  Reusing: $message" -ForegroundColor DarkGreen
+}
+
+function Write-SetupAction($message) {
+    Write-Host "  $message" -ForegroundColor Yellow
+}
+
+function Write-SetupDone($message) {
+    Write-Host "  Done: $message" -ForegroundColor Green
+}
+
+function Write-SetupSummary($message) {
+    Write-Host ""
+    Write-Host $message -ForegroundColor Green
+}
+
+function Hide-InternalDirectory($path) {
+    if (-not (Test-Path $path)) {
+        return
+    }
+
+    try {
+        attrib +h $path 2>$null | Out-Null
+    }
+    catch {
+    }
 }
 
 function Refresh-SessionPath {
@@ -154,7 +215,7 @@ function Invoke-Python($pythonSpec, $arguments) {
 }
 
 function Invoke-Download($url, $destinationPath, $label) {
-    Write-Host "Downloading $label ..."
+    Write-SetupAction "Downloading $label ..."
     Invoke-WebRequest -Uri $url -OutFile $destinationPath
 }
 
@@ -163,7 +224,7 @@ function Install-WithWinget($packageId, $label) {
         throw "winget was not found. Install App Installer from Microsoft Store first, then run launch_app.bat again."
     }
 
-    Write-Host "Installing $label ..."
+    Write-SetupAction "Installing $label ..."
     winget install --id $packageId --accept-package-agreements --accept-source-agreements --silent
     Refresh-SessionPath
 }
@@ -181,7 +242,7 @@ function Install-PythonDirectly {
 
     Invoke-Download $pythonInstallerUrl $pythonInstallerPath "Python installer from python.org"
 
-    Write-Host "Running Python installer ..."
+    Write-SetupAction "Running Python installer ..."
     $installerArgs = @(
         "/quiet",
         "InstallAllUsers=0",
@@ -232,7 +293,7 @@ function Install-NodeDirectly {
     Ensure-StateDir
     Invoke-Download $nodeInstallerUrl $nodeInstallerPath "Node.js installer from nodejs.org"
 
-    Write-Host "Running Node.js installer ..."
+    Write-SetupAction "Running Node.js installer ..."
     $process = Start-Process -FilePath "msiexec.exe" -ArgumentList @("/i", $nodeInstallerPath, "/qn", "/norestart") -Wait -PassThru
     if ($process.ExitCode -ne 0) {
         throw "Node.js installer exited with code $($process.ExitCode)."
@@ -275,7 +336,7 @@ function Install-FfmpegDirectly {
         Remove-Item $extractDir -Recurse -Force
     }
 
-    Write-Host "Extracting FFmpeg ..."
+    Write-SetupAction "Extracting FFmpeg ..."
     Expand-Archive -Path $ffmpegArchivePath -DestinationPath $extractDir -Force
 
     $packageDir = Get-ChildItem -Path $extractDir -Directory | Where-Object { Test-Path (Join-Path $_.FullName "bin\ffmpeg.exe") } | Select-Object -First 1
@@ -400,9 +461,13 @@ function Ensure-Ffmpeg {
 }
 
 function Ensure-StateDir {
-    if (-not (Test-Path $stateDir)) {
-        New-Item -ItemType Directory -Path $stateDir | Out-Null
+    foreach ($directory in @($internalDir, $runtimeDir, $setupDir, $installerDir)) {
+        if (-not (Test-Path $directory)) {
+            New-Item -ItemType Directory -Path $directory | Out-Null
+        }
     }
+
+    Hide-InternalDirectory $internalDir
 
     if (-not (Test-Path $installerDir)) {
         New-Item -ItemType Directory -Path $installerDir | Out-Null
@@ -482,36 +547,48 @@ function Test-FrontendBuildReady {
 function Invoke-Setup {
     Set-Location $root
 
-    Write-Host "Preparing Miscoshorts AI for Windows..."
+    Write-SetupBanner
     Refresh-SessionPath
     Ensure-StateDir
+
+    Start-SetupStep "Checking local tools"
     $pythonSpec = Ensure-Python
+    Write-SetupDone "Python is ready."
     $null = Ensure-Ffmpeg
-    $pythonDepsSignature = Get-StateSignature @("requirements.txt")
+    Write-SetupDone "FFmpeg is ready."
+    $pythonDepsSignature = Get-StateSignature @("requirements.txt", "app")
     $frontendDepsSignature = Get-StateSignature @("frontend/package.json", "frontend/package-lock.json")
     $frontendBuildSignature = Get-StateSignature @("frontend/src", "frontend/index.html", "frontend/package.json", "frontend/vite.config.ts")
 
+    Start-SetupStep "Preparing Python environment"
     if ((Test-Path $venvDir) -and (-not (Test-UsableVenv))) {
-        Write-Host "Existing virtual environment is invalid. Recreating it ..."
+        Write-SetupAction "Existing Python environment is invalid. Recreating it ..."
         Remove-Item $venvDir -Recurse -Force
     }
 
     if (-not (Test-UsableVenv)) {
-        Write-Host "Creating virtual environment ..."
-        Invoke-CheckedCommand $pythonSpec.Command ($pythonSpec.Arguments + @("-m", "venv", ".venv")) "Creating the Python virtual environment failed."
+        Write-SetupAction "Creating local Python environment ..."
+        Invoke-CheckedCommand $pythonSpec.Command ($pythonSpec.Arguments + @("-m", "venv", $venvDir)) "Creating the Python virtual environment failed."
+        Write-SetupDone "Local Python environment created."
+    }
+    else {
+        Write-SetupReuse "existing local Python environment"
     }
 
     if (-not (Test-StateMatch $pythonDepsStamp $pythonDepsSignature)) {
-        Write-Host "Installing Python packages ..."
+        Write-SetupAction "Installing Python packages ..."
         Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "-r", "requirements.txt") "Installing Python dependencies failed."
         Write-StateValue $pythonDepsStamp $pythonDepsSignature
+        Write-SetupDone "Python packages are up to date."
     }
     else {
-        Write-Host "Python packages are already installed. Skipping reinstall."
+        Write-SetupReuse "Python packages already installed"
     }
 
+    Start-SetupStep "Preparing app interface"
     if (Test-FrontendBuildReady) {
-        Write-Host "Prebuilt frontend found. Skipping Node.js setup and frontend build."
+        Write-SetupReuse "prebuilt frontend already included"
+        Write-SetupInfo "The app will open using the bundled interface with no extra frontend setup."
     }
     else {
         $frontendPackageJson = Join-Path $frontendDir "package.json"
@@ -519,10 +596,12 @@ function Invoke-Setup {
             throw "The frontend source files were not found. Download the full GitHub ZIP again, extract it completely, and run launch_app.bat from the extracted project folder."
         }
 
+        Write-SetupInfo "A prebuilt frontend was not found, so Windows will prepare the browser app locally."
         $nodeCommand = Ensure-Node
+        Write-SetupDone "Node.js is ready."
 
         if (-not (Test-StateMatch $frontendDepsStamp $frontendDepsSignature)) {
-            Write-Host "Installing frontend packages ..."
+            Write-SetupAction "Installing frontend packages ..."
             Push-Location $frontendDir
             try {
                 Invoke-CheckedCommand $nodeCommand @("ci") "Installing frontend packages failed."
@@ -531,13 +610,14 @@ function Invoke-Setup {
                 Pop-Location
             }
             Write-StateValue $frontendDepsStamp $frontendDepsSignature
+            Write-SetupDone "Frontend packages are up to date."
         }
         else {
-            Write-Host "Frontend packages are already installed. Skipping npm install."
+            Write-SetupReuse "frontend packages already installed"
         }
 
         if (-not (Test-StateMatch $frontendBuildStamp $frontendBuildSignature)) {
-            Write-Host "Building frontend ..."
+            Write-SetupAction "Building frontend ..."
             Push-Location $frontendDir
             try {
                 Invoke-CheckedCommand $nodeCommand @("run", "build") "Building the frontend failed. Check the error output above and the setup log for the real npm or TypeScript error."
@@ -546,9 +626,10 @@ function Invoke-Setup {
                 Pop-Location
             }
             Write-StateValue $frontendBuildStamp $frontendBuildSignature
+            Write-SetupDone "Frontend build is ready."
         }
         else {
-            Write-Host "Frontend build is up to date. Skipping build."
+            Write-SetupReuse "frontend build already up to date"
         }
 
         if (-not (Test-FrontendBuildReady)) {
@@ -556,13 +637,20 @@ function Invoke-Setup {
         }
     }
 
+    Start-SetupStep "Final checks"
+    $elapsed = New-TimeSpan -Start $script:SetupStartedAt -End (Get-Date)
+    Write-SetupDone "Local setup is complete."
+    Write-SetupInfo "Internal setup files are stored in .miscoshorts so the project folder stays clean."
+    Write-SetupSummary "Setup finished in $([math]::Max(1, [int][math]::Round($elapsed.TotalSeconds))) seconds."
+
     if ($SkipLaunch) {
-        Write-Host "Skipping app launch because -SkipLaunch was requested."
+        Write-SetupSummary "Skipping app launch because -SkipLaunch was requested."
         return
     }
 
-    Write-Host "Launching app ..."
-    Invoke-CheckedCommand $venvPython @("app_launcher.py") "The local app failed to start."
+    Start-SetupStep "Starting app"
+    Write-SetupInfo "Opening the local app in your browser. Keep this window open while the app runs."
+    Invoke-CheckedCommand $venvPython @("-m", "app.app_launcher") "The local app failed to start."
 }
 
 try {

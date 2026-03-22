@@ -5,15 +5,12 @@ import threading
 import time
 import traceback
 import uuid
-from pathlib import Path
 
 from flask import Flask, jsonify, request, send_file, send_from_directory
 
-from shorts_service import create_short_from_url
+from app.paths import FRONTEND_DIST_DIR
+from app.shorts_service import create_short_from_url
 
-
-ROOT_DIR = Path(__file__).resolve().parent
-FRONTEND_DIST_DIR = ROOT_DIR / "frontend" / "dist"
 
 app = Flask(__name__, static_folder=str(FRONTEND_DIST_DIR), static_url_path="/")
 jobs: dict[str, dict] = {}
