@@ -29,6 +29,8 @@ The browser is just the interface. The launcher window is what keeps the local a
 
 On Windows, the launcher can also handle first-time setup for you. It installs missing dependencies, prepares the app, and opens it in the browser. Later launches are faster and reuse the existing setup.
 
+The launcher stores internal Windows runtime files inside `.miscoshorts/` so the main project folder stays cleaner.
+
 If the folder already contains `frontend/dist`, the launcher uses that built app directly and skips Node.js completely.
 
 If you are sending this to a friend, send the full project folder, not just the launcher file.
@@ -41,10 +43,11 @@ Big thanks to the original creator for the idea, codebase foundation, and tutori
 
 - Downloads a YouTube video with `yt-dlp`
 - Transcribes the audio with `openai-whisper`
-- Uses Gemini to select the strongest short-form moment
-- Crops the video to 9:16 format
+- Uses Gemini to select the strongest short-form moments
+- Can generate up to 5 export-ready clips from one source video
+- Reframes the video into a cleaner 9:16 master with centered vertical composition
 - Adds subtitles automatically
-- Exports a ready-to-post `.mp4`
+- Exports a Studio HQ `1080x1920` `.mp4` with stronger H.264 and AAC settings
 - Offers both terminal mode and a local browser UI
 
 ## Browser Mode
@@ -55,18 +58,19 @@ You paste:
 
 - a YouTube link
 - a Gemini API key
-- an optional output filename
 
 The local app then:
 
 1. sends the request to a Python backend running on your machine
-2. downloads the source video
+2. downloads the highest-quality source video and audio it can get from YouTube
 3. transcribes it with Whisper
-4. asks Gemini for the best short clip
-5. renders subtitles and exports the final MP4
+4. asks Gemini for the strongest 3 Shorts moments
+5. renders dynamic subtitles and exports high-quality vertical MP4 files
 6. lets you download both the video and the transcript from the browser
 
 If `GEMINI_API_KEY` already exists in `.env`, the browser app can use that automatically. The user does not have to paste the key every time.
+
+The current browser flow is intentionally simplified: it runs the default 3-clip Shorts workflow and exports them with the `Studio HQ 1080x1920 MP4` profile.
 
 ## Requirements
 
@@ -128,11 +132,11 @@ choco install ffmpeg
 A terminal-based local start is also available:
 
 ```bash
-python3 start_local.py
+python3 -m app.start_local
 ```
 
 ```powershell
-py start_local.py
+py -m app.start_local
 ```
 
 That script starts the backend, starts the React frontend, and opens the browser automatically.
@@ -160,11 +164,11 @@ If you prefer to start everything manually:
 Start the backend:
 
 ```bash
-python3 server.py
+python3 -m app.server
 ```
 
 ```powershell
-py server.py
+py -m app.server
 ```
 
 Start the frontend in a second terminal:
@@ -188,7 +192,7 @@ If you build the frontend first, the Python server can serve the finished browse
 cd frontend
 npm run build
 cd ..
-python3 server.py
+python3 -m app.server
 ```
 
 Then open:
@@ -202,11 +206,11 @@ http://127.0.0.1:5001
 The original terminal flow still exists if you prefer it.
 
 ```bash
-python3 cli.py
+python3 -m app.cli
 ```
 
 ```powershell
-py cli.py
+py -m app.cli
 ```
 
 ## Configuration
@@ -257,7 +261,7 @@ If the Windows launcher says Python could not be downloaded or still cannot find
 Important:
 
 - the launcher should keep the window open on failure now
-- a full setup log is written to `.setup-state/windows-setup.log`
+- a full setup log is written to `.miscoshorts/setup/windows-setup.log`
 - send the full error text from the launcher window if it still stops
 
 ### Missing FFmpeg
@@ -289,7 +293,7 @@ pip install openai-whisper
 
 ### Font Errors
 
-If subtitle rendering fails because of fonts, the app already tries several fallbacks, especially for Windows. If needed, change the font list in `subtitles.py`.
+If subtitle rendering fails because of fonts, the app already tries several fallbacks, especially for Windows. If needed, change the font list in `app/subtitles.py`.
 
 The current subtitle renderer now prefers higher-quality system fonts first, uses a narrower caption width, and places subtitles lower in the frame for a cleaner Shorts look.
 
@@ -303,21 +307,27 @@ The current subtitle renderer now prefers higher-quality system fonts first, use
 
 ```text
 miscoshorts-ai/
+├── app/
+│   ├── __init__.py
+│   ├── app_launcher.py
+│   ├── cli.py
+│   ├── gemini_analyzer.py
+│   ├── paths.py
+│   ├── server.py
+│   ├── shorts_service.py
+│   ├── start_local.py
+│   └── subtitles.py
 ├── frontend/
-├── cli.py
-├── gemini_analyzer.py
-├── shorts_service.py
-├── server.py
-├── app_launcher.py
-├── start_local.py
+├── outputs/
 ├── setup_windows.ps1
 ├── launch_app.command
 ├── launch_app.bat
-├── subtitles.py
 ├── requirements.txt
 ├── .env.example
 └── README.md
 ```
+
+For normal users, `launch_app.command` and `launch_app.bat` are the only entry points they should need. The backend implementation now lives inside `app/`, and Windows launcher-managed runtime files live in `.miscoshorts/`.
 
 ## Roadmap
 

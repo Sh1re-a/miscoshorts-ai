@@ -6,25 +6,25 @@
 
 @layer base {
   :root {
-    --background: 42 47% 96%;
+    --background: 206 100% 98%;
     --foreground: 222 39% 11%;
     --card: 0 0% 100%;
     --card-foreground: 222 39% 11%;
     --popover: 0 0% 100%;
     --popover-foreground: 222 39% 11%;
-    --primary: 25 91% 55%;
+    --primary: 203 82% 58%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 160 34% 92%;
-    --secondary-foreground: 165 26% 24%;
-    --muted: 38 31% 92%;
+    --secondary: 205 71% 94%;
+    --secondary-foreground: 210 45% 30%;
+    --muted: 207 67% 95%;
     --muted-foreground: 220 12% 42%;
-    --accent: 168 40% 50%;
+    --accent: 199 89% 48%;
     --accent-foreground: 0 0% 100%;
     --destructive: 0 76% 56%;
     --destructive-foreground: 0 0% 98%;
-    --border: 36 34% 84%;
-    --input: 36 34% 84%;
-    --ring: 25 91% 55%;
+    --border: 206 54% 88%;
+    --input: 206 54% 88%;
+    --ring: 203 82% 58%;
     --radius: 1.25rem;
   }
 
@@ -79,32 +79,30 @@
 @layer utilities {
   .bg-ink {
     background:
-      radial-gradient(circle at top left, rgba(247, 184, 120, 0.32), transparent 28%),
-      radial-gradient(circle at bottom right, rgba(144, 210, 193, 0.26), transparent 24%),
-      #fcfaf5;
+      radial-gradient(circle at top, rgba(164, 214, 255, 0.38), transparent 30%),
+      linear-gradient(180deg, #f8fbff 0%, #eef6ff 50%, #f8fbff 100%);
   }
 
   .bg-night {
-    background-color: rgba(255, 255, 255, 0.82);
+    background-color: rgba(255, 255, 255, 0.9);
   }
 
   .bg-porcelain {
     background:
-      radial-gradient(circle at top left, rgba(248, 194, 129, 0.22), transparent 30%),
-      radial-gradient(circle at 85% 15%, rgba(151, 223, 203, 0.2), transparent 22%),
-      linear-gradient(180deg, #fffdf8 0%, #f9f4eb 100%);
+      radial-gradient(circle at top left, rgba(177, 221, 255, 0.26), transparent 30%),
+      linear-gradient(180deg, #fafdff 0%, #edf6ff 100%);
   }
 
   .text-sand {
-    color: #d97706;
+    color: #0284c7;
   }
 
   .border-sand\/60 {
-    border-color: rgba(217, 119, 6, 0.6);
+    border-color: rgba(14, 165, 233, 0.45);
   }
 
   .bg-sand\/10 {
-    background-color: rgba(251, 191, 36, 0.12);
+    background-color: rgba(14, 165, 233, 0.1);
   }
 }
 

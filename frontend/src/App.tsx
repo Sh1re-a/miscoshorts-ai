@@ -1,6 +1,6 @@
 import { useEffect, useEffectEvent, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
-import { CheckCircle2, Download, LoaderCircle, PlaySquare } from 'lucide-react'
+import { CheckCircle2, Download, LoaderCircle, PlaySquare, RotateCcw } from 'lucide-react'
 
 import { Badge } from './components/ui/badge'
 import { Button } from './components/ui/button'
@@ -34,6 +34,7 @@ type JobResult = {
   outputFilename: string
   outputDir: string
   clipCount: number
+  renderProfile?: string
   clips: JobClip[]
 }
 
@@ -62,7 +63,7 @@ type BootstrapPayload = {
   frontendBuilt: boolean
 }
 
-type ClipCountOption = 1 | 3 | 5
+const defaultClipCount = 3
 
 const progressByStatus: Record<JobStatus, number> = {
   idle: 0,
@@ -88,17 +89,19 @@ const statusTitles: Record<JobStatus, string> = {
   failed: 'Render failed',
 }
 
-const clipCountOptions: Array<{ value: ClipCountOption; label: string; note: string }> = [
-  { value: 1, label: '1 clip', note: 'Fastest' },
-  { value: 3, label: '3 clips', note: 'More coverage' },
-]
-
-const subtitlePreview = {
-  label: 'Fixed subtitle direction',
-  title: 'Iran\'s "Taboo" Leader: The Secret Behind His Rise',
-  reason: 'A cleaner editorial top panel with stronger contrast and calmer hierarchy.',
-  caption: 'a really searing statement',
+const stageDescriptions: Record<JobStatus, string> = {
+  idle: 'Paste a YouTube link, add your Gemini key, and start the default Shorts render flow.',
+  queued: 'Your request reached the local app and is waiting to begin.',
+  validating: 'Checking subtitle rendering compatibility and local requirements before the heavy work starts.',
+  downloading: 'Downloading the source video and preparing local files.',
+  transcribing: 'Whisper is transcribing the video. This is usually the longest step.',
+  analyzing: 'Gemini is selecting the strongest clip moments from the transcript.',
+  rendering: 'Rendering the final vertical video with dynamic subtitles and overlays.',
+  completed: 'Everything is finished. Your files are ready below as high-quality 1080x1920 exports.',
+  failed: 'The job stopped before finishing. Read the message below for the exact reason.',
 }
+
+const renderProfileLabel = 'Studio HQ 1080x1920 MP4'
 
 const apiKeyStorageKey = 'miscoshorts.apiKey'
 
@@ -166,7 +169,6 @@ function App() {
   const [requestError, setRequestError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [apiKeyNotice, setApiKeyNotice] = useState(apiKey ? 'Saved locally in this browser.' : 'Not saved yet.')
-  const [clipCount, setClipCount] = useState<ClipCountOption>(3)
   const [nowMs, setNowMs] = useState(() => Date.now())
 
   useEffect(() => {
@@ -256,9 +258,19 @@ function App() {
   const recentLogs = useMemo(() => (job.logs ?? []).slice(-8).reverse(), [job.logs])
   const hasAvailableApiKey = Boolean(apiKey.trim()) || hasConfiguredApiKey
   const canSubmit = Boolean(videoUrl.trim()) && hasAvailableApiKey && !isSubmitting && !isWorking
-  const startButtonLabel = isSubmitting || isWorking ? 'Job running' : `Render ${clipCount} clip${clipCount > 1 ? 's' : ''}`
-  const etaWindow = useMemo(() => getEtaWindow(job, clipCount, nowMs), [job, clipCount, nowMs])
+  const startButtonLabel = isSubmitting || isWorking ? 'Job running' : 'Start studio render'
+  const etaWindow = useMemo(() => getEtaWindow(job, defaultClipCount, nowMs), [job, nowMs])
   const etaLabel = etaWindow ? `${formatEta(etaWindow[0])} to ${formatEta(etaWindow[1])}` : null
+  const hasStarted = job.status !== 'idle' || isSubmitting || jobId !== null
+  const effectiveClipCount = job.result?.clipCount ?? job.clipCount ?? defaultClipCount
+
+  function resetFlow() {
+    setJobId(null)
+    setJob({ status: 'idle' })
+    setRequestError(null)
+    setIsSubmitting(false)
+    setOutputFilename('short_con_subs.mp4')
+  }
 
   function clearSavedApiKey() {
     try {
@@ -287,7 +299,7 @@ function App() {
           videoUrl,
           apiKey,
           outputFilename,
-          clipCount,
+          clipCount: defaultClipCount,
         }),
       })
 
@@ -300,7 +312,7 @@ function App() {
       setJobId(payload.jobId)
       setJob({
         status: payload.status ?? 'queued',
-        message: `The job is running locally and will render ${payload.clipCount ?? clipCount} clip(s).`,
+        message: `The job is running locally and will render ${payload.clipCount ?? defaultClipCount} clip(s).`,
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unexpected error'
@@ -312,49 +324,33 @@ function App() {
   }
 
   return (
-    <main className="bg-ink min-h-screen text-slate-900">
-      <div className="mx-auto flex min-h-screen max-w-5xl flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8 lg:py-10">
-        <header className="bg-porcelain relative overflow-hidden rounded-[32px] border border-stone-200/80 px-6 py-7 shadow-[0_28px_80px_rgba(62,43,24,0.08)]">
-          <div className="hero-orb hero-orb-left" />
-          <div className="hero-orb hero-orb-right" />
-          <div className="grid-fade" />
-          <div className="relative grid gap-5 lg:grid-cols-[minmax(0,1fr)_19rem] lg:items-end">
-            <div className="space-y-4">
-              <Badge variant="outline" className="app-kicker border-sand/60 bg-sand/10 text-sand">
-                Local Render Dashboard
-              </Badge>
-              <div className="space-y-2">
-                <h1 className="app-display text-3xl font-semibold tracking-tight text-slate-950 sm:text-4xl md:text-5xl">
-                  Cleaner shorts, clearer typography
-                </h1>
-                <p className="app-copy max-w-2xl text-sm text-slate-600 sm:text-base">
-                  The app now focuses on one stronger subtitle direction: a high-contrast editorial header, calmer body copy, and a cleaner preview before you render.
-                </p>
+    <main className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(180,220,255,0.35),_transparent_28%),linear-gradient(180deg,_#f6fbff_0%,_#eef7ff_42%,_#f7fbff_100%)] text-slate-900">
+      <div className="mx-auto flex min-h-screen max-w-3xl items-center justify-center px-4 py-8 sm:px-6 lg:px-8">
+        <Card className="w-full overflow-hidden rounded-[34px] border border-sky-100 bg-white shadow-[0_30px_80px_rgba(66,124,184,0.14)]">
+          <CardHeader className="border-b border-sky-100/90 bg-[linear-gradient(180deg,_rgba(247,251,255,0.98)_0%,_rgba(238,247,255,0.98)_100%)] p-6 sm:p-8">
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-3">
+                <Badge variant="outline" className="border-sky-200 bg-sky-50 text-sky-700">
+                  Local Shorts Studio
+                </Badge>
+                <div className="space-y-2">
+                  <CardTitle className="app-heading text-3xl text-slate-950 sm:text-4xl">Create clean clips from one link</CardTitle>
+                  <CardDescription className="max-w-xl text-sm leading-6 text-slate-600 sm:text-base">
+                    Paste your YouTube link, add a Gemini key, and let the app handle the full Shorts workflow for you.
+                  </CardDescription>
+                </div>
               </div>
-            </div>
 
-            <div className="rounded-[28px] border border-white/70 bg-white/70 p-5 backdrop-blur-xl">
-              <p className="app-kicker text-xs text-slate-500">Current direction</p>
-              <p className="mt-2 app-heading text-xl text-slate-950">Studio editorial</p>
-              <p className="mt-2 text-sm leading-6 text-slate-600">
-                Fewer choices in the UI, stronger readability in the render, and a preview that matches the exported look.
-              </p>
-              <div className="mt-4 rounded-2xl border border-stone-200 bg-white px-4 py-3 text-sm text-slate-600">
-                Default demo setup: 3 clips, fixed subtitle style, clearer top overlay.
-              </div>
+              {hasStarted ? (
+                <Button type="button" variant="secondary" className="shrink-0 bg-white text-slate-700 hover:bg-sky-50" onClick={resetFlow}>
+                  <RotateCcw className="mr-2 h-4 w-4" /> New job
+                </Button>
+              ) : null}
             </div>
-          </div>
-        </header>
+          </CardHeader>
 
-        <section className="grid gap-6 lg:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
-          <Card className="border-stone-200/80 bg-white/95 shadow-[0_20px_55px_rgba(62,43,24,0.08)] backdrop-blur-sm">
-            <CardHeader>
-              <CardTitle className="app-heading text-2xl text-slate-950">Start job</CardTitle>
-              <CardDescription className="text-slate-600">
-                Only the important inputs remain. Subtitle styling is fixed to one cleaner premium profile.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
+          <CardContent className="space-y-6 p-6 sm:p-8">
+            {!hasStarted ? (
               <form className="space-y-5" onSubmit={handleSubmit}>
                 <div className="space-y-2">
                   <Label htmlFor="videoUrl">YouTube URL</Label>
@@ -366,6 +362,7 @@ function App() {
                     autoComplete="off"
                     required
                   />
+                  <p className="text-xs text-slate-500">Paste the full YouTube video link you want to turn into Shorts. The app handles the rest.</p>
                 </div>
 
                 <div className="space-y-2">
@@ -394,82 +391,13 @@ function App() {
                   </p>
                 </div>
 
-                <div className="space-y-2">
-                  <Label htmlFor="outputFilename">Output file</Label>
-                  <Input
-                    id="outputFilename"
-                    value={outputFilename}
-                    onChange={(event) => setOutputFilename(event.target.value)}
-                    placeholder="short_con_subs.mp4"
-                  />
-                  <p className="text-xs text-slate-500">Optional. Leave it as-is if you just want the clean default export.</p>
+                <div className="rounded-[24px] border border-sky-100 bg-sky-50/80 px-4 py-4 text-sm leading-6 text-slate-700">
+                  <p className="font-semibold text-slate-900">{renderProfileLabel}</p>
+                  <p className="mt-2">The app runs a focused Shorts workflow: 3 selected clips, centered reframing, stronger H.264 settings, AAC audio, and more dynamic voice-following subtitles.</p>
+                  <p className="mt-2">Keep the launcher window open while the job runs. Finished files appear here and in the local outputs folder.</p>
                 </div>
 
-                <div className="rounded-[28px] border border-stone-200 bg-stone-50/70 p-4">
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="space-y-1">
-                      <p className="app-kicker text-xs text-slate-500">Subtitle direction</p>
-                      <p className="app-heading text-lg text-slate-950">Studio editorial</p>
-                      <p className="text-sm leading-6 text-slate-600">
-                        Stronger top headline panel, cleaner caption contrast, and fewer distracting style decisions.
-                      </p>
-                    </div>
-                    <Badge variant="outline" className="border-stone-300 bg-white text-slate-700">
-                      Fixed
-                    </Badge>
-                  </div>
-                </div>
-
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="rounded-[22px] border border-stone-200 bg-white px-4 py-4">
-                    <p className="app-kicker text-[0.65rem] text-slate-500">Before you render</p>
-                    <p className="mt-2 text-sm font-semibold text-slate-900">Keep the launcher window open</p>
-                    <p className="mt-2 text-sm leading-6 text-slate-600">
-                      The browser is only the interface. The launcher window keeps the local server and render process alive.
-                    </p>
-                  </div>
-                  <div className="rounded-[22px] border border-stone-200 bg-white px-4 py-4">
-                    <p className="app-kicker text-[0.65rem] text-slate-500">After render</p>
-                    <p className="mt-2 text-sm font-semibold text-slate-900">Download here, files also save locally</p>
-                    <p className="mt-2 text-sm leading-6 text-slate-600">
-                      Every finished render appears in the downloads panel and is also stored in a new folder inside outputs.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="rounded-[24px] border border-sky-200 bg-sky-50 px-4 py-4 text-sm leading-6 text-sky-950">
-                  First launch can take longer while Windows prepares Python and FFmpeg. Later launches should usually reuse the same setup and open much faster.
-                </div>
-
-                <div className="space-y-3">
-                  <Label>How many clips</Label>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    {clipCountOptions.map((option) => {
-                      const selected = clipCount === option.value
-                      return (
-                        <button
-                          key={option.value}
-                          type="button"
-                          onClick={() => setClipCount(option.value)}
-                          className={`rounded-[22px] border px-4 py-4 text-left transition ${
-                            selected
-                              ? 'border-amber-300 bg-white shadow-[0_12px_28px_rgba(176,123,42,0.12)]'
-                              : 'border-stone-200 bg-white hover:border-stone-300 hover:bg-stone-50'
-                          }`}
-                        >
-                          <p className="text-base font-semibold text-slate-900">{option.label}</p>
-                          <p className="mt-1 text-sm text-slate-500">{option.note}</p>
-                        </button>
-                      )
-                    })}
-                  </div>
-                </div>
-
-                <div className="rounded-[24px] border border-stone-200 bg-stone-50 px-4 py-4 text-sm leading-6 text-slate-700">
-                  The render now uses one refined subtitle setup by default. You preview the exact direction on the right instead of choosing between multiple weaker presets.
-                </div>
-
-                <Button className="w-full bg-amber-600 text-white hover:bg-amber-700" type="submit" disabled={!canSubmit}>
+                <Button className="h-12 w-full rounded-2xl bg-sky-600 text-white hover:bg-sky-700" type="submit" disabled={!canSubmit}>
                   {isSubmitting || isWorking ? (
                     <>
                       <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> Job running
@@ -487,90 +415,15 @@ function App() {
 
                 {requestError ? <p className="text-sm text-rose-600">{requestError}</p> : null}
               </form>
-            </CardContent>
-          </Card>
-
-          <div className="space-y-6">
-            <Card className="border-stone-200/80 bg-white/95 shadow-[0_20px_55px_rgba(62,43,24,0.08)] backdrop-blur-sm">
-              <CardHeader>
-                <CardTitle className="app-heading text-2xl text-slate-950">Style preview</CardTitle>
-                <CardDescription className="text-slate-600">
-                  This is the direction used in the rendered clip. One stronger look, fewer style choices.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="preview-stage relative overflow-hidden rounded-[30px] border border-stone-200/80 p-3">
-                  <div className="preview-video-frame aspect-[9/16]">
-                    <div className="preview-safe-guide preview-safe-guide-top" />
-                    <div className="preview-safe-guide preview-safe-guide-bottom" />
-                    <div className="preview-safe-label preview-safe-label-top">headline safe zone</div>
-                    <div className="preview-safe-label preview-safe-label-bottom">subtitle safe zone</div>
-                    <div className="preview-portrait-glow" />
-                    <div className="preview-portrait-frame">
-                      <div className="preview-portrait-head" />
-                      <div className="preview-portrait-face" />
-                      <div className="preview-portrait-neck" />
-                      <div className="preview-portrait-shirt" />
-                      <div className="preview-glasses preview-glasses-left" />
-                      <div className="preview-glasses preview-glasses-right" />
-                      <div className="preview-glasses-bridge" />
-                    </div>
-                    <div className="preview-video-overlay" />
-
-                    <div className="preview-top-panel">
-                      <div className="preview-top-accent" />
-                      <div className="preview-header-stack">
-                        <p className="preview-panel-label">{subtitlePreview.label}</p>
-                        <p className="preview-title">{subtitlePreview.title}</p>
-                        <p className="preview-reason">{subtitlePreview.reason}</p>
-                      </div>
-                    </div>
-
-                    <div className="preview-subtitle-shadow" />
-                    <div className="preview-subtitle-wrap">
-                      <div className="preview-subtitle-box">
-                        <p className="preview-subtitle">{subtitlePreview.caption}</p>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="grid gap-3 sm:grid-cols-3">
-                  <div className="rounded-[22px] border border-stone-200 bg-stone-50 px-4 py-3">
-                    <p className="app-kicker text-[0.65rem] text-slate-500">Headline</p>
-                    <p className="mt-2 text-sm font-semibold text-slate-900">Dark panel with clear hierarchy</p>
-                  </div>
-                  <div className="rounded-[22px] border border-stone-200 bg-stone-50 px-4 py-3">
-                    <p className="app-kicker text-[0.65rem] text-slate-500">Reason</p>
-                    <p className="mt-2 text-sm font-semibold text-slate-900">Softer secondary copy, still readable</p>
-                  </div>
-                  <div className="rounded-[22px] border border-stone-200 bg-stone-50 px-4 py-3">
-                    <p className="app-kicker text-[0.65rem] text-slate-500">Captions</p>
-                    <p className="mt-2 text-sm font-semibold text-slate-900">Cleaner bottom focus with less visual noise</p>
-                  </div>
-                </div>
-
-                <div className="rounded-[24px] border border-emerald-200 bg-emerald-50 px-4 py-4 text-sm leading-6 text-emerald-950">
-                  Customer-ready: the preview now shows where title and subtitle sit on a portrait frame, so the chosen style is easier to trust before rendering.
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card className="border-stone-200/80 bg-white/95 shadow-[0_20px_55px_rgba(62,43,24,0.08)] backdrop-blur-sm">
-              <CardHeader>
-                <CardTitle className="app-heading text-2xl text-slate-950">Status</CardTitle>
-                <CardDescription className="text-slate-600">
-                  Clear live progress from your local backend.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-5">
-                <div className="flex items-start justify-between gap-4 rounded-2xl border border-stone-200 bg-stone-50 px-4 py-4">
+            ) : (
+              <div className="space-y-6">
+                <div className="flex items-start justify-between gap-4 rounded-[26px] border border-sky-100 bg-sky-50/70 px-5 py-5">
                   <div className="space-y-2">
-                    <p className="app-kicker text-sm font-medium text-amber-700">Current step</p>
+                    <p className="app-kicker text-sm font-medium text-sky-700">Current step</p>
                     <p className="text-xl font-semibold text-slate-950">{statusTitles[job.status]}</p>
-                    <p className="app-copy text-sm text-slate-600">{job.message ?? 'No active job yet.'}</p>
+                    <p className="app-copy text-sm leading-6 text-slate-600">{job.message ?? stageDescriptions[job.status]}</p>
                   </div>
-                  <Badge variant={job.status === 'failed' ? 'destructive' : 'secondary'} className="shrink-0">
+                  <Badge variant={job.status === 'failed' ? 'destructive' : 'secondary'} className="shrink-0 border-sky-200 bg-white text-slate-700">
                     {job.status}
                   </Badge>
                 </div>
@@ -607,18 +460,20 @@ function App() {
                     })}
                 </div>
 
-                {job.error ? <p className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{job.error}</p> : null}
-              </CardContent>
-            </Card>
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm leading-6 text-slate-700">
+                  <p className="font-semibold text-slate-900">What happens now</p>
+                  <p className="mt-2">{stageDescriptions[job.status]}</p>
+                  <p className="mt-3 text-slate-500">Requested clips: {effectiveClipCount}. Output profile: {job.result?.renderProfile ?? renderProfileLabel}. Finished files are saved locally in the outputs folder and will appear below when ready.</p>
+                </div>
 
-            <Card className="border-stone-200/80 bg-white/95 shadow-[0_20px_55px_rgba(62,43,24,0.08)] backdrop-blur-sm">
-              <CardHeader>
-                <CardTitle className="app-heading text-xl text-slate-950">Activity log</CardTitle>
-                <CardDescription className="text-slate-600">
-                  Latest backend messages. This should match what the terminal shows.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
+                {job.error ? <p className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{job.error}</p> : null}
+
+                <div className="space-y-3">
+                  <div>
+                    <p className="app-heading text-lg text-slate-950">Live activity</p>
+                    <p className="mt-1 text-sm text-slate-500">The latest exact messages from the local process.</p>
+                  </div>
+
                 {recentLogs.length > 0 ? (
                   <div className="space-y-3">
                     {recentLogs.map((entry, index) => (
@@ -636,41 +491,14 @@ function App() {
                     No backend activity yet.
                   </div>
                 )}
-              </CardContent>
-            </Card>
-
-            <Card className="border-stone-200/80 bg-white/95 shadow-[0_20px_55px_rgba(62,43,24,0.08)] backdrop-blur-sm">
-              <CardHeader>
-                <CardTitle className="app-heading text-xl text-slate-950">Customer flow</CardTitle>
-                <CardDescription className="text-slate-600">
-                  The app is now structured around one clean path from input to finished files.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {[
-                    'Paste the YouTube link.',
-                    'Use the saved Gemini key or add one now.',
-                    'Render 1 or 3 clips with the fixed subtitle style.',
-                    'Download the clips and transcript when the job completes.',
-                  ].map((step, index) => (
-                    <div key={step} className="rounded-[22px] border border-stone-200 bg-stone-50 px-4 py-4">
-                      <p className="app-kicker text-[0.65rem] text-slate-500">Step {index + 1}</p>
-                      <p className="mt-2 text-sm font-semibold leading-6 text-slate-900">{step}</p>
-                    </div>
-                  ))}
                 </div>
-              </CardContent>
-            </Card>
 
-            <Card className="border-stone-200/80 bg-white/95 shadow-[0_20px_55px_rgba(62,43,24,0.08)] backdrop-blur-sm">
-              <CardHeader>
-                <CardTitle className="app-heading text-xl text-slate-950">Downloads</CardTitle>
-                <CardDescription className="text-slate-600">
-                  When the render finishes, the files appear here.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
+                <div className="space-y-4 rounded-[26px] border border-slate-200 bg-white p-5 shadow-[0_12px_30px_rgba(66,124,184,0.08)]">
+                  <div>
+                    <p className="app-heading text-lg text-slate-950">Downloads</p>
+                    <p className="mt-1 text-sm text-slate-500">When the render finishes, your files appear here.</p>
+                  </div>
+
                 {job.status === 'completed' && job.result && jobId ? (
                   <>
                     <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
@@ -678,6 +506,7 @@ function App() {
                         <CheckCircle2 className="h-4 w-4" /> {job.result.clipCount} clip(s) ready
                       </div>
                       <p>{job.result.title ?? 'Your first clip is ready.'}</p>
+                      <p className="mt-2 text-emerald-900">Quality profile: {job.result.renderProfile ?? renderProfileLabel}</p>
                       <p className="mt-2 text-emerald-800/80">Saved locally in {job.result.outputDir}</p>
                     </div>
 
@@ -690,7 +519,7 @@ function App() {
                               <p className="text-sm text-slate-600">{clip.reason ?? 'Gemini selected a strong moment from the source video.'}</p>
                               <p className="text-xs text-slate-500">{clip.start.toFixed(1)}s to {clip.end.toFixed(1)}s</p>
                             </div>
-                            <Button asChild className="bg-amber-600 text-white hover:bg-amber-700 sm:w-auto">
+                            <Button asChild className="bg-sky-600 text-white hover:bg-sky-700 sm:w-auto">
                               <a href={`/api/jobs/${jobId}/download/video/${clip.index}`}>
                                 <Download className="mr-2 h-4 w-4" /> Download clip
                               </a>
@@ -709,15 +538,17 @@ function App() {
                 ) : (
                   <div className="space-y-3 rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-5 text-sm text-slate-600">
                     <p className="font-medium text-slate-900">What you get after each run</p>
-                    <p>- One or three finished vertical clips ready to download</p>
+                    <p>- Up to five finished vertical clips ready to download</p>
+                    <p>- High-quality 1080x1920 MP4 exports optimized for sharing</p>
                     <p>- A full transcript file for reference</p>
                     <p>- A saved local folder inside outputs for the exact job</p>
                   </div>
                 )}
-              </CardContent>
-            </Card>
-          </div>
-        </section>
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
       </div>
     </main>
   )
