@@ -214,6 +214,8 @@ def create_short_from_url(
     clip_count: int = DEFAULT_CLIP_COUNT,
 ) -> dict:
     ensure_dependencies()
+    _emit(progress_callback, "validating", "Checking subtitle rendering compatibility...")
+    subtitles.assert_subtitle_rendering_ready(subtitle_style)
 
     job_id, output_dir = create_output_dir(base_dir=base_dir, job_id=job_id)
     transcript_path = output_dir / "full_transcript.txt"

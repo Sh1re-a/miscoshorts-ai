@@ -1,3 +1,4 @@
+import os
 import platform
 import re
 
@@ -75,12 +76,24 @@ TITLE_FONT_PRESETS = [
     "DejaVuSans-Bold",
 ]
 
+AUTO_FONT = "__AUTO_DEFAULT_FONT__"
+
 
 def get_preferred_fonts():
     system_name = platform.system().lower()
 
     if system_name == 'windows':
-        return ['Aptos Display Bold', 'Aptos Bold', 'Segoe UI Semibold', 'Segoe UI Bold', 'Arial-Bold', 'Arial', 'Calibri', 'NotoSans-Bold', 'DejaVuSans-Bold']
+        windows_font_paths = [
+            r"C:\Windows\Fonts\arialbd.ttf",
+            r"C:\Windows\Fonts\arial.ttf",
+            r"C:\Windows\Fonts\segoeuib.ttf",
+            r"C:\Windows\Fonts\segoeui.ttf",
+            r"C:\Windows\Fonts\calibrib.ttf",
+            r"C:\Windows\Fonts\calibri.ttf",
+            r"C:\Windows\Fonts\bahnschrift.ttf",
+        ]
+        existing_windows_font_paths = [font_path for font_path in windows_font_paths if os.path.exists(font_path)]
+        return [*existing_windows_font_paths, 'Aptos Display Bold', 'Aptos Bold', 'Segoe UI Semibold', 'Segoe UI Bold', 'Arial-Bold', 'Arial', 'Calibri', 'NotoSans-Bold', 'DejaVuSans-Bold']
     if system_name == 'darwin':
         return ['SF Pro Display Semibold', 'SF Pro Display Bold', 'Avenir Next Bold', 'Avenir Next Demi Bold', 'Helvetica Neue Medium', 'Helvetica Neue Bold', 'Helvetica-Bold', 'Arial-Bold', 'Arial', 'DejaVuSans-Bold']
     return ['NotoSans-Bold', 'Inter-SemiBold', 'DejaVuSans-Bold', 'LiberationSans-Bold', 'Arial-Bold', 'Arial']
@@ -108,7 +121,13 @@ def normalize_subtitle_style(style=None):
 def get_font_candidates(font_preset):
     preset_fonts = FONT_PRESETS.get(font_preset, [])
     fallback_fonts = get_preferred_fonts()
-    return list(dict.fromkeys([*preset_fonts, *fallback_fonts]))
+    return list(dict.fromkeys([*preset_fonts, *fallback_fonts, AUTO_FONT]))
+
+
+def _font_kwargs(font):
+    if font == AUTO_FONT:
+        return {}
+    return {"font": font}
 
 
 def split_subtitle_text(text, start_time, end_time):
@@ -255,7 +274,7 @@ def _smooth_word_window(word_start, word_end, video_duration):
 def _create_caption_text_clip(text, font, font_size, color, stroke_color, stroke_width, width, interline):
     clip = TextClip(
         text=text,
-        font=font,
+        **_font_kwargs(font),
         font_size=font_size,
         color=color,
         stroke_color=stroke_color,
@@ -273,7 +292,7 @@ def _create_caption_text_clip(text, font, font_size, color, stroke_color, stroke
 def _create_label_text_clip(text, font, font_size, color, stroke_color, stroke_width):
     clip = TextClip(
         text=text,
-        font=font,
+        **_font_kwargs(font),
         font_size=font_size,
         color=color,
         stroke_color=stroke_color,
@@ -560,7 +579,7 @@ def create_header_text_clip(text, video_clip, *, font_candidates, font_size, col
             try:
                 shadow = TextClip(
                     text=text,
-                    font=font,
+                    **_font_kwargs(font),
                     font_size=candidate_size,
                     color="#000000",
                     stroke_color="#000000",
@@ -575,7 +594,7 @@ def create_header_text_clip(text, video_clip, *, font_candidates, font_size, col
 
                 clip = TextClip(
                     text=text,
-                    font=font,
+                    **_font_kwargs(font),
                     font_size=candidate_size,
                     color=color,
                     stroke_color=stroke_color,
@@ -601,6 +620,40 @@ def create_header_text_clip(text, video_clip, *, font_candidates, font_size, col
                 last_error = error
 
     raise RuntimeError("Could not render header text with any compatible font.") from last_error
+
+
+def assert_subtitle_rendering_ready(subtitle_style=None):
+    resolved_style = normalize_subtitle_style(subtitle_style)
+    tested_fonts = []
+    last_error = None
+
+    for font in get_font_candidates(resolved_style["fontPreset"]):
+        tested_fonts.append(font)
+        probe_clip = None
+        try:
+            probe_clip = _create_label_text_clip(
+                "Subtitle probe",
+                font,
+                34,
+                "#fffdf8",
+                "#111827",
+                2,
+            )
+            return font
+        except Exception as error:
+            last_error = error
+        finally:
+            if probe_clip is not None:
+                try:
+                    probe_clip.close()
+                except Exception:
+                    pass
+
+    system_name = platform.system() or "Unknown OS"
+    raise RuntimeError(
+        "Could not render subtitles with any compatible font on this machine. "
+        f"OS: {system_name}. Tested fonts: {', '.join(tested_fonts)}"
+    ) from last_error
 
 
 def create_top_description_overlay(video_clip, title, reason, subtitle_style):

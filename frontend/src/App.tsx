@@ -12,6 +12,7 @@ import { Progress } from './components/ui/progress'
 type JobStatus =
   | 'idle'
   | 'queued'
+  | 'validating'
   | 'downloading'
   | 'transcribing'
   | 'analyzing'
@@ -66,6 +67,7 @@ type ClipCountOption = 1 | 3 | 5
 const progressByStatus: Record<JobStatus, number> = {
   idle: 0,
   queued: 8,
+  validating: 14,
   downloading: 20,
   transcribing: 48,
   analyzing: 68,
@@ -77,6 +79,7 @@ const progressByStatus: Record<JobStatus, number> = {
 const statusTitles: Record<JobStatus, string> = {
   idle: 'Ready to start',
   queued: 'Queued in local backend',
+  validating: 'Validating subtitle compatibility',
   downloading: 'Downloading source video',
   transcribing: 'Transcribing audio',
   analyzing: 'Gemini is selecting clips',
@@ -138,6 +141,8 @@ function getEtaWindow(job: JobPayload, selectedClipCount: number, nowMs: number)
   switch (job.status) {
     case 'queued':
       return [Math.max(0, 20 - elapsedSeconds), Math.max(0, 60 - elapsedSeconds)]
+    case 'validating':
+      return [Math.max(0, 5 - elapsedSeconds), Math.max(0, 20 - elapsedSeconds)]
     case 'downloading':
       return [Math.max(0, 40 - elapsedSeconds), Math.max(0, 150 - elapsedSeconds)]
     case 'transcribing':
