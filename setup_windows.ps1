@@ -1,10 +1,7 @@
-$paramBlock = @"
 param(
     [switch]$SkipLaunch,
     [switch]$NonInteractive
 )
-"@
-Invoke-Expression $paramBlock
 
 $ErrorActionPreference = "Stop"
 
