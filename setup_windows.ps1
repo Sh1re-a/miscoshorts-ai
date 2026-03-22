@@ -442,6 +442,13 @@ function Test-Stale($stampPath, $paths) {
     return $false
 }
 
+function Invoke-CheckedCommand($command, $arguments, $failureMessage) {
+    & $command @arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "$failureMessage Exit code: $LASTEXITCODE."
+    }
+}
+
 function Test-FrontendBuildReady {
     return Test-Path $frontendEntry
 }
@@ -462,13 +469,13 @@ function Invoke-Setup {
 
     if (-not (Test-UsableVenv)) {
         Write-Host "Creating virtual environment ..."
-        Invoke-Python $pythonSpec @("-m", "venv", ".venv")
+        Invoke-CheckedCommand $pythonSpec.Command ($pythonSpec.Arguments + @("-m", "venv", ".venv")) "Creating the Python virtual environment failed."
     }
 
     if (Test-Stale $pythonDepsStamp @((Join-Path $root "requirements.txt"), $venvPython)) {
         Write-Host "Installing Python packages ..."
-        & $venvPython -m pip install --upgrade pip
-        & $venvPython -m pip install -r requirements.txt
+        Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--upgrade", "pip") "Updating pip failed."
+        Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "-r", "requirements.txt") "Installing Python dependencies failed."
         Update-Stamp $pythonDepsStamp
     }
     else {
@@ -481,7 +488,7 @@ function Invoke-Setup {
     else {
         $frontendPackageJson = Join-Path $frontendDir "package.json"
         if (-not (Test-Path $frontendPackageJson)) {
-            throw "The prebuilt frontend is missing and frontend source files were not found. Re-extract the full release zip and try again."
+            throw "The frontend source files were not found. Download the full GitHub ZIP again, extract it completely, and run launch_app.bat from the extracted project folder."
         }
 
         $nodeCommand = Ensure-Node
@@ -490,7 +497,7 @@ function Invoke-Setup {
             Write-Host "Installing frontend packages ..."
             Push-Location $frontendDir
             try {
-                & $nodeCommand install
+                Invoke-CheckedCommand $nodeCommand @("install") "Installing frontend packages failed."
             }
             finally {
                 Pop-Location
@@ -505,7 +512,7 @@ function Invoke-Setup {
             Write-Host "Building frontend ..."
             Push-Location $frontendDir
             try {
-                & $nodeCommand run build
+                Invoke-CheckedCommand $nodeCommand @("run", "build") "Building the frontend failed. Check the error output above and the setup log for the real npm or TypeScript error."
             }
             finally {
                 Pop-Location
@@ -517,12 +524,12 @@ function Invoke-Setup {
         }
 
         if (-not (Test-FrontendBuildReady)) {
-            throw "Frontend build completed but frontend/dist/index.html is still missing."
+            throw "The frontend build finished without creating frontend/dist/index.html. Check the npm build output above and the setup log for details."
         }
     }
 
     Write-Host "Launching app ..."
-    & $venvPython app_launcher.py
+    Invoke-CheckedCommand $venvPython @("app_launcher.py") "The local app failed to start."
 }
 
 try {
