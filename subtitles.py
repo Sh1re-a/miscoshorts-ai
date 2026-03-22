@@ -59,8 +59,8 @@ DEFAULT_STYLE = {
     "colorPreset": "ivory",
 }
 
-TOP_OVERLAY_MIN_DURATION = 1.8
-TOP_OVERLAY_MAX_DURATION = 3.2
+TOP_OVERLAY_MIN_DURATION = 2.4
+TOP_OVERLAY_MAX_DURATION = 4.2
 WORD_HIGHLIGHT_LEAD = 0.03
 WORD_HIGHLIGHT_TAIL = 0.05
 
@@ -604,21 +604,17 @@ def create_header_text_clip(text, video_clip, *, font_candidates, font_size, col
 
 
 def create_top_description_overlay(video_clip, title, reason, subtitle_style):
-    title_text = _sanitize_overlay_text(title, 52)
-    reason_text = _sanitize_overlay_text(reason, 82)
+    title_text = _sanitize_overlay_text(title, 64)
+    reason_text = _sanitize_overlay_text(reason, 92)
     if not title_text and not reason_text:
         return []
 
     font_candidates = list(dict.fromkeys([*get_font_candidates(subtitle_style["fontPreset"]), *TITLE_FONT_PRESETS]))
-    overlays = []
     video_duration = _safe_duration(video_clip.duration)
     overlay_duration = _intro_overlay_duration(video_duration)
-    top_bar_height = int(video_clip.h * 0.12)
-    top_bar = ColorClip(size=(video_clip.w, top_bar_height), color=(6, 10, 18))
-    top_bar = top_bar.with_opacity(0.16).with_position((0, 0)).with_duration(overlay_duration)
-    overlays.append(top_bar)
-
-    current_y = int(video_clip.h * 0.028)
+    overlays = []
+    title_clip = None
+    reason_clip = None
 
     if title_text:
         try:
@@ -626,18 +622,15 @@ def create_top_description_overlay(video_clip, title, reason, subtitle_style):
                 title_text,
                 video_clip,
                 font_candidates=font_candidates,
-                font_size=resolve_top_text_size(video_clip, title_text, minimum=22, maximum=34, ratio=0.02),
-                color="#f8fbff",
-                stroke_color="#0f172a",
-                stroke_width=1,
+                font_size=resolve_top_text_size(video_clip, title_text, minimum=24, maximum=38, ratio=0.0225),
+                color="#f8fafc",
+                stroke_color="#020617",
+                stroke_width=2,
                 width_ratio=0.74,
-                max_height_ratio=0.042,
+                max_height_ratio=0.05,
             )
-            title_clip = title_clip.with_position(("center", current_y)).with_duration(overlay_duration)
-            overlays.append(title_clip)
-            current_y += title_clip.h + int(video_clip.h * 0.005)
         except Exception:
-            pass
+            title_clip = None
 
     if reason_text:
         try:
@@ -645,18 +638,73 @@ def create_top_description_overlay(video_clip, title, reason, subtitle_style):
                 reason_text,
                 video_clip,
                 font_candidates=font_candidates,
-                font_size=resolve_top_text_size(video_clip, reason_text, minimum=15, maximum=20, ratio=0.013),
-                color="#dce7f4",
-                stroke_color="#0f172a",
+                font_size=resolve_top_text_size(video_clip, reason_text, minimum=16, maximum=22, ratio=0.0145),
+                color="#e2e8f0",
+                stroke_color="#020617",
                 stroke_width=1,
                 width_ratio=0.74,
-                max_height_ratio=0.035,
-                opacity=0.82,
+                max_height_ratio=0.042,
+                opacity=0.96,
             )
-            reason_clip = reason_clip.with_position(("center", current_y)).with_duration(overlay_duration)
-            overlays.append(reason_clip)
         except Exception:
-            pass
+            reason_clip = None
+
+    if title_clip is None and reason_clip is None:
+        return []
+
+    panel_padding_x = int(video_clip.w * 0.042)
+    panel_padding_top = int(video_clip.h * 0.018)
+    panel_padding_bottom = int(video_clip.h * 0.016)
+    panel_gap = int(video_clip.h * 0.008)
+    accent_height = max(4, int(video_clip.h * 0.0038))
+    divider_height = 1
+
+    content_width = max(
+        title_clip.w if title_clip is not None else 0,
+        reason_clip.w if reason_clip is not None else 0,
+    )
+    panel_width = min(video_clip.w - int(video_clip.w * 0.08), content_width + panel_padding_x * 2)
+
+    content_height = 0
+    if title_clip is not None:
+        content_height += title_clip.h
+    if reason_clip is not None:
+        content_height += reason_clip.h
+    if title_clip is not None and reason_clip is not None:
+        content_height += panel_gap * 2 + divider_height
+
+    panel_height = panel_padding_top + accent_height + panel_gap + content_height + panel_padding_bottom
+    panel_x = int((video_clip.w - panel_width) / 2)
+    panel_y = int(video_clip.h * 0.034)
+
+    top_fade = ColorClip(size=(video_clip.w, int(video_clip.h * 0.2)), color=(5, 10, 18))
+    top_fade = top_fade.with_opacity(0.07).with_position((0, 0)).with_duration(overlay_duration)
+    panel_shadow = ColorClip(size=(panel_width, panel_height), color=(2, 6, 12))
+    panel_shadow = panel_shadow.with_opacity(0.22).with_position((panel_x, panel_y + max(6, int(video_clip.h * 0.006)))).with_duration(overlay_duration)
+    panel_clip = ColorClip(size=(panel_width, panel_height), color=(6, 10, 18))
+    panel_clip = panel_clip.with_opacity(0.58).with_position((panel_x, panel_y)).with_duration(overlay_duration)
+    accent_clip = ColorClip(size=(panel_width, accent_height), color=(235, 193, 124))
+    accent_clip = accent_clip.with_opacity(0.98).with_position((panel_x, panel_y)).with_duration(overlay_duration)
+
+    overlays.extend([top_fade, panel_shadow, panel_clip, accent_clip])
+
+    current_y = panel_y + panel_padding_top + accent_height + panel_gap
+    center_x = panel_x + int(panel_width / 2)
+
+    if title_clip is not None:
+        overlays.append(title_clip.with_position(("center", current_y)).with_duration(overlay_duration))
+        current_y += title_clip.h
+
+    if title_clip is not None and reason_clip is not None:
+        current_y += panel_gap
+        divider_width = int(panel_width * 0.84)
+        divider_clip = ColorClip(size=(divider_width, divider_height), color=(148, 163, 184))
+        divider_clip = divider_clip.with_opacity(0.28).with_position((center_x - int(divider_width / 2), current_y)).with_duration(overlay_duration)
+        overlays.append(divider_clip)
+        current_y += divider_height + panel_gap
+
+    if reason_clip is not None:
+        overlays.append(reason_clip.with_position(("center", current_y)).with_duration(overlay_duration))
 
     return overlays
 
@@ -687,7 +735,7 @@ def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_sty
                     if variants:
                         for (variant_start, variant_end), variant in variants:
                             variant = _with_clip_timing(variant, variant_start, variant_end)
-                            highlighted_subtitle_layers.append(variant.with_position(("center", int(video_clip.h * 0.78))))
+                            highlighted_subtitle_layers.append(variant.with_position(("center", int(video_clip.h * 0.755))))
                     else:
                         chunk_text = " ".join(word["text"] for word in chunk_words)
                         subtitles_data.append(((chunk_words[0]["start"], chunk_words[-1]["end"]), chunk_text))
@@ -695,7 +743,7 @@ def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_sty
                 subtitles_data.extend(split_subtitle_text(text, start, end))
 
     subtitle_layers = []
-    subtitle_y = int(video_clip.h * 0.78)
+    subtitle_y = int(video_clip.h * 0.755)
     for (start, end), text in subtitles_data:
         subtitle_clip = create_textclip_with_fallback(text, video_clip, resolved_style)
         subtitle_clip = _with_clip_timing(subtitle_clip, start, end)
@@ -704,7 +752,7 @@ def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_sty
 
     bottom_shade_height = int(video_clip.h * 0.3)
     bottom_shade = ColorClip(size=(video_clip.w, bottom_shade_height), color=(7, 12, 20))
-    bottom_shade = bottom_shade.with_opacity(0.13).with_position((0, video_clip.h - bottom_shade_height)).with_duration(video_duration)
+    bottom_shade = bottom_shade.with_opacity(0.16).with_position((0, video_clip.h - bottom_shade_height)).with_duration(video_duration)
     focus_shade = ColorClip(size=(video_clip.w, int(video_clip.h * 0.2)), color=(7, 12, 20))
     focus_shade = focus_shade.with_opacity(0.08).with_position((0, int(video_clip.h * 0.74))).with_duration(video_duration)
     top_description_layers = create_top_description_overlay(video_clip, clip_title, clip_reason, resolved_style)

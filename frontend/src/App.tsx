@@ -79,9 +79,15 @@ const statusTitles: Record<JobStatus, string> = {
 
 const clipCountOptions: Array<{ value: ClipCountOption; label: string; note: string }> = [
   { value: 1, label: '1 clip', note: 'Fastest' },
-  { value: 3, label: '3 clips', note: 'Balanced' },
-  { value: 5, label: '5 clips', note: 'More choices' },
+  { value: 3, label: '3 clips', note: 'More coverage' },
 ]
+
+const subtitlePreview = {
+  label: 'Fixed subtitle direction',
+  title: 'Iran\'s "Taboo" Leader: The Secret Behind His Rise',
+  reason: 'A cleaner editorial top panel with stronger contrast and calmer hierarchy.',
+  caption: 'a really searing statement',
+}
 
 const apiKeyStorageKey = 'miscoshorts.apiKey'
 
@@ -110,7 +116,7 @@ function App() {
   const [requestError, setRequestError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [apiKeyNotice, setApiKeyNotice] = useState(apiKey ? 'Saved locally in this browser.' : 'Not saved yet.')
-  const [clipCount, setClipCount] = useState<ClipCountOption>(1)
+  const [clipCount, setClipCount] = useState<ClipCountOption>(3)
 
   const pollJob = useEffectEvent(async () => {
     if (!jobId) {
@@ -212,28 +218,46 @@ function App() {
   }
 
   return (
-    <main className="min-h-screen bg-gradient-to-b from-sky-50 via-white to-slate-50 text-slate-900">
+    <main className="bg-ink min-h-screen text-slate-900">
       <div className="mx-auto flex min-h-screen max-w-5xl flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8 lg:py-10">
-        <header className="space-y-4 rounded-[28px] border border-sky-100 bg-white px-6 py-6 shadow-[0_20px_60px_rgba(148,184,255,0.12)]">
-          <Badge variant="outline" className="app-kicker border-sky-200 bg-sky-50 text-sky-700">
-            Local Render Dashboard
-          </Badge>
-          <div className="space-y-2">
-            <h1 className="app-display text-3xl font-semibold tracking-tight text-slate-950 sm:text-4xl md:text-5xl">
-              Simple status-first video render
-            </h1>
-            <p className="app-copy max-w-2xl text-sm text-slate-600 sm:text-base">
-              Paste a YouTube link, start the job, and follow each stage clearly while the backend downloads, transcribes, analyzes, and renders.
-            </p>
+        <header className="bg-porcelain relative overflow-hidden rounded-[32px] border border-stone-200/80 px-6 py-7 shadow-[0_28px_80px_rgba(62,43,24,0.08)]">
+          <div className="hero-orb hero-orb-left" />
+          <div className="hero-orb hero-orb-right" />
+          <div className="grid-fade" />
+          <div className="relative grid gap-5 lg:grid-cols-[minmax(0,1fr)_19rem] lg:items-end">
+            <div className="space-y-4">
+              <Badge variant="outline" className="app-kicker border-sand/60 bg-sand/10 text-sand">
+                Local Render Dashboard
+              </Badge>
+              <div className="space-y-2">
+                <h1 className="app-display text-3xl font-semibold tracking-tight text-slate-950 sm:text-4xl md:text-5xl">
+                  Cleaner shorts, clearer typography
+                </h1>
+                <p className="app-copy max-w-2xl text-sm text-slate-600 sm:text-base">
+                  The app now focuses on one stronger subtitle direction: a high-contrast editorial header, calmer body copy, and a cleaner preview before you render.
+                </p>
+              </div>
+            </div>
+
+            <div className="rounded-[28px] border border-white/70 bg-white/70 p-5 backdrop-blur-xl">
+              <p className="app-kicker text-xs text-slate-500">Current direction</p>
+              <p className="mt-2 app-heading text-xl text-slate-950">Studio editorial</p>
+              <p className="mt-2 text-sm leading-6 text-slate-600">
+                Fewer choices in the UI, stronger readability in the render, and a preview that matches the exported look.
+              </p>
+              <div className="mt-4 rounded-2xl border border-stone-200 bg-white px-4 py-3 text-sm text-slate-600">
+                Default demo setup: 3 clips, fixed subtitle style, clearer top overlay.
+              </div>
+            </div>
           </div>
         </header>
 
         <section className="grid gap-6 lg:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
-          <Card className="border-sky-100 bg-white shadow-[0_18px_50px_rgba(148,184,255,0.10)]">
+          <Card className="border-stone-200/80 bg-white/95 shadow-[0_20px_55px_rgba(62,43,24,0.08)] backdrop-blur-sm">
             <CardHeader>
               <CardTitle className="app-heading text-2xl text-slate-950">Start job</CardTitle>
               <CardDescription className="text-slate-600">
-                  Keep it simple. The app now uses a cleaner premium subtitle profile automatically.
+                Only the important inputs remain. Subtitle styling is fixed to one cleaner premium profile.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -281,11 +305,27 @@ function App() {
                     onChange={(event) => setOutputFilename(event.target.value)}
                     placeholder="short_con_subs.mp4"
                   />
+                  <p className="text-xs text-slate-500">Optional. Leave it as-is if you just want the clean default export.</p>
+                </div>
+
+                <div className="rounded-[28px] border border-stone-200 bg-stone-50/70 p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="space-y-1">
+                      <p className="app-kicker text-xs text-slate-500">Subtitle direction</p>
+                      <p className="app-heading text-lg text-slate-950">Studio editorial</p>
+                      <p className="text-sm leading-6 text-slate-600">
+                        Stronger top headline panel, cleaner caption contrast, and fewer distracting style decisions.
+                      </p>
+                    </div>
+                    <Badge variant="outline" className="border-stone-300 bg-white text-slate-700">
+                      Fixed
+                    </Badge>
+                  </div>
                 </div>
 
                 <div className="space-y-3">
                   <Label>How many clips</Label>
-                  <div className="grid gap-3 sm:grid-cols-3">
+                  <div className="grid gap-3 sm:grid-cols-2">
                     {clipCountOptions.map((option) => {
                       const selected = clipCount === option.value
                       return (
@@ -293,10 +333,10 @@ function App() {
                           key={option.value}
                           type="button"
                           onClick={() => setClipCount(option.value)}
-                          className={`rounded-2xl border px-4 py-4 text-left transition ${
+                          className={`rounded-[22px] border px-4 py-4 text-left transition ${
                             selected
-                              ? 'border-sky-300 bg-sky-50 shadow-[0_10px_24px_rgba(125,170,255,0.14)]'
-                              : 'border-slate-200 bg-white hover:border-sky-200 hover:bg-sky-50/60'
+                              ? 'border-amber-300 bg-white shadow-[0_12px_28px_rgba(176,123,42,0.12)]'
+                              : 'border-stone-200 bg-white hover:border-stone-300 hover:bg-stone-50'
                           }`}
                         >
                           <p className="text-base font-semibold text-slate-900">{option.label}</p>
@@ -307,11 +347,11 @@ function App() {
                   </div>
                 </div>
 
-                <div className="rounded-2xl border border-sky-100 bg-sky-50 px-4 py-4 text-sm text-slate-700">
-                  Default subtitle settings now use a cleaner premium look with softer highlight and sharper typography.
+                <div className="rounded-[24px] border border-stone-200 bg-stone-50 px-4 py-4 text-sm leading-6 text-slate-700">
+                  The render now uses one refined subtitle setup by default. You preview the exact direction on the right instead of choosing between multiple weaker presets.
                 </div>
 
-                <Button className="w-full bg-sky-600 text-white hover:bg-sky-700" type="submit" disabled={isSubmitting || isWorking}>
+                <Button className="w-full bg-amber-600 text-white hover:bg-amber-700" type="submit" disabled={isSubmitting || isWorking}>
                   {isSubmitting || isWorking ? (
                     <>
                       <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> Job running
@@ -329,7 +369,72 @@ function App() {
           </Card>
 
           <div className="space-y-6">
-            <Card className="border-sky-100 bg-white shadow-[0_18px_50px_rgba(148,184,255,0.10)]">
+            <Card className="border-stone-200/80 bg-white/95 shadow-[0_20px_55px_rgba(62,43,24,0.08)] backdrop-blur-sm">
+              <CardHeader>
+                <CardTitle className="app-heading text-2xl text-slate-950">Style preview</CardTitle>
+                <CardDescription className="text-slate-600">
+                  This is the direction used in the rendered clip. One stronger look, fewer style choices.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="preview-stage relative overflow-hidden rounded-[30px] border border-stone-200/80 p-3">
+                  <div className="preview-video-frame aspect-[9/16]">
+                    <div className="preview-safe-guide preview-safe-guide-top" />
+                    <div className="preview-safe-guide preview-safe-guide-bottom" />
+                    <div className="preview-safe-label preview-safe-label-top">headline safe zone</div>
+                    <div className="preview-safe-label preview-safe-label-bottom">subtitle safe zone</div>
+                    <div className="preview-portrait-glow" />
+                    <div className="preview-portrait-frame">
+                      <div className="preview-portrait-head" />
+                      <div className="preview-portrait-face" />
+                      <div className="preview-portrait-neck" />
+                      <div className="preview-portrait-shirt" />
+                      <div className="preview-glasses preview-glasses-left" />
+                      <div className="preview-glasses preview-glasses-right" />
+                      <div className="preview-glasses-bridge" />
+                    </div>
+                    <div className="preview-video-overlay" />
+
+                    <div className="preview-top-panel">
+                      <div className="preview-top-accent" />
+                      <div className="preview-header-stack">
+                        <p className="preview-panel-label">{subtitlePreview.label}</p>
+                        <p className="preview-title">{subtitlePreview.title}</p>
+                        <p className="preview-reason">{subtitlePreview.reason}</p>
+                      </div>
+                    </div>
+
+                    <div className="preview-subtitle-shadow" />
+                    <div className="preview-subtitle-wrap">
+                      <div className="preview-subtitle-box">
+                        <p className="preview-subtitle">{subtitlePreview.caption}</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <div className="rounded-[22px] border border-stone-200 bg-stone-50 px-4 py-3">
+                    <p className="app-kicker text-[0.65rem] text-slate-500">Headline</p>
+                    <p className="mt-2 text-sm font-semibold text-slate-900">Dark panel with clear hierarchy</p>
+                  </div>
+                  <div className="rounded-[22px] border border-stone-200 bg-stone-50 px-4 py-3">
+                    <p className="app-kicker text-[0.65rem] text-slate-500">Reason</p>
+                    <p className="mt-2 text-sm font-semibold text-slate-900">Softer secondary copy, still readable</p>
+                  </div>
+                  <div className="rounded-[22px] border border-stone-200 bg-stone-50 px-4 py-3">
+                    <p className="app-kicker text-[0.65rem] text-slate-500">Captions</p>
+                    <p className="mt-2 text-sm font-semibold text-slate-900">Cleaner bottom focus with less visual noise</p>
+                  </div>
+                </div>
+
+                <div className="rounded-[24px] border border-emerald-200 bg-emerald-50 px-4 py-4 text-sm leading-6 text-emerald-950">
+                  Customer-ready: the preview now shows where title and subtitle sit on a portrait frame, so the chosen style is easier to trust before rendering.
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="border-stone-200/80 bg-white/95 shadow-[0_20px_55px_rgba(62,43,24,0.08)] backdrop-blur-sm">
               <CardHeader>
                 <CardTitle className="app-heading text-2xl text-slate-950">Status</CardTitle>
                 <CardDescription className="text-slate-600">
@@ -337,9 +442,9 @@ function App() {
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-5">
-                <div className="flex items-start justify-between gap-4 rounded-2xl border border-sky-100 bg-sky-50 px-4 py-4">
+                <div className="flex items-start justify-between gap-4 rounded-2xl border border-stone-200 bg-stone-50 px-4 py-4">
                   <div className="space-y-2">
-                    <p className="app-kicker text-sm font-medium text-sky-700">Current step</p>
+                    <p className="app-kicker text-sm font-medium text-amber-700">Current step</p>
                     <p className="text-xl font-semibold text-slate-950">{statusTitles[job.status]}</p>
                     <p className="app-copy text-sm text-slate-600">{job.message ?? 'No active job yet.'}</p>
                   </div>
@@ -365,7 +470,7 @@ function App() {
                         <div
                           key={status}
                           className={`rounded-2xl border px-4 py-3 text-sm ${
-                            active ? 'border-sky-200 bg-sky-50 text-slate-900' : 'border-slate-200 bg-slate-50 text-slate-500'
+                            active ? 'border-amber-200 bg-amber-50 text-slate-900' : 'border-slate-200 bg-slate-50 text-slate-500'
                           }`}
                         >
                           {title}
@@ -378,7 +483,7 @@ function App() {
               </CardContent>
             </Card>
 
-            <Card className="border-sky-100 bg-white shadow-[0_18px_50px_rgba(148,184,255,0.10)]">
+            <Card className="border-stone-200/80 bg-white/95 shadow-[0_20px_55px_rgba(62,43,24,0.08)] backdrop-blur-sm">
               <CardHeader>
                 <CardTitle className="app-heading text-xl text-slate-950">Activity log</CardTitle>
                 <CardDescription className="text-slate-600">
@@ -406,7 +511,7 @@ function App() {
               </CardContent>
             </Card>
 
-            <Card className="border-sky-100 bg-white shadow-[0_18px_50px_rgba(148,184,255,0.10)]">
+            <Card className="border-stone-200/80 bg-white/95 shadow-[0_20px_55px_rgba(62,43,24,0.08)] backdrop-blur-sm">
               <CardHeader>
                 <CardTitle className="app-heading text-xl text-slate-950">Downloads</CardTitle>
                 <CardDescription className="text-slate-600">
@@ -433,7 +538,7 @@ function App() {
                               <p className="text-sm text-slate-600">{clip.reason ?? 'Gemini selected a strong moment from the source video.'}</p>
                               <p className="text-xs text-slate-500">{clip.start.toFixed(1)}s to {clip.end.toFixed(1)}s</p>
                             </div>
-                            <Button asChild className="bg-sky-600 text-white hover:bg-sky-700 sm:w-auto">
+                            <Button asChild className="bg-amber-600 text-white hover:bg-amber-700 sm:w-auto">
                               <a href={`/api/jobs/${jobId}/download/video/${clip.index}`}>
                                 <Download className="mr-2 h-4 w-4" /> Download clip
                               </a>
