@@ -5,6 +5,12 @@ $frontendDir = Join-Path $root "frontend"
 $venvDir = Join-Path $root ".venv"
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
 $stateDir = Join-Path $root ".setup-state"
+$installerDir = Join-Path $stateDir "installers"
+$pythonInstallerVersion = "3.12.10"
+$pythonInstallerArch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "amd64" }
+$pythonInstallerName = "python-$pythonInstallerVersion-$pythonInstallerArch.exe"
+$pythonInstallerPath = Join-Path $installerDir $pythonInstallerName
+$pythonInstallerUrl = "https://www.python.org/ftp/python/$pythonInstallerVersion/$pythonInstallerName"
 $pythonDepsStamp = Join-Path $stateDir "python-deps.stamp"
 $frontendDepsStamp = Join-Path $stateDir "frontend-deps.stamp"
 $frontendBuildStamp = Join-Path $stateDir "frontend-build.stamp"
@@ -19,6 +25,61 @@ function Test-Command($name) {
     return $null -ne (Get-Command $name -ErrorAction SilentlyContinue)
 }
 
+function New-PythonLaunchSpec($command, $arguments = @()) {
+    return [PSCustomObject]@{
+        Command = $command
+        Arguments = @($arguments)
+    }
+}
+
+function Test-UsablePython($command, $arguments = @()) {
+    try {
+        $probeArgs = @($arguments) + @("-c", "import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)")
+        & $command @probeArgs *> $null
+        return $LASTEXITCODE -eq 0
+    }
+    catch {
+        return $false
+    }
+}
+
+function Find-PythonLaunchSpec {
+    if (Test-Command "py") {
+        if (Test-UsablePython "py" @("-3.12")) {
+            return New-PythonLaunchSpec "py" @("-3.12")
+        }
+
+        if (Test-UsablePython "py") {
+            return New-PythonLaunchSpec "py"
+        }
+    }
+
+    if (Test-Command "python" -and (Test-UsablePython "python")) {
+        return New-PythonLaunchSpec "python"
+    }
+
+    $candidatePaths = @(
+        (Join-Path $env:LocalAppData "Programs\Python\Python314\python.exe"),
+        (Join-Path $env:LocalAppData "Programs\Python\Python313\python.exe"),
+        (Join-Path $env:LocalAppData "Programs\Python\Python312\python.exe"),
+        (Join-Path $env:ProgramFiles "Python314\python.exe"),
+        (Join-Path $env:ProgramFiles "Python313\python.exe"),
+        (Join-Path $env:ProgramFiles "Python312\python.exe")
+    ) | Where-Object { $_ }
+
+    foreach ($candidate in $candidatePaths) {
+        if ((Test-Path $candidate) -and (Test-UsablePython $candidate)) {
+            return New-PythonLaunchSpec $candidate
+        }
+    }
+
+    return $null
+}
+
+function Invoke-Python($pythonSpec, $arguments) {
+    & $pythonSpec.Command @($pythonSpec.Arguments + $arguments)
+}
+
 function Install-WithWinget($packageId, $label) {
     if (-not (Test-Command "winget")) {
         throw "winget was not found. Install App Installer from Microsoft Store first, then run launch_app.bat again."
@@ -29,15 +90,69 @@ function Install-WithWinget($packageId, $label) {
     Refresh-SessionPath
 }
 
-function Ensure-Python {
-    if (Test-Command "py") { return }
-    if (Test-Command "python") { return }
+function Install-PythonDirectly {
+    Ensure-StateDir
 
-    Install-WithWinget "Python.Python.3.12" "Python"
-
-    if (-not (Test-Command "py") -and -not (Test-Command "python")) {
-        throw "Python installation finished but the command is still unavailable. Close this window and run launch_app.bat again."
+    if (-not (Test-Path $installerDir)) {
+        New-Item -ItemType Directory -Path $installerDir | Out-Null
     }
+
+    Write-Host "Downloading Python installer from python.org ..."
+    Invoke-WebRequest -Uri $pythonInstallerUrl -OutFile $pythonInstallerPath
+
+    Write-Host "Running Python installer ..."
+    $installerArgs = @(
+        "/quiet",
+        "InstallAllUsers=0",
+        "PrependPath=1",
+        "Include_launcher=1",
+        "AssociateFiles=0",
+        "Shortcuts=0",
+        "Include_test=0"
+    )
+    $process = Start-Process -FilePath $pythonInstallerPath -ArgumentList $installerArgs -Wait -PassThru
+    if ($process.ExitCode -ne 0) {
+        throw "Python installer exited with code $($process.ExitCode)."
+    }
+
+    Refresh-SessionPath
+}
+
+function Ensure-Python {
+    $pythonSpec = Find-PythonLaunchSpec
+    if ($null -ne $pythonSpec) {
+        return $pythonSpec
+    }
+
+    if (Test-Command "winget") {
+        try {
+            Install-WithWinget "Python.Python.3.12" "Python"
+            $pythonSpec = Find-PythonLaunchSpec
+            if ($null -ne $pythonSpec) {
+                return $pythonSpec
+            }
+        }
+        catch {
+            Write-Warning "winget Python install failed: $($_.Exception.Message)"
+        }
+    }
+    else {
+        Write-Warning "winget was not found. Falling back to a direct Python installer download."
+    }
+
+    try {
+        Install-PythonDirectly
+    }
+    catch {
+        throw "Could not install Python automatically. Download Python 3.12+ from https://www.python.org/downloads/windows/ and then run launch_app.bat again. Details: $($_.Exception.Message)"
+    }
+
+    $pythonSpec = Find-PythonLaunchSpec
+    if ($null -eq $pythonSpec) {
+        throw "Python installation finished but Python 3.12+ is still unavailable. Install it manually from https://www.python.org/downloads/windows/ and then run launch_app.bat again."
+    }
+
+    return $pythonSpec
 }
 
 function Ensure-Node {
@@ -58,11 +173,6 @@ function Ensure-Ffmpeg {
     if (-not (Test-Command "ffmpeg")) {
         throw "FFmpeg installation finished but ffmpeg is still unavailable. Close this window and run launch_app.bat again."
     }
-}
-
-function Get-PythonCommand {
-    if (Test-Command "py") { return "py" }
-    return "python"
 }
 
 function Ensure-StateDir {
@@ -112,15 +222,13 @@ Set-Location $root
 Write-Host "Preparing Miscoshorts AI for Windows..."
 Refresh-SessionPath
 Ensure-StateDir
-Ensure-Python
+$pythonSpec = Ensure-Python
 Ensure-Node
 Ensure-Ffmpeg
 
-$pythonCommand = Get-PythonCommand
-
 if (-not (Test-Path $venvPython)) {
     Write-Host "Creating virtual environment ..."
-    & $pythonCommand -m venv .venv
+    Invoke-Python $pythonSpec @("-m", "venv", ".venv")
 }
 
 if (Test-Stale $pythonDepsStamp @((Join-Path $root "requirements.txt"), $venvPython)) {

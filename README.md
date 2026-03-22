@@ -226,6 +226,21 @@ Typical artifacts:
 
 ## Troubleshooting
 
+### Windows Cannot Install Or Find Python
+
+If the Windows launcher says Python could not be downloaded or still cannot find Python after install:
+
+1. run `launch_app.bat` again from the project folder
+2. if `winget` is blocked or missing, the launcher now falls back to the official Python installer from python.org
+3. if it still fails, install Python 3.12+ manually from https://www.python.org/downloads/windows/
+4. after manual install, close the terminal window and run `launch_app.bat` again
+
+Important:
+
+- install Python 3.12 or newer
+- on the Python installer, enable `Add python.exe to PATH` if shown
+- send the full error text from the launcher window if it still stops
+
 ### Missing FFmpeg
 
 Check that FFmpeg is installed:
