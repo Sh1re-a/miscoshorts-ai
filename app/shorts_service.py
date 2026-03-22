@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import threading
@@ -351,6 +352,27 @@ def create_short_from_url(
 
             _emit(progress_callback, "rendering", f"Preparing subtitle timing for clip {index}...")
             clip_transcript = transcribe_clip_for_subtitles(clip, output_dir, index)
+            subtitle_plan = subtitles.build_subtitle_plan(
+                clip_transcript.get("segments") or [],
+                0,
+                clip_vertical.duration,
+            )
+            subtitle_plan_path = output_dir / f"clip_{index:02d}_subtitles.json"
+            subtitle_plan_path.write_text(
+                json.dumps(subtitles.export_subtitle_plan(subtitle_plan), ensure_ascii=True, indent=2),
+                encoding="utf-8",
+            )
+            subtitle_preflight = subtitles.validate_subtitle_plan_renderability(
+                clip_vertical.size,
+                subtitle_plan,
+                subtitle_style,
+            )
+            subtitle_preflight_path = output_dir / f"clip_{index:02d}_subtitle_preflight.json"
+            subtitle_preflight_path.write_text(
+                json.dumps(subtitle_preflight, ensure_ascii=True, indent=2),
+                encoding="utf-8",
+            )
+            _emit(progress_callback, "rendering", f"Subtitle preflight passed for clip {index}.")
 
             clip_final = subtitles.create_subtitles(
                 clip_vertical,
@@ -371,6 +393,10 @@ def create_short_from_url(
                     "end": end,
                     "outputFilename": current_filename,
                     "outputPath": str(output_path),
+                    "subtitlePlanPath": str(subtitle_plan_path),
+                    "subtitlePlan": subtitles.export_subtitle_plan(subtitle_plan),
+                    "subtitlePreflightPath": str(subtitle_preflight_path),
+                    "subtitlePreflight": subtitle_preflight,
                 }
             )
 

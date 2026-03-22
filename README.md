@@ -29,6 +29,8 @@ The browser is just the interface. The launcher window is what keeps the local a
 
 On Windows, the launcher can also handle first-time setup for you. It installs missing dependencies, prepares the app, and opens it in the browser. Later launches are faster and reuse the existing setup.
 
+On macOS, `launch_app.command` now prefers the built app when `frontend/dist` is included, and falls back to the local developer flow only when the built frontend is missing.
+
 The launcher stores internal Windows runtime files inside `.miscoshorts/` so the main project folder stays cleaner.
 
 If the folder already contains `frontend/dist`, the launcher uses that built app directly and skips Node.js completely.
@@ -145,6 +147,8 @@ If you want the non-technical option instead of typing in the terminal:
 
 - macOS: double-click `launch_app.command`
 - Windows: double-click `launch_app.bat`
+
+On macOS, the launcher uses the built frontend automatically when it is available. If no built frontend is present, it starts the local React dev server instead.
 
 On Windows, `launch_app.bat` now does more than just start the app:
 

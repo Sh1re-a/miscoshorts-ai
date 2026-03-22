@@ -1,12 +1,20 @@
 import os
 import platform
 import re
+from difflib import SequenceMatcher
 
-from moviepy import ColorClip, CompositeVideoClip, TextClip
+import numpy as np
+from moviepy import CompositeVideoClip, ImageClip, VideoClip
+from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont
 
 
 FONT_PRESETS = {
     "clean": [
+        "TheBoldFont",
+        "Inter ExtraBold",
+        "Inter-Bold",
+        "Montserrat ExtraBold",
+        "Montserrat-Bold",
         "SF Pro Display Semibold",
         "Avenir Next Bold",
         "Avenir Next Demi Bold",
@@ -21,6 +29,11 @@ FONT_PRESETS = {
         "DejaVuSans-Bold",
     ],
     "bold": [
+        "TheBoldFont",
+        "Inter ExtraBold",
+        "Inter-Bold",
+        "Montserrat ExtraBold",
+        "Montserrat-Bold",
         "SF Pro Display Bold",
         "Avenir Next Heavy",
         "Avenir Next Bold",
@@ -34,6 +47,8 @@ FONT_PRESETS = {
         "DejaVuSans-Bold",
     ],
     "soft": [
+        "Inter-Bold",
+        "Montserrat-Bold",
         "SF Pro Rounded Semibold",
         "Avenir Next Medium",
         "Avenir Next Demi Bold",
@@ -50,10 +65,20 @@ FONT_PRESETS = {
 }
 
 COLOR_PRESETS = {
-    "sun": {"base_color": "#fffdf7", "active_color": "#ffd54a", "stroke_color": "#050505"},
-    "ivory": {"base_color": "#ffffff", "active_color": "#ffd54a", "stroke_color": "#050505"},
-    "mint": {"base_color": "#ffffff", "active_color": "#ffd54a", "stroke_color": "#050505"},
+    "sun": {"base_color": "#ffffff", "active_color": "#ffd700", "stroke_color": None},
+    "ivory": {"base_color": "#ffffff", "active_color": "#ffd700", "stroke_color": None},
+    "mint": {"base_color": "#ffffff", "active_color": "#ffd700", "stroke_color": None},
 }
+
+HEADER_COLOR = "#f5f5f5"
+HEADER_REASON_COLOR = "#dddddd"
+HEADER_PANEL_FILL = (0, 0, 0, 166)
+HEADER_PANEL_BORDER = (255, 255, 255, 26)
+SUBTITLE_SHADOW_ALPHA = 76
+SUBTITLE_SHADOW_COLOR = (0, 0, 0, SUBTITLE_SHADOW_ALPHA)
+SUBTITLE_INACTIVE_ALPHA = 128
+GRADIENT_TOP_ALPHA = 76
+GRADIENT_BOTTOM_ALPHA = 102
 
 DEFAULT_STYLE = {
     "fontPreset": "clean",
@@ -108,17 +133,47 @@ TOP_OVERLAY_MIN_DURATION = 2.4
 TOP_OVERLAY_MAX_DURATION = 4.2
 WORD_HIGHLIGHT_LEAD = 0.05
 WORD_HIGHLIGHT_TAIL = 0.08
-SUBTITLE_Y_RATIO = 0.69
-SUBTITLE_SAFE_WIDTH_RATIO = 0.8
-SUBTITLE_MAX_HEIGHT_RATIO = 0.22
-SUBTITLE_BASE_FONT_RATIO = 0.074
-SUBTITLE_MIN_FONT_SIZE = 38
-SUBTITLE_MAX_FONT_SIZE = 74
+SUBTITLE_Y_RATIO = 0.75
+SUBTITLE_SAFE_WIDTH_RATIO = 0.85
+SUBTITLE_MAX_HEIGHT_RATIO = 0.24
+SUBTITLE_BASE_FONT_RATIO = 70 / 1920
+SUBTITLE_MIN_FONT_SIZE = 70
+SUBTITLE_MAX_FONT_SIZE = 70
 ACTIVE_WORD_SCALE = 1.08
 ACTIVE_WORD_SETTLE_SCALE = 1.03
 ENABLE_TOP_DESCRIPTION_OVERLAY = False
+SUBTITLE_HORIZONTAL_MARGIN_RATIO = 0.1
+SUBTITLE_VERTICAL_MARGIN_RATIO = 0.1
+SUBTITLE_MAX_LINES = 2
+SUBTITLE_TEXT_PADDING_X = 6
+SUBTITLE_TEXT_PADDING_Y = 6
+SUBTITLE_MIN_FONT_RATIO = 0.028
+SUBTITLE_MAX_FONT_RATIO = 0.036
+HEADER_SAFE_WIDTH_RATIO = 0.9
+HEADER_TOP_RATIO = 0.1
+HEADER_PANEL_PADDING_X = 28
+HEADER_PANEL_PADDING_Y = 18
+HEADER_PANEL_GAP = 12
+HEADER_PANEL_RADIUS = 24
+HEADER_TITLE_FONT_RATIO = 0.035
+HEADER_REASON_FONT_RATIO = 0.018
+HEADER_TITLE_MIN_RATIO = 0.028
+HEADER_TITLE_MAX_RATIO = 0.042
+HEADER_REASON_MIN_RATIO = 0.014
+HEADER_REASON_MAX_RATIO = 0.022
+SUBTITLE_FADE_IN = 0.08
+SUBTITLE_FADE_OUT = 0.08
+HEADER_FADE_IN = 0.5
+HEADER_FADE_OUT = 0.5
+HEADER_DURATION = 3.0
+HEADER_PANEL_MIN_HEIGHT = 120
 
 TITLE_FONT_PRESETS = [
+    "TheBoldFont",
+    "Inter ExtraBold",
+    "Inter-Bold",
+    "Montserrat ExtraBold",
+    "Montserrat-Bold",
     "SF Pro Display Semibold",
     "Avenir Next Bold",
     "Avenir Next Demi Bold",
@@ -130,13 +185,23 @@ TITLE_FONT_PRESETS = [
 ]
 
 AUTO_FONT = "__AUTO_DEFAULT_FONT__"
+SUBTITLE_LETTER_SPACING = -2
+HEADER_TITLE_LETTER_SPACING = 3
+HEADER_REASON_LETTER_SPACING = 0
 
 
 def get_preferred_fonts():
     system_name = platform.system().lower()
 
+    def existing_paths(*paths):
+        return [path for path in paths if os.path.exists(path)]
+
     if system_name == 'windows':
-        windows_font_paths = [
+        windows_font_paths = existing_paths(
+            r"C:\Windows\Fonts\Inter-ExtraBold.ttf",
+            r"C:\Windows\Fonts\Inter-Bold.ttf",
+            r"C:\Windows\Fonts\Montserrat-ExtraBold.ttf",
+            r"C:\Windows\Fonts\Montserrat-Bold.ttf",
             r"C:\Windows\Fonts\arialbd.ttf",
             r"C:\Windows\Fonts\arial.ttf",
             r"C:\Windows\Fonts\segoeuib.ttf",
@@ -144,12 +209,52 @@ def get_preferred_fonts():
             r"C:\Windows\Fonts\calibrib.ttf",
             r"C:\Windows\Fonts\calibri.ttf",
             r"C:\Windows\Fonts\bahnschrift.ttf",
-        ]
-        existing_windows_font_paths = [font_path for font_path in windows_font_paths if os.path.exists(font_path)]
-        return [*existing_windows_font_paths, 'Aptos Display Bold', 'Aptos Bold', 'Segoe UI Semibold', 'Segoe UI Bold', 'Arial-Bold', 'Arial', 'Calibri', 'NotoSans-Bold', 'DejaVuSans-Bold']
+        )
+        return [*windows_font_paths, 'Aptos Display Bold', 'Aptos Bold', 'Segoe UI Semibold', 'Segoe UI Bold', 'Arial-Bold', 'Arial', 'Calibri', 'NotoSans-Bold', 'DejaVuSans-Bold']
     if system_name == 'darwin':
-        return ['SF Pro Display Semibold', 'SF Pro Display Bold', 'Avenir Next Bold', 'Avenir Next Demi Bold', 'Helvetica Neue Medium', 'Helvetica Neue Bold', 'Helvetica-Bold', 'Arial-Bold', 'Arial', 'DejaVuSans-Bold']
-    return ['NotoSans-Bold', 'Inter-SemiBold', 'DejaVuSans-Bold', 'LiberationSans-Bold', 'Arial-Bold', 'Arial']
+        return [
+            *existing_paths(
+                '/Library/Fonts/Inter-ExtraBold.ttf',
+                '/Library/Fonts/Inter-Bold.ttf',
+                '/Library/Fonts/Montserrat-ExtraBold.ttf',
+                '/Library/Fonts/Montserrat-Bold.ttf',
+                '/Library/Fonts/Arial Bold.ttf',
+                '/System/Library/Fonts/Supplemental/Arial Bold.ttf',
+                '/System/Library/Fonts/Supplemental/Arial.ttf',
+                '/System/Library/Fonts/Helvetica.ttc',
+                '/System/Library/Fonts/Supplemental/Helvetica.ttf',
+                '/System/Library/Fonts/Supplemental/Trebuchet MS Bold.ttf',
+            ),
+            'SF Pro Display Semibold',
+            'SF Pro Display Bold',
+            'Avenir Next Bold',
+            'Avenir Next Demi Bold',
+            'Helvetica Neue Medium',
+            'Helvetica Neue Bold',
+            'Helvetica-Bold',
+            'Arial-Bold',
+            'Arial',
+            'DejaVuSans-Bold',
+        ]
+    return [
+        *existing_paths(
+            '/usr/share/fonts/truetype/inter/Inter-ExtraBold.ttf',
+            '/usr/share/fonts/truetype/inter/Inter-Bold.ttf',
+            '/usr/share/fonts/truetype/montserrat/Montserrat-ExtraBold.ttf',
+            '/usr/share/fonts/truetype/montserrat/Montserrat-Bold.ttf',
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+            '/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf',
+            '/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf',
+        ),
+        'NotoSans-Bold',
+        'Inter-Bold',
+        'Inter-SemiBold',
+        'Montserrat-Bold',
+        'DejaVuSans-Bold',
+        'LiberationSans-Bold',
+        'Arial-Bold',
+        'Arial',
+    ]
 
 
 def normalize_subtitle_style(style=None):
@@ -184,7 +289,8 @@ def _font_kwargs(font):
 
 
 def _clean_caption_text(text):
-    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    cleaned = (text or "").replace("’", "'").replace("`", "'")
+    cleaned = re.sub(r"\s+", " ", cleaned.strip())
     if not cleaned:
         return ""
 
@@ -214,6 +320,41 @@ def _clean_caption_text(text):
 
 def _display_caption_text(text):
     return _clean_caption_text(text).upper()
+
+
+def _normalized_compare_text(text):
+    return re.sub(r"[^a-z0-9%]+", "", _clean_caption_text(text).lower())
+
+
+def _word_entries_are_reliable(segment_text, word_entries):
+    if not word_entries:
+        return False
+
+    segment_compare = _normalized_compare_text(segment_text)
+    words_compare = _normalized_compare_text(" ".join(entry.get("text", "") for entry in word_entries))
+    if not segment_compare or not words_compare:
+        return False
+
+    similarity = SequenceMatcher(None, segment_compare, words_compare).ratio()
+    if similarity < 0.78:
+        return False
+
+    suspicious_words = 0
+    for entry in word_entries:
+        token = _clean_caption_text(entry.get("text", ""))
+        if not token:
+            suspicious_words += 1
+            continue
+
+        if re.search(r"[A-Za-z]{1,2}\d|\d[A-Za-z]{1,2}", token):
+            suspicious_words += 1
+            continue
+
+        if len(re.sub(r"[^A-Za-z0-9]+", "", token)) <= 1 and token not in {"I", "A", "%"}:
+            suspicious_words += 1
+            continue
+
+    return suspicious_words <= max(1, len(word_entries) // 4)
 
 
 def _score_highlight_word(word_text):
@@ -258,7 +399,78 @@ def _build_caption_cue(start_time, end_time, words):
         "words": cleaned_words,
         "highlightIndex": highlight_index,
         "highlight": cleaned_words[highlight_index],
+        "wordEntries": None,
     }
+
+
+def _finalize_subtitle_plan(cues, video_duration):
+    finalized = []
+
+    for cue in cues:
+        start = max(0.0, min(video_duration, float(cue["start"])))
+        end = max(start + 0.12, min(video_duration, float(cue["end"])))
+        text = _display_caption_text(cue.get("text", ""))
+        if not text:
+            continue
+
+        normalized_cue = dict(cue)
+        normalized_cue["start"] = start
+        normalized_cue["end"] = end
+        normalized_cue["text"] = text
+
+        if finalized and finalized[-1]["text"] == normalized_cue["text"] and start - finalized[-1]["end"] <= 0.08:
+            finalized[-1]["end"] = end
+            continue
+
+        finalized.append(normalized_cue)
+
+    return finalized
+
+
+def export_subtitle_plan(cues):
+    exported = []
+    for cue in cues:
+        exported.append(
+            {
+                "start": round(float(cue["start"]), 3),
+                "end": round(float(cue["end"]), 3),
+                "text": cue["text"],
+                "highlight": cue["highlight"],
+            }
+        )
+    return exported
+
+
+def build_subtitle_plan(whisper_segments, clip_start_time, video_duration):
+    cues = []
+
+    for segment in whisper_segments:
+        start = segment['start'] - clip_start_time
+        end = segment['end'] - clip_start_time
+        text = _clean_caption_text(segment['text'])
+
+        if end <= 0 or start >= video_duration:
+            continue
+
+        start = max(0, start)
+        end = min(video_duration, end)
+        word_entries = extract_word_entries(segment, clip_start_time, video_duration)
+        use_word_entries = _word_entries_are_reliable(text, word_entries)
+
+        if use_word_entries:
+            for chunk_words in split_word_entries(word_entries):
+                cue = _build_caption_cue(chunk_words[0]["start"], chunk_words[-1]["end"], [word["text"] for word in chunk_words])
+                if cue is None:
+                    continue
+                cue["wordEntries"] = chunk_words
+                cues.append(cue)
+        else:
+            for (chunk_start, chunk_end), chunk_text in split_subtitle_text(text, start, end):
+                cue = _build_caption_cue(chunk_start, chunk_end, chunk_text.split(" "))
+                if cue is not None:
+                    cues.append(cue)
+
+    return _finalize_subtitle_plan(cues, video_duration)
 
 
 def split_subtitle_text(text, start_time, end_time):
@@ -378,6 +590,49 @@ def _with_clip_timing(clip, start_time, end_time):
     return clip.with_start(start_time).with_duration(clip_duration)
 
 
+def _cubic_ease(value):
+    bounded = max(0.0, min(1.0, float(value)))
+    return bounded * bounded * (3.0 - 2.0 * bounded)
+
+
+def _opacity_at_time(local_t, duration, fade_in_duration, fade_out_duration):
+    opacity = 1.0
+    if fade_in_duration > 0 and local_t < fade_in_duration:
+        opacity *= _cubic_ease(local_t / fade_in_duration)
+    if fade_out_duration > 0 and local_t > duration - fade_out_duration:
+        remaining = max(0.0, duration - local_t)
+        opacity *= _cubic_ease(remaining / fade_out_duration)
+    return opacity
+
+
+def _create_rgba_video_clip(frame_provider, size, duration, *, fade_in_duration=0.0, fade_out_duration=0.0):
+    def rgb_frame(t):
+        frame = frame_provider(t)
+        return frame[:, :, :3]
+
+    def mask_frame(t):
+        frame = frame_provider(t)
+        alpha = frame[:, :, 3].astype(np.float32) / 255.0
+        return alpha * _opacity_at_time(float(t), duration, fade_in_duration, fade_out_duration)
+
+    clip = VideoClip(frame_function=rgb_frame, duration=duration)
+    clip.size = size
+    mask = VideoClip(frame_function=mask_frame, is_mask=True, duration=duration)
+    mask.size = size
+    return clip.with_mask(mask)
+
+
+def _create_static_rgba_clip(rgba_frame, duration, *, fade_in_duration=0.0, fade_out_duration=0.0):
+    frame = np.array(rgba_frame, copy=False)
+    return _create_rgba_video_clip(
+        lambda _t: frame,
+        (frame.shape[1], frame.shape[0]),
+        duration,
+        fade_in_duration=fade_in_duration,
+        fade_out_duration=fade_out_duration,
+    )
+
+
 def _prime_clip_duration(clip, duration=1.0):
     return clip.with_duration(_safe_duration(duration, fallback=1.0))
 
@@ -390,49 +645,603 @@ def _expand_clip_canvas(clip, pad_x=0, pad_y=0):
     return _prime_clip_duration(expanded, getattr(clip, "duration", 1.0))
 
 
-def _intro_overlay_duration(video_duration):
-    return min(TOP_OVERLAY_MAX_DURATION, max(TOP_OVERLAY_MIN_DURATION, video_duration * 0.36))
+def _load_pil_font(font, font_size):
+    if font == AUTO_FONT:
+        return None
+
+    try:
+        return ImageFont.truetype(font, font_size)
+    except Exception:
+        return None
 
 
-def _smooth_word_window(word_start, word_end, video_duration):
-    start = max(0.0, word_start - WORD_HIGHLIGHT_LEAD)
-    end = min(video_duration, word_end + WORD_HIGHLIGHT_TAIL)
-    if end - start < 0.12:
-        end = min(video_duration, start + 0.12)
-    return start, end
+def _build_font_size_candidates(video_clip):
+    preferred = round(video_clip.h * SUBTITLE_BASE_FONT_RATIO)
+    minimum = round(video_clip.h * SUBTITLE_MIN_FONT_RATIO)
+    maximum = round(video_clip.h * SUBTITLE_MAX_FONT_RATIO)
+    upper = max(preferred, maximum)
+    lower = max(28, min(minimum, upper))
+    return range(upper, lower - 1, -4)
 
 
-def _create_caption_text_clip(text, font, font_size, color, stroke_color, stroke_width, width, interline):
-    clip = TextClip(
-        text=text,
-        **_font_kwargs(font),
-        font_size=font_size,
-        color=color,
-        stroke_color=stroke_color,
-        stroke_width=stroke_width,
-        method='caption',
-        size=(width, None),
-        interline=interline,
-        text_align='center',
+def _measure_caption_word(draw, word, word_index, font, stroke_width):
+    bbox = draw.textbbox((0, 0), word, font=font, anchor='ls', stroke_width=stroke_width)
+    return {
+        "text": word,
+        "index": word_index,
+        "bbox": bbox,
+        "width": bbox[2] - bbox[0],
+        "ascent": max(0, -bbox[1]),
+        "descent": max(0, bbox[3]),
+    }
+
+
+def _measure_tracked_text(draw, text, font, stroke_width, tracking):
+    if not text:
+        return {
+            "bbox": (0, 0, 0, 0),
+            "width": 0,
+            "ascent": 0,
+            "descent": 0,
+        }
+
+    if tracking == 0 or len(text) <= 1:
+        return _measure_caption_word(draw, text, 0, font, stroke_width)
+
+    glyph_boxes = []
+    current_x = 0
+    min_left = None
+    min_top = None
+    max_right = None
+    max_bottom = None
+
+    for char in text:
+        bbox = draw.textbbox((0, 0), char, font=font, anchor='ls', stroke_width=stroke_width)
+        left = current_x + bbox[0]
+        right = current_x + bbox[2]
+        min_left = left if min_left is None else min(min_left, left)
+        min_top = bbox[1] if min_top is None else min(min_top, bbox[1])
+        max_right = right if max_right is None else max(max_right, right)
+        max_bottom = bbox[3] if max_bottom is None else max(max_bottom, bbox[3])
+        advance = draw.textlength(char, font=font)
+        current_x += advance + tracking
+        glyph_boxes.append(bbox)
+
+    if min_left is None:
+        min_left = min_top = max_right = max_bottom = 0
+
+    return {
+        "bbox": (int(min_left), int(min_top), int(max_right), int(max_bottom)),
+        "width": int(max_right - min_left),
+        "ascent": max(0, -int(min_top)),
+        "descent": max(0, int(max_bottom)),
+    }
+
+
+def _draw_tracked_text(draw, position, text, font, fill, tracking, anchor='ls', stroke_width=0, stroke_fill=None):
+    if tracking == 0 or len(text) <= 1:
+        kwargs = {
+            "font": font,
+            "fill": fill,
+            "anchor": anchor,
+        }
+        if stroke_width > 0 and stroke_fill is not None:
+            kwargs["stroke_width"] = stroke_width
+            kwargs["stroke_fill"] = stroke_fill
+        draw.text(position, text, **kwargs)
+        return
+
+    x, y = position
+    current_x = x
+    for char in text:
+        kwargs = {
+            "font": font,
+            "fill": fill,
+            "anchor": anchor,
+        }
+        if stroke_width > 0 and stroke_fill is not None:
+            kwargs["stroke_width"] = stroke_width
+            kwargs["stroke_fill"] = stroke_fill
+        draw.text((current_x, y), char, **kwargs)
+        current_x += draw.textlength(char, font=font) + tracking
+
+
+def _wrap_caption_words(measured_words, max_width, space_width, max_lines=SUBTITLE_MAX_LINES):
+    if not measured_words:
+        return None
+
+    lines = []
+    current_line = []
+    current_width = 0
+
+    for word in measured_words:
+        proposed_width = word["width"] if not current_line else current_width + space_width + word["width"]
+        if current_line and proposed_width > max_width:
+            lines.append({"words": current_line, "width": current_width})
+            current_line = [word]
+            current_width = word["width"]
+        else:
+            current_line.append(word)
+            current_width = proposed_width
+
+        if len(lines) >= max_lines:
+            return None
+
+    if current_line:
+        lines.append({"words": current_line, "width": current_width})
+
+    if len(lines) > max_lines:
+        return None
+
+    for line in lines:
+        line["ascent"] = max(word["ascent"] for word in line["words"])
+        line["descent"] = max(word["descent"] for word in line["words"])
+        line["height"] = line["ascent"] + line["descent"]
+
+    return lines
+
+
+def _build_locked_text_layout(
+    cue,
+    video_clip,
+    subtitle_style,
+    *,
+    max_width_ratio,
+    max_height_ratio,
+    base_font_ratio,
+    min_font_ratio,
+    max_font_ratio,
+    padding_x,
+    padding_y,
+    line_gap_ratio,
+    max_lines=SUBTITLE_MAX_LINES,
+    stroke_color=None,
+    shadow_offset_y=None,
+    tracking=0,
+):
+    colors = COLOR_PRESETS[subtitle_style["colorPreset"]]
+    max_width = int(video_clip.w * max_width_ratio)
+    max_height = int(video_clip.h * max_height_ratio)
+    stroke_width = 0 if not (stroke_color or colors["stroke_color"]) else max(1, min(3, round(video_clip.h * 0.0012)))
+    shadow_offset_y = shadow_offset_y if shadow_offset_y is not None else max(2, round(video_clip.h * 0.0024))
+    line_gap = max(6, round(video_clip.h * line_gap_ratio))
+    padding_x = max(4, min(16, padding_x))
+    padding_y = max(4, min(16, padding_y))
+    probe_image = Image.new('RGBA', (max_width + padding_x * 2, max_height + padding_y * 2), (0, 0, 0, 0))
+    probe_draw = ImageDraw.Draw(probe_image)
+    display_words = cue.get("words") or cue["text"].split()
+    display_words = [_display_caption_text(word) for word in display_words if _display_caption_text(word)]
+
+    if not display_words:
+        raise RuntimeError("Subtitle cue has no renderable words.")
+
+    last_error = None
+    for font in get_font_candidates(subtitle_style["fontPreset"]):
+        for font_size in _build_font_size_candidates_custom(video_clip, base_font_ratio, min_font_ratio, max_font_ratio):
+            pil_font = _load_pil_font(font, font_size)
+            if pil_font is None:
+                continue
+
+            try:
+                space_width = max(4, round(probe_draw.textlength(' ', font=pil_font)))
+                measured_words = [
+                    {
+                        "text": word,
+                        "index": word_index,
+                        **_measure_tracked_text(probe_draw, word, pil_font, stroke_width, tracking),
+                    }
+                    for word_index, word in enumerate(display_words)
+                ]
+                if any(word["width"] > max_width for word in measured_words):
+                    continue
+
+                lines = _wrap_caption_words(measured_words, max_width, space_width, max_lines=max_lines)
+                if lines is None:
+                    continue
+
+                content_width = max(line["width"] for line in lines)
+                content_height = sum(line["height"] for line in lines) + line_gap * (len(lines) - 1)
+                canvas_width = content_width + padding_x * 2
+                canvas_height = content_height + padding_y * 2 + shadow_offset_y
+                if canvas_height > max_height:
+                    continue
+
+                positioned_words = []
+                current_y = padding_y
+                for line in lines:
+                    line_left = padding_x + int((content_width - line["width"]) / 2)
+                    baseline_y = current_y + line["ascent"]
+                    current_x = line_left
+                    for word in line["words"]:
+                        positioned_words.append(
+                            {
+                                "index": word["index"],
+                                "text": word["text"],
+                                "anchor_x": current_x - word["bbox"][0],
+                                "baseline_y": baseline_y,
+                                "tracking": tracking,
+                            }
+                        )
+                        current_x += word["width"] + space_width
+                    current_y += line["height"] + line_gap
+
+                return {
+                    "font": pil_font,
+                    "stroke_width": stroke_width,
+                    "stroke_fill": ImageColor.getrgb(stroke_color or colors["stroke_color"]) if (stroke_color or colors["stroke_color"]) else None,
+                    "shadow_offset_y": shadow_offset_y,
+                    "size": (canvas_width, canvas_height),
+                    "words": sorted(positioned_words, key=lambda entry: entry["index"]),
+                }
+            except Exception as error:
+                last_error = error
+
+    raise RuntimeError("Could not render subtitles with a glyph-safe PIL font.") from last_error
+
+
+def _render_locked_text_image(
+    layout,
+    subtitle_style,
+    *,
+    highlight_index,
+    base_color=None,
+    active_color=None,
+    inactive_alpha=1.0,
+    shadow_fill=None,
+):
+    colors = COLOR_PRESETS[subtitle_style["colorPreset"]]
+    base_rgb = ImageColor.getrgb(base_color or colors["base_color"])
+    active_rgb = ImageColor.getrgb(active_color or colors["active_color"])
+    shadow_rgba = shadow_fill or SUBTITLE_SHADOW_COLOR
+    inactive_channel = max(0, min(255, round(255 * inactive_alpha)))
+    image = Image.new('RGBA', layout["size"], (0, 0, 0, 0))
+    shadow_layer = Image.new('RGBA', layout["size"], (0, 0, 0, 0))
+    shadow_draw = ImageDraw.Draw(shadow_layer)
+    draw = ImageDraw.Draw(image)
+
+    for word in layout["words"]:
+        is_active = word["index"] == highlight_index
+        fill = (*active_rgb, 255) if is_active else (*base_rgb, inactive_channel)
+        _draw_tracked_text(
+            shadow_draw,
+            (word["anchor_x"] + 2, word["baseline_y"] + layout["shadow_offset_y"]),
+            word["text"],
+            layout["font"],
+            shadow_rgba,
+            word.get("tracking", 0),
+            anchor='ls',
+        )
+        _draw_tracked_text(
+            draw,
+            (word["anchor_x"], word["baseline_y"]),
+            word["text"],
+            layout["font"],
+            fill,
+            word.get("tracking", 0),
+            anchor='ls',
+            stroke_width=layout["stroke_width"],
+            stroke_fill=layout["stroke_fill"],
+        )
+
+    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=5))
+    return Image.alpha_composite(shadow_layer, image)
+
+
+def _render_subtitle_bitmap_image(cue, video_clip, subtitle_style):
+    layout = _build_locked_text_layout(
+        cue,
+        video_clip,
+        subtitle_style,
+        max_width_ratio=SUBTITLE_SAFE_WIDTH_RATIO,
+        max_height_ratio=SUBTITLE_MAX_HEIGHT_RATIO,
+        base_font_ratio=SUBTITLE_BASE_FONT_RATIO,
+        min_font_ratio=SUBTITLE_MIN_FONT_RATIO,
+        max_font_ratio=SUBTITLE_MAX_FONT_RATIO,
+        padding_x=SUBTITLE_TEXT_PADDING_X,
+        padding_y=SUBTITLE_TEXT_PADDING_Y,
+        line_gap_ratio=0.008,
+        tracking=SUBTITLE_LETTER_SPACING,
     )
-    clip = _prime_clip_duration(clip)
-    vertical_pad = max(6, round(font_size * 0.18) + stroke_width)
-    return _expand_clip_canvas(clip, pad_y=vertical_pad)
-
-
-def _create_label_text_clip(text, font, font_size, color, stroke_color, stroke_width):
-    clip = TextClip(
-        text=text,
-        **_font_kwargs(font),
-        font_size=font_size,
-        color=color,
-        stroke_color=stroke_color,
-        stroke_width=stroke_width,
+    highlight_index = cue.get("highlightIndex")
+    if highlight_index is None or highlight_index >= len(layout["words"]):
+        highlight_index = -1
+    return _render_locked_text_image(
+        layout,
+        subtitle_style,
+        highlight_index=highlight_index,
+        inactive_alpha=SUBTITLE_INACTIVE_ALPHA / 255,
     )
-    clip = _prime_clip_duration(clip)
-    horizontal_pad = max(6, round(font_size * 0.12) + stroke_width)
-    vertical_pad = max(6, round(font_size * 0.18) + stroke_width)
-    return _expand_clip_canvas(clip, pad_x=horizontal_pad, pad_y=vertical_pad)
+
+
+def _render_subtitle_bitmap_clip(cue, video_clip, subtitle_style):
+    image = _render_subtitle_bitmap_image(cue, video_clip, subtitle_style)
+    clip = ImageClip(np.array(image))
+    return _prime_clip_duration(clip)
+
+
+def _build_font_size_candidates_custom(video_clip, base_font_ratio, min_font_ratio, max_font_ratio):
+    preferred = round(video_clip.h * base_font_ratio)
+    minimum = round(video_clip.h * min_font_ratio)
+    maximum = round(video_clip.h * max_font_ratio)
+    upper = max(preferred, maximum)
+    lower = max(16, min(minimum, upper))
+    return range(upper, lower - 1, -4)
+
+
+def _render_header_bitmap_clip(text, video_clip, subtitle_style, *, reason=False):
+    cue = {
+        "text": text.upper() if not reason else text,
+        "words": (text.upper() if not reason else text).split(),
+        "highlightIndex": -1,
+    }
+    layout = _build_locked_text_layout(
+        cue,
+        video_clip,
+        subtitle_style,
+        max_width_ratio=HEADER_SAFE_WIDTH_RATIO - 0.08,
+        max_height_ratio=0.16 if not reason else 0.1,
+        base_font_ratio=HEADER_REASON_FONT_RATIO if reason else HEADER_TITLE_FONT_RATIO,
+        min_font_ratio=HEADER_REASON_MIN_RATIO if reason else HEADER_TITLE_MIN_RATIO,
+        max_font_ratio=HEADER_REASON_MAX_RATIO if reason else HEADER_TITLE_MAX_RATIO,
+        padding_x=10,
+        padding_y=10,
+        line_gap_ratio=0.008,
+        max_lines=3 if not reason else 2,
+        stroke_color=None,
+        shadow_offset_y=max(1, round(video_clip.h * 0.0014)),
+        tracking=HEADER_REASON_LETTER_SPACING if reason else HEADER_TITLE_LETTER_SPACING,
+    )
+    image = _render_locked_text_image(
+        layout,
+        subtitle_style,
+        highlight_index=-1,
+        base_color=HEADER_REASON_COLOR if reason else HEADER_COLOR,
+        active_color=HEADER_REASON_COLOR if reason else HEADER_COLOR,
+        inactive_alpha=1.0,
+        shadow_fill=(0, 0, 0, 32),
+    )
+    return _prime_clip_duration(ImageClip(np.array(image)))
+
+
+def _render_vertical_gradient_image(width, height, *, height_ratio, anchor, max_alpha):
+    gradient_height = max(32, int(height * height_ratio))
+    gradient = np.zeros((gradient_height, width, 4), dtype=np.uint8)
+
+    for row in range(gradient_height):
+        progress = row / max(1, gradient_height - 1)
+        opacity = int(round(max_alpha * (1.0 - progress if anchor == 'top' else progress)))
+        gradient[row, :, 3] = opacity
+
+    return Image.fromarray(gradient, mode='RGBA')
+
+
+def _render_vertical_gradient_clip(video_clip, *, height_ratio, anchor, max_alpha):
+    gradient = np.array(
+        _render_vertical_gradient_image(
+            video_clip.w,
+            video_clip.h,
+            height_ratio=height_ratio,
+            anchor=anchor,
+            max_alpha=max_alpha,
+        )
+    )
+    gradient_height = gradient.shape[0]
+    position_y = 0 if anchor == 'top' else video_clip.h - gradient_height
+    return _prime_clip_duration(ImageClip(gradient)).with_position((0, position_y))
+
+
+def _render_header_panel_layers(video_clip, title_clip, reason_clip):
+    panel_width = int(video_clip.w * HEADER_SAFE_WIDTH_RATIO)
+    panel_x = int((video_clip.w - panel_width) / 2)
+    panel_y = int(video_clip.h * HEADER_TOP_RATIO)
+    content_width = panel_width - HEADER_PANEL_PADDING_X * 2
+    title_width = title_clip.w if title_clip is not None else 0
+    reason_width = reason_clip.w if reason_clip is not None else 0
+    text_width = min(content_width, max(title_width, reason_width, 0))
+    text_start_x = panel_x + int((panel_width - text_width) / 2)
+
+    panel_height = HEADER_PANEL_PADDING_Y * 2
+    if title_clip is not None:
+        panel_height += title_clip.h
+    if title_clip is not None and reason_clip is not None:
+        panel_height += HEADER_PANEL_GAP
+    if reason_clip is not None:
+        panel_height += reason_clip.h
+    panel_height = max(panel_height, round(video_clip.h * (HEADER_PANEL_MIN_HEIGHT / 1920)))
+
+    panel_image = Image.new('RGBA', (panel_width, panel_height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(panel_image)
+    draw.rounded_rectangle(
+        (0, 0, panel_width - 1, panel_height - 1),
+        radius=HEADER_PANEL_RADIUS,
+        fill=HEADER_PANEL_FILL,
+    )
+    draw.line(
+        [(HEADER_PANEL_RADIUS, panel_height - 1), (panel_width - HEADER_PANEL_RADIUS, panel_height - 1)],
+        fill=HEADER_PANEL_BORDER,
+        width=1,
+    )
+
+    panel_clip = _prime_clip_duration(ImageClip(np.array(panel_image))).with_position((panel_x, panel_y))
+    layers = [panel_clip]
+    current_y = panel_y + HEADER_PANEL_PADDING_Y
+
+    if title_clip is not None:
+        layers.append(title_clip.with_position((text_start_x + int((text_width - title_clip.w) / 2), current_y)))
+        current_y += title_clip.h + HEADER_PANEL_GAP
+
+    if reason_clip is not None:
+        if title_clip is None:
+            current_y = panel_y + int((panel_height - reason_clip.h) / 2)
+        layers.append(reason_clip.with_position((text_start_x + int((text_width - reason_clip.w) / 2), current_y)))
+
+    return layers
+
+
+def _build_cue_render_segments(cue):
+    cue_start = float(cue["start"])
+    cue_end = float(cue["end"])
+    if cue_end - cue_start <= 0.02:
+        return [(cue_start, cue_end, cue.get("highlightIndex", -1), True, True)]
+
+    word_entries = cue.get("wordEntries") or []
+    if not word_entries:
+        return [(cue_start, cue_end, cue.get("highlightIndex", -1), True, True)]
+
+    boundaries = {cue_start, cue_end}
+    for entry in word_entries:
+        start = max(cue_start, float(entry["start"]))
+        end = min(cue_end, float(entry["end"]))
+        if end - start <= 0.01:
+            continue
+        boundaries.add(start)
+        boundaries.add(end)
+
+    ordered_boundaries = sorted(boundaries)
+    raw_segments = []
+
+    for index in range(len(ordered_boundaries) - 1):
+        start = ordered_boundaries[index]
+        end = ordered_boundaries[index + 1]
+        if end - start <= 0.01:
+            continue
+
+        midpoint = start + (end - start) / 2
+        active_index = -1
+        for word_index, entry in enumerate(word_entries):
+            entry_start = max(cue_start, float(entry["start"]))
+            entry_end = min(cue_end, float(entry["end"]))
+            if entry_start <= midpoint < entry_end:
+                active_index = word_index
+                break
+
+        raw_segments.append((start, end, active_index))
+
+    if not raw_segments:
+        return [(cue_start, cue_end, cue.get("highlightIndex", -1), True, True)]
+
+    merged_segments = []
+    for start, end, active_index in raw_segments:
+        if merged_segments and merged_segments[-1][2] == active_index and start - merged_segments[-1][1] <= 0.001:
+            merged_segments[-1] = (merged_segments[-1][0], end, active_index)
+        else:
+            merged_segments.append((start, end, active_index))
+
+    finalized = []
+    for index, (start, end, active_index) in enumerate(merged_segments):
+        finalized.append((start, end, active_index, index == 0, index == len(merged_segments) - 1))
+
+    return finalized
+
+
+class _SubtitleProbeVideo:
+    def __init__(self, width, height):
+        self.w = width
+        self.h = height
+
+
+def validate_subtitle_plan_renderability(video_size, subtitle_cues, subtitle_style=None):
+    resolved_style = normalize_subtitle_style(subtitle_style)
+    probe_video = _SubtitleProbeVideo(video_size[0], video_size[1])
+    results = []
+
+    for cue in subtitle_cues:
+        clip = None
+        try:
+            clip = _render_subtitle_bitmap_clip(cue, probe_video, resolved_style)
+            positioned = _position_subtitle_clip(clip, probe_video)
+            results.append(
+                {
+                    "start": round(float(cue["start"]), 3),
+                    "end": round(float(cue["end"]), 3),
+                    "text": cue["text"],
+                    "width": int(clip.w),
+                    "height": int(clip.h),
+                    "position": tuple(positioned.pos(0)),
+                }
+            )
+        finally:
+            if clip is not None:
+                clip.close()
+
+    return results
+
+
+def create_subtitle_preview_frames(video_size, subtitle_cues, subtitle_style=None, backgrounds=None):
+    resolved_style = normalize_subtitle_style(subtitle_style)
+    probe_video = _SubtitleProbeVideo(video_size[0], video_size[1])
+    background_map = backgrounds or {
+        "white": (245, 245, 245),
+        "dark": (20, 24, 32),
+    }
+    top_gradient = _render_vertical_gradient_image(
+        video_size[0],
+        video_size[1],
+        height_ratio=0.2,
+        anchor='top',
+        max_alpha=GRADIENT_TOP_ALPHA,
+    )
+    bottom_gradient = _render_vertical_gradient_image(
+        video_size[0],
+        video_size[1],
+        height_ratio=0.24,
+        anchor='bottom',
+        max_alpha=GRADIENT_BOTTOM_ALPHA,
+    )
+    previews = []
+
+    for cue in subtitle_cues:
+        subtitle_layout = _build_locked_text_layout(
+            cue,
+            probe_video,
+            resolved_style,
+            max_width_ratio=SUBTITLE_SAFE_WIDTH_RATIO,
+            max_height_ratio=SUBTITLE_MAX_HEIGHT_RATIO,
+            base_font_ratio=SUBTITLE_BASE_FONT_RATIO,
+            min_font_ratio=SUBTITLE_MIN_FONT_RATIO,
+            max_font_ratio=SUBTITLE_MAX_FONT_RATIO,
+            padding_x=SUBTITLE_TEXT_PADDING_X,
+            padding_y=SUBTITLE_TEXT_PADDING_Y,
+            line_gap_ratio=0.008,
+        )
+        subtitle_image = _render_locked_text_image(
+            subtitle_layout,
+            resolved_style,
+            highlight_index=cue.get("highlightIndex", -1),
+            inactive_alpha=SUBTITLE_INACTIVE_ALPHA / 255,
+        )
+        subtitle_width, subtitle_height = subtitle_image.size
+        subtitle_clip = _prime_clip_duration(ImageClip(np.array(subtitle_image)))
+        positioned = _position_subtitle_clip(subtitle_clip, probe_video)
+        position = tuple(positioned.pos(0))
+        subtitle_clip.close()
+
+        cue_previews = []
+        for background_name, background_color in background_map.items():
+            frame = Image.new("RGBA", video_size, (*background_color, 255))
+            frame.alpha_composite(top_gradient, dest=(0, 0))
+            frame.alpha_composite(bottom_gradient, dest=(0, video_size[1] - bottom_gradient.height))
+            frame.alpha_composite(subtitle_image, dest=position)
+            cue_previews.append(
+                {
+                    "background": background_name,
+                    "image": frame.convert("RGB"),
+                }
+            )
+
+        previews.append(
+            {
+                "text": cue["text"],
+                "start": round(float(cue["start"]), 3),
+                "end": round(float(cue["end"]), 3),
+                "width": subtitle_width,
+                "height": subtitle_height,
+                "position": position,
+                "frames": cue_previews,
+            }
+        )
+
+    return previews
 
 
 def _normalize_word_text(text):
@@ -502,381 +1311,49 @@ def extract_word_entries(segment, clip_start_time, video_duration):
     return extracted
 
 
-def _layout_word_clips(word_clips, caption_width, space_width, line_gap):
-    if not word_clips:
-        return None
-
-    lines = []
-    current_line = []
-    current_width = 0
-
-    for index, clip in enumerate(word_clips):
-        proposed_width = clip.w if not current_line else current_width + space_width + clip.w
-        if current_line and proposed_width > caption_width:
-            lines.append((current_line, current_width))
-            current_line = [index]
-            current_width = clip.w
-        else:
-            current_line.append(index)
-            current_width = proposed_width
-
-    if current_line:
-        lines.append((current_line, current_width))
-
-    positions = {}
-    current_y = 0
-    total_height = 0
-
-    for line_indexes, line_width in lines:
-        line_height = max(word_clips[index].h for index in line_indexes)
-        start_x = max(0, round((caption_width - line_width) / 2))
-        current_x = start_x
-        for line_index, word_index in enumerate(line_indexes):
-            positions[word_index] = (current_x, current_y)
-            current_x += word_clips[word_index].w
-            if line_index < len(line_indexes) - 1:
-                current_x += space_width
-        current_y += line_height + line_gap
-        total_height = current_y - line_gap
-
-    return positions, total_height
-
-
-def _layout_slot_widths(slot_widths, caption_width, space_width, line_gap, line_heights):
-    if not slot_widths:
-        return None
-
-    lines = []
-    current_line = []
-    current_width = 0
-
-    for index, slot_width in enumerate(slot_widths):
-        proposed_width = slot_width if not current_line else current_width + space_width + slot_width
-        if current_line and proposed_width > caption_width:
-            lines.append((current_line, current_width))
-            current_line = [index]
-            current_width = slot_width
-        else:
-            current_line.append(index)
-            current_width = proposed_width
-
-    if current_line:
-        lines.append((current_line, current_width))
-
-    positions = {}
-    current_y = 0
-    total_height = 0
-
-    for line_indexes, line_width in lines:
-        line_height = max(line_heights[index] for index in line_indexes)
-        start_x = max(0, round((caption_width - line_width) / 2))
-        current_x = start_x
-        for line_index, word_index in enumerate(line_indexes):
-            positions[word_index] = (current_x, current_y)
-            current_x += slot_widths[word_index]
-            if line_index < len(line_indexes) - 1:
-                current_x += space_width
-        current_y += line_height + line_gap
-        total_height = current_y - line_gap
-
-    return positions, total_height
-
-
-def create_highlighted_chunk_variants(chunk_words, video_clip, subtitle_style):
-    if not chunk_words:
-        return []
-
-    last_error = None
-    palette = COLOR_PRESETS[subtitle_style["colorPreset"]]
-    display_words = [_display_caption_text(word["text"]) for word in chunk_words if _display_caption_text(word["text"])]
-    if not display_words:
-        return []
-
-    chunk_text = " ".join(display_words)
-    highlight_index = _choose_highlight_index(display_words)
-    preferred_font_size = resolve_font_size(video_clip, chunk_text)
-    caption_width = int(video_clip.w * SUBTITLE_SAFE_WIDTH_RATIO)
-    max_text_height = int(video_clip.h * SUBTITLE_MAX_HEIGHT_RATIO)
-
-    for font in get_font_candidates(subtitle_style["fontPreset"]):
-        for font_size in range(preferred_font_size, SUBTITLE_MIN_FONT_SIZE - 1, -2):
-            active_font_size = max(font_size + 1, round(font_size * ACTIVE_WORD_SCALE))
-            settle_font_size = max(font_size, round(font_size * ACTIVE_WORD_SETTLE_SCALE))
-            stroke_width = max(3, round(font_size * 0.13))
-            shadow_stroke_width = max(2, round(font_size * 0.07))
-            shadow_y = max(4, round(font_size * 0.08))
-            line_gap = max(2, round(font_size * 0.04))
-            space_width = max(round(font_size * 0.12), 6)
-            padding = max(8, round(active_font_size * 0.16))
-
-            base_word_clips = []
-            highlight_word_clips = []
-            pop_word_clips = []
-            try:
-                for index, word in enumerate(display_words):
-                    base_word_clips.append(
-                        _create_label_text_clip(
-                            word,
-                            font,
-                            font_size,
-                            palette["base_color"],
-                            palette["stroke_color"],
-                            stroke_width,
-                        )
-                    )
-
-                    if index == highlight_index:
-                        highlight_word_clips.append(
-                            _create_label_text_clip(
-                                word,
-                                font,
-                                settle_font_size,
-                                palette["active_color"],
-                                palette["stroke_color"],
-                                stroke_width,
-                            )
-                        )
-                        pop_word_clips.append(
-                            _create_label_text_clip(
-                                word,
-                                font,
-                                active_font_size,
-                                palette["active_color"],
-                                palette["stroke_color"],
-                                max(stroke_width + 1, round(active_font_size * 0.13)),
-                            )
-                        )
-                    else:
-                        highlight_word_clips.append(base_word_clips[-1])
-                        pop_word_clips.append(base_word_clips[-1])
-
-                slot_widths = []
-                slot_heights = []
-                for index, clip in enumerate(base_word_clips):
-                    slot_widths.append(max(clip.w, highlight_word_clips[index].w, pop_word_clips[index].w))
-                    slot_heights.append(max(clip.h, highlight_word_clips[index].h, pop_word_clips[index].h))
-
-                layout = _layout_slot_widths(slot_widths, caption_width, space_width, line_gap, slot_heights)
-                if layout is None:
-                    for clip in base_word_clips:
-                        clip.close()
-                    continue
-
-                positions, total_height = layout
-                canvas_width = caption_width + padding * 2
-                canvas_height = total_height + max(10, round(font_size * 0.14)) + padding * 2
-                if canvas_height > max_text_height:
-                    for clip in base_word_clips:
-                        clip.close()
-                    continue
-
-                base_layers = []
-                for index, word in enumerate(display_words):
-                    position_x, position_y = positions[index]
-                    position_x += padding
-                    position_y += padding
-                    base_clip = base_word_clips[index]
-                    shadow = _create_label_text_clip(
-                        word,
-                        font,
-                        font_size,
-                        "#000000",
-                        "#000000",
-                        shadow_stroke_width,
-                    )
-                    shadow = shadow.with_opacity(0.28).with_position((position_x, position_y + shadow_y))
-                    face = base_clip.with_position(
-                        (
-                            position_x + int((slot_widths[index] - base_clip.w) / 2),
-                            position_y + int((slot_heights[index] - base_clip.h) / 2),
-                        )
-                    )
-                    base_layers.extend([shadow, face])
-
-                base_clip = CompositeVideoClip(base_layers, size=(canvas_width, canvas_height))
-                base_clip = _prime_clip_duration(base_clip)
-
-                highlight_word = chunk_words[highlight_index]
-                highlight_start, highlight_end = _smooth_word_window(
-                    highlight_word["start"],
-                    highlight_word["end"],
-                    _safe_duration(video_clip.duration),
-                )
-                highlight_duration = highlight_end - highlight_start
-                pop_end = min(highlight_end, highlight_start + max(0.09, highlight_duration * 0.28))
-
-                position_x, position_y = positions[highlight_index]
-                position_x += padding
-                position_y += padding
-
-                active_shadow = _create_label_text_clip(
-                    display_words[highlight_index],
-                    font,
-                    active_font_size,
-                    "#000000",
-                    "#000000",
-                    max(2, round(active_font_size * 0.07)),
-                )
-                active_shadow = active_shadow.with_opacity(0.34).with_position(
-                    (
-                        position_x + int((slot_widths[highlight_index] - active_shadow.w) / 2),
-                        position_y + int((slot_heights[highlight_index] - active_shadow.h) / 2) + shadow_y,
-                    )
-                )
-
-                settle_face = highlight_word_clips[highlight_index].with_position(
-                    (
-                        position_x + int((slot_widths[highlight_index] - highlight_word_clips[highlight_index].w) / 2),
-                        position_y + int((slot_heights[highlight_index] - highlight_word_clips[highlight_index].h) / 2),
-                    )
-                )
-                pop_face = pop_word_clips[highlight_index].with_position(
-                    (
-                        position_x + int((slot_widths[highlight_index] - pop_word_clips[highlight_index].w) / 2),
-                        position_y + int((slot_heights[highlight_index] - pop_word_clips[highlight_index].h) / 2),
-                    )
-                )
-
-                variants = []
-                pop_variant = CompositeVideoClip([base_clip, active_shadow, pop_face], size=(canvas_width, canvas_height))
-                pop_variant = _prime_clip_duration(pop_variant, pop_end - highlight_start)
-                variants.append(((highlight_start, pop_end), pop_variant))
-
-                if highlight_end - pop_end >= 0.06:
-                    settle_variant = CompositeVideoClip([base_clip, active_shadow, settle_face], size=(canvas_width, canvas_height))
-                    settle_variant = _prime_clip_duration(settle_variant, highlight_end - pop_end)
-                    variants.append(((pop_end, highlight_end), settle_variant))
-
-                return variants
-            except Exception as error:
-                last_error = error
-            finally:
-                for clip in [*base_word_clips, *[clip for clip in highlight_word_clips if clip not in base_word_clips], *[clip for clip in pop_word_clips if clip not in base_word_clips and clip not in highlight_word_clips]]:
-                    try:
-                        clip.close()
-                    except Exception:
-                        pass
-
-    if last_error is not None:
-        raise RuntimeError("Could not render highlighted word subtitles with any compatible font.") from last_error
-    return []
-
-
 def create_textclip_with_fallback(text, video_clip, subtitle_style):
-    last_error = None
-    colors = COLOR_PRESETS[subtitle_style["colorPreset"]]
-    preferred_font_size = resolve_font_size(video_clip, text)
-    caption_width = int(video_clip.w * SUBTITLE_SAFE_WIDTH_RATIO)
-    max_text_height = int(video_clip.h * 0.18)
+    cue = {
+        "text": text,
+        "words": text.split(),
+        "highlightIndex": -1,
+    }
+    return _render_subtitle_bitmap_clip(cue, video_clip, subtitle_style)
 
-    for font in get_font_candidates(subtitle_style["fontPreset"]):
-        for font_size in range(preferred_font_size, SUBTITLE_MIN_FONT_SIZE - 1, -2):
-            stroke_width = max(3, round(font_size * 0.14))
 
-            try:
-                shadow = _create_caption_text_clip(
-                    text,
-                    font,
-                    font_size,
-                    "#000000",
-                    "#000000",
-                    max(2, round(font_size * 0.075)),
-                    caption_width,
-                    max(1, round(font_size * 0.04)),
-                )
+def _header_overlay_duration(video_duration):
+    if video_duration <= 0:
+        return 0.0
+    return min(video_duration, HEADER_DURATION)
 
-                face = _create_caption_text_clip(
-                    text,
-                    font,
-                    font_size,
-                    colors["base_color"],
-                    colors["stroke_color"],
-                    stroke_width,
-                    caption_width,
-                    max(1, round(font_size * 0.04)),
-                )
 
-                if max(shadow.h, face.h) > max_text_height:
-                    shadow.close()
-                    face.close()
-                    continue
+def _resolve_active_index_for_time(cue, local_time):
+    word_entries = cue.get("wordEntries") or []
+    if not word_entries:
+        return cue.get("highlightIndex", -1)
 
-                shadow = shadow.with_opacity(0.32).with_position((0, max(3, round(font_size * 0.08))))
-                face = face.with_position((0, 0))
-                clip = CompositeVideoClip(
-                    [shadow, face],
-                    size=(max(shadow.w, face.w), max(shadow.h, face.h) + max(8, round(font_size * 0.12))),
-                )
-                clip = _prime_clip_duration(clip)
+    timestamp = max(0.0, float(local_time)) + float(cue.get("start", 0.0))
+    for word_index, entry in enumerate(word_entries):
+        word_start = float(entry["start"])
+        word_end = float(entry["end"])
+        if word_start <= timestamp < word_end:
+            return word_index
 
-                return clip
-            except Exception as error:
-                last_error = error
-
-    raise RuntimeError(
-        "Could not render subtitles with any compatible font."
-    ) from last_error
+    if timestamp < float(word_entries[0]["start"]):
+        return 0
+    return len(word_entries) - 1
 
 
 def _position_subtitle_clip(clip, video_clip):
-    safe_bottom = int(video_clip.h * 0.82)
-    preferred_top = int(video_clip.h * SUBTITLE_Y_RATIO)
-    y = min(preferred_top, safe_bottom - clip.h)
-    y = max(int(video_clip.h * 0.54), y)
-    return clip.with_position(("center", y))
-
-
-def create_header_text_clip(text, video_clip, *, font_candidates, font_size, color, stroke_color, stroke_width, width_ratio, max_height_ratio, opacity=1.0):
-    last_error = None
-    width = int(video_clip.w * width_ratio)
-    max_height = int(video_clip.h * max_height_ratio)
-
-    for font in font_candidates:
-        for candidate_size in range(font_size, max(font_size - 10, 11), -2):
-            try:
-                shadow = TextClip(
-                    text=text,
-                    **_font_kwargs(font),
-                    font_size=candidate_size,
-                    color="#000000",
-                    stroke_color="#000000",
-                    stroke_width=max(1, stroke_width),
-                    method="caption",
-                    size=(width, None),
-                    interline=max(2, round(candidate_size * 0.1)),
-                    text_align="center",
-                )
-                shadow = _prime_clip_duration(shadow)
-                shadow = _expand_clip_canvas(shadow, pad_x=max(8, round(candidate_size * 0.08)), pad_y=max(8, round(candidate_size * 0.14)))
-
-                clip = TextClip(
-                    text=text,
-                    **_font_kwargs(font),
-                    font_size=candidate_size,
-                    color=color,
-                    stroke_color=stroke_color,
-                    stroke_width=stroke_width,
-                    method="caption",
-                    size=(width, None),
-                    interline=max(2, round(candidate_size * 0.12)),
-                    text_align="center",
-                )
-                clip = _prime_clip_duration(clip)
-                clip = _expand_clip_canvas(clip, pad_x=max(8, round(candidate_size * 0.08)), pad_y=max(8, round(candidate_size * 0.14)))
-                if clip.h > max_height:
-                    shadow.close()
-                    clip.close()
-                    continue
-                shadow = shadow.with_opacity(0.18).with_position((0, max(2, round(candidate_size * 0.08))))
-                if opacity != 1.0:
-                    clip = clip.with_opacity(opacity)
-                layered = CompositeVideoClip([shadow, clip], size=(max(shadow.w, clip.w), max(shadow.h, clip.h) + max(4, round(candidate_size * 0.08))))
-                layered = _prime_clip_duration(layered)
-                return layered
-            except Exception as error:
-                last_error = error
-
-    raise RuntimeError("Could not render header text with any compatible font.") from last_error
+    safe_left = int(video_clip.w * SUBTITLE_HORIZONTAL_MARGIN_RATIO)
+    safe_right = video_clip.w - safe_left
+    safe_top = int(video_clip.h * SUBTITLE_VERTICAL_MARGIN_RATIO)
+    safe_bottom = video_clip.h - safe_top
+    x = max(safe_left, int((video_clip.w - clip.w) / 2))
+    x = min(x, safe_right - clip.w)
+    target_center_y = int(video_clip.h * SUBTITLE_Y_RATIO)
+    y = int(target_center_y - (clip.h / 2))
+    y = max(safe_top, min(y, safe_bottom - clip.h))
+    return clip.with_position((x, y))
 
 
 def assert_subtitle_rendering_ready(subtitle_style=None):
@@ -886,25 +1363,23 @@ def assert_subtitle_rendering_ready(subtitle_style=None):
 
     for font in get_font_candidates(resolved_style["fontPreset"]):
         tested_fonts.append(font)
-        probe_clip = None
         try:
-            probe_clip = _create_label_text_clip(
-                "Subtitle probe",
-                font,
-                34,
-                "#fffdf8",
-                "#111827",
-                2,
+            pil_font = _load_pil_font(font, 48)
+            if pil_font is None:
+                continue
+
+            probe = Image.new('RGBA', (512, 256), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(probe)
+            draw.text(
+                (24, 96),
+                'SUBTITLE PROBE',
+                font=pil_font,
+                fill=(255, 255, 255, 255),
+                anchor='ls',
             )
             return font
         except Exception as error:
             last_error = error
-        finally:
-            if probe_clip is not None:
-                try:
-                    probe_clip.close()
-                except Exception:
-                    pass
 
     system_name = platform.system() or "Unknown OS"
     raise RuntimeError(
@@ -914,160 +1389,118 @@ def assert_subtitle_rendering_ready(subtitle_style=None):
 
 
 def create_top_description_overlay(video_clip, title, reason, subtitle_style):
-    if not ENABLE_TOP_DESCRIPTION_OVERLAY:
-        return []
-
-    title_text = _sanitize_overlay_text(title, 64)
-    reason_text = _sanitize_overlay_text(reason, 92)
-    if not title_text and not reason_text:
-        return []
-
-    font_candidates = list(dict.fromkeys([*get_font_candidates(subtitle_style["fontPreset"]), *TITLE_FONT_PRESETS]))
-    video_duration = _safe_duration(video_clip.duration)
-    overlay_duration = _intro_overlay_duration(video_duration)
-    overlays = []
+    resolved_style = normalize_subtitle_style(subtitle_style)
+    title_text = _sanitize_overlay_text(title, 72)
+    reason_text = _sanitize_overlay_text(reason, 108)
     title_clip = None
     reason_clip = None
 
     if title_text:
         try:
-            title_clip = create_header_text_clip(
-                title_text,
-                video_clip,
-                font_candidates=font_candidates,
-                font_size=resolve_top_text_size(video_clip, title_text, minimum=24, maximum=38, ratio=0.0225),
-                color="#f8fafc",
-                stroke_color="#020617",
-                stroke_width=2,
-                width_ratio=0.74,
-                max_height_ratio=0.05,
-            )
+            title_clip = _render_header_bitmap_clip(title_text, video_clip, resolved_style)
         except Exception:
             title_clip = None
 
     if reason_text:
         try:
-            reason_clip = create_header_text_clip(
-                reason_text,
-                video_clip,
-                font_candidates=font_candidates,
-                font_size=resolve_top_text_size(video_clip, reason_text, minimum=16, maximum=22, ratio=0.0145),
-                color="#e2e8f0",
-                stroke_color="#020617",
-                stroke_width=1,
-                width_ratio=0.74,
-                max_height_ratio=0.042,
-                opacity=0.96,
-            )
+            reason_style = dict(resolved_style)
+            reason_style["fontPreset"] = "soft"
+            reason_clip = _render_header_bitmap_clip(reason_text, video_clip, reason_style, reason=True)
         except Exception:
             reason_clip = None
 
     if title_clip is None and reason_clip is None:
         return []
 
-    panel_padding_x = int(video_clip.w * 0.042)
-    panel_padding_top = int(video_clip.h * 0.018)
-    panel_padding_bottom = int(video_clip.h * 0.016)
-    panel_gap = int(video_clip.h * 0.008)
-    accent_height = max(4, int(video_clip.h * 0.0038))
-    divider_height = 1
-
-    content_width = max(
-        title_clip.w if title_clip is not None else 0,
-        reason_clip.w if reason_clip is not None else 0,
-    )
-    panel_width = min(video_clip.w - int(video_clip.w * 0.08), content_width + panel_padding_x * 2)
-
-    content_height = 0
-    if title_clip is not None:
-        content_height += title_clip.h
-    if reason_clip is not None:
-        content_height += reason_clip.h
-    if title_clip is not None and reason_clip is not None:
-        content_height += panel_gap * 2 + divider_height
-
-    panel_height = panel_padding_top + accent_height + panel_gap + content_height + panel_padding_bottom
-    panel_x = int((video_clip.w - panel_width) / 2)
-    panel_y = int(video_clip.h * 0.034)
-
-    top_fade = ColorClip(size=(video_clip.w, int(video_clip.h * 0.2)), color=(5, 10, 18))
-    top_fade = top_fade.with_opacity(0.07).with_position((0, 0)).with_duration(overlay_duration)
-    panel_shadow = ColorClip(size=(panel_width, panel_height), color=(2, 6, 12))
-    panel_shadow = panel_shadow.with_opacity(0.22).with_position((panel_x, panel_y + max(6, int(video_clip.h * 0.006)))).with_duration(overlay_duration)
-    panel_clip = ColorClip(size=(panel_width, panel_height), color=(6, 10, 18))
-    panel_clip = panel_clip.with_opacity(0.58).with_position((panel_x, panel_y)).with_duration(overlay_duration)
-    accent_clip = ColorClip(size=(panel_width, accent_height), color=(235, 193, 124))
-    accent_clip = accent_clip.with_opacity(0.98).with_position((panel_x, panel_y)).with_duration(overlay_duration)
-
-    overlays.extend([top_fade, panel_shadow, panel_clip, accent_clip])
-
-    current_y = panel_y + panel_padding_top + accent_height + panel_gap
-    center_x = panel_x + int(panel_width / 2)
-
-    if title_clip is not None:
-        overlays.append(title_clip.with_position(("center", current_y)).with_duration(overlay_duration))
-        current_y += title_clip.h
-
-    if title_clip is not None and reason_clip is not None:
-        current_y += panel_gap
-        divider_width = int(panel_width * 0.84)
-        divider_clip = ColorClip(size=(divider_width, divider_height), color=(148, 163, 184))
-        divider_clip = divider_clip.with_opacity(0.28).with_position((center_x - int(divider_width / 2), current_y)).with_duration(overlay_duration)
-        overlays.append(divider_clip)
-        current_y += divider_height + panel_gap
-
-    if reason_clip is not None:
-        overlays.append(reason_clip.with_position(("center", current_y)).with_duration(overlay_duration))
-
-    return overlays
+    return _render_header_panel_layers(video_clip, title_clip, reason_clip)
 
 
 def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_style=None, clip_title=None, clip_reason=None):
     print("📝 Building subtitle layers...")
     resolved_style = normalize_subtitle_style(subtitle_style)
     video_duration = _safe_duration(video_clip.duration)
+    header_duration = _header_overlay_duration(video_duration)
 
-    subtitle_cues = []
-    highlighted_subtitle_layers = []
-    for segment in whisper_segments:
-        start = segment['start'] - clip_start_time
-        end = segment['end'] - clip_start_time
-        text = _clean_caption_text(segment['text'])
-
-        if end > 0 and start < video_duration:
-            start = max(0, start)
-            end = min(video_duration, end)
-            word_entries = extract_word_entries(segment, clip_start_time, video_duration)
-            if word_entries:
-                for chunk_words in split_word_entries(word_entries):
-                    cue = _build_caption_cue(chunk_words[0]["start"], chunk_words[-1]["end"], [word["text"] for word in chunk_words])
-                    if cue is not None:
-                        subtitle_cues.append(cue)
-                    try:
-                        variants = create_highlighted_chunk_variants(chunk_words, video_clip, resolved_style)
-                    except Exception:
-                        variants = []
-
-                    if variants:
-                        for (variant_start, variant_end), variant in variants:
-                            variant = _with_clip_timing(variant, variant_start, variant_end)
-                            highlighted_subtitle_layers.append(_position_subtitle_clip(variant, video_clip))
-            else:
-                for (chunk_start, chunk_end), chunk_text in split_subtitle_text(text, start, end):
-                    cue = _build_caption_cue(chunk_start, chunk_end, chunk_text.split(" "))
-                    if cue is not None:
-                        subtitle_cues.append(cue)
-
+    subtitle_cues = build_subtitle_plan(whisper_segments, clip_start_time, video_duration)
     subtitle_layers = []
     for cue in subtitle_cues:
-        subtitle_clip = create_textclip_with_fallback(cue["text"], video_clip, resolved_style)
-        subtitle_clip = _with_clip_timing(subtitle_clip, cue["start"], cue["end"])
+        locked_layout = _build_locked_text_layout(
+            cue,
+            video_clip,
+            resolved_style,
+            max_width_ratio=SUBTITLE_SAFE_WIDTH_RATIO,
+            max_height_ratio=SUBTITLE_MAX_HEIGHT_RATIO,
+            base_font_ratio=SUBTITLE_BASE_FONT_RATIO,
+            min_font_ratio=SUBTITLE_MIN_FONT_RATIO,
+            max_font_ratio=SUBTITLE_MAX_FONT_RATIO,
+            padding_x=SUBTITLE_TEXT_PADDING_X,
+            padding_y=SUBTITLE_TEXT_PADDING_Y,
+            line_gap_ratio=0.008,
+            tracking=SUBTITLE_LETTER_SPACING,
+        )
+        rendered_states = {}
+        candidate_indexes = {-1}
+        if cue.get("wordEntries"):
+            candidate_indexes.update(range(len(cue["wordEntries"])))
+        else:
+            candidate_indexes.add(cue.get("highlightIndex", -1))
+
+        for active_index in candidate_indexes:
+            if active_index not in rendered_states:
+                rendered_states[active_index] = np.array(
+                    _render_locked_text_image(
+                        locked_layout,
+                        resolved_style,
+                        highlight_index=active_index,
+                        inactive_alpha=SUBTITLE_INACTIVE_ALPHA / 255,
+                    )
+                )
+
+        cue_start = float(cue["start"])
+        cue_end = float(cue["end"])
+        cue_duration = _safe_duration(cue_end - cue_start)
+
+        def cue_frame_provider(local_t, *, current_cue=cue, states=rendered_states, duration=cue_duration):
+            timestamp = min(max(float(local_t), 0.0), max(0.0, duration - 1e-6))
+            active_index = _resolve_active_index_for_time(current_cue, timestamp)
+            return states.get(active_index, states.get(-1))
+
+        subtitle_clip = _create_rgba_video_clip(
+            cue_frame_provider,
+            locked_layout["size"],
+            cue_duration,
+            fade_in_duration=SUBTITLE_FADE_IN,
+            fade_out_duration=SUBTITLE_FADE_OUT,
+        )
+        subtitle_clip = _with_clip_timing(subtitle_clip, cue_start, cue_end)
         subtitle_clip = _position_subtitle_clip(subtitle_clip, video_clip)
         subtitle_layers.append(subtitle_clip)
 
-    top_description_layers = create_top_description_overlay(video_clip, clip_title, clip_reason, resolved_style)
+    top_description_layers = []
+    for layer in create_top_description_overlay(video_clip, clip_title, clip_reason, resolved_style):
+        frame = layer.get_frame(0)
+        if frame.ndim == 3 and frame.shape[2] == 3:
+            if layer.mask is not None:
+                alpha_channel = np.clip(layer.mask.get_frame(0) * 255.0, 0, 255).astype(np.uint8)
+            else:
+                alpha_channel = np.full((frame.shape[0], frame.shape[1]), 255, dtype=np.uint8)
+            frame = np.dstack([frame, alpha_channel])
+        position = layer.pos(0)
+        layer.close()
+        header_clip = _create_static_rgba_clip(
+            frame,
+            header_duration,
+            fade_in_duration=HEADER_FADE_IN,
+            fade_out_duration=HEADER_FADE_OUT,
+        )
+        top_description_layers.append(_with_clip_timing(header_clip.with_position(position), 0, header_duration))
 
-    layers = [video_clip, *top_description_layers, *subtitle_layers, *highlighted_subtitle_layers]
+    gradient_layers = [
+        _with_clip_timing(_render_vertical_gradient_clip(video_clip, height_ratio=0.2, anchor='top', max_alpha=GRADIENT_TOP_ALPHA), 0, video_duration),
+        _with_clip_timing(_render_vertical_gradient_clip(video_clip, height_ratio=0.24, anchor='bottom', max_alpha=GRADIENT_BOTTOM_ALPHA), 0, video_duration),
+    ]
+
+    layers = [video_clip, *gradient_layers, *top_description_layers, *subtitle_layers]
     final_clip = CompositeVideoClip(layers, size=video_clip.size).with_duration(video_duration)
     if video_clip.audio is not None:
         final_clip = final_clip.with_audio(video_clip.audio.with_duration(video_duration))

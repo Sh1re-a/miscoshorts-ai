@@ -2,7 +2,11 @@
 
 cd "$(dirname "$0")" || exit 1
 
-python3 -m app.start_local
+if [[ -f "frontend/dist/index.html" ]]; then
+	python3 -m app.app_launcher
+else
+	python3 -m app.start_local
+fi
 status=$?
 
 if [[ $status -ne 0 ]]; then

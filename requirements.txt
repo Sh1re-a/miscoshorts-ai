@@ -1,5 +1,6 @@
 yt-dlp
 moviepy
+Pillow
 google-generativeai
 openai-whisper
 python-dotenv
