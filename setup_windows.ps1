@@ -7,6 +7,9 @@ $venvPython = Join-Path $venvDir "Scripts\python.exe"
 $stateDir = Join-Path $root ".setup-state"
 $installerDir = Join-Path $stateDir "installers"
 $logPath = Join-Path $stateDir "windows-setup.log"
+$pythonInstallRoot = Join-Path $stateDir "python"
+$pythonCurrentDir = Join-Path $pythonInstallRoot "current"
+$pythonManagedExe = Join-Path $pythonCurrentDir "python.exe"
 $pythonInstallerVersion = "3.12.10"
 $pythonInstallerArch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "amd64" }
 $pythonInstallerName = "python-$pythonInstallerVersion-$pythonInstallerArch.exe"
@@ -101,6 +104,10 @@ function Test-UsablePython($command, $arguments = @()) {
 }
 
 function Find-PythonLaunchSpec {
+    if ((Test-Path $pythonManagedExe) -and (Test-UsablePython $pythonManagedExe)) {
+        return New-PythonLaunchSpec $pythonManagedExe
+    }
+
     if (Test-Command "py") {
         if (Test-UsablePython "py" @("-3.12")) {
             return New-PythonLaunchSpec "py" @("-3.12")
@@ -155,14 +162,26 @@ function Install-WithWinget($packageId, $label) {
 function Install-PythonDirectly {
     Ensure-StateDir
 
+    if (-not (Test-Path $pythonInstallRoot)) {
+        New-Item -ItemType Directory -Path $pythonInstallRoot | Out-Null
+    }
+
+    if (Test-Path $pythonCurrentDir) {
+        Remove-Item $pythonCurrentDir -Recurse -Force
+    }
+
     Invoke-Download $pythonInstallerUrl $pythonInstallerPath "Python installer from python.org"
 
     Write-Host "Running Python installer ..."
     $installerArgs = @(
         "/quiet",
         "InstallAllUsers=0",
-        "PrependPath=1",
-        "Include_launcher=1",
+        "TargetDir=$pythonCurrentDir",
+        "PrependPath=0",
+        "Include_launcher=0",
+        "InstallLauncherAllUsers=0",
+        "Include_pip=1",
+        "Include_venv=1",
         "AssociateFiles=0",
         "Shortcuts=0",
         "Include_test=0"
@@ -172,6 +191,11 @@ function Install-PythonDirectly {
         throw "Python installer exited with code $($process.ExitCode)."
     }
 
+    if (-not (Test-Path $pythonManagedExe)) {
+        throw "Python installer completed but python.exe was not found in $pythonCurrentDir."
+    }
+
+    Add-DirectoryToSessionPath $pythonCurrentDir
     Refresh-SessionPath
 }
 
@@ -290,10 +314,18 @@ function Ensure-Python {
 
     $pythonSpec = Find-PythonLaunchSpec
     if ($null -eq $pythonSpec) {
-        throw "Python installation finished but Python 3.12+ is still unavailable. Install it manually from https://www.python.org/downloads/windows/ and then run launch_app.bat again."
+        throw "Python installation finished but Python 3.12+ is still unavailable."
     }
 
     return $pythonSpec
+}
+
+function Test-UsableVenv {
+    if (-not (Test-Path $venvPython)) {
+        return $false
+    }
+
+    return Test-UsablePython $venvPython
 }
 
 function Ensure-Node {
@@ -366,6 +398,10 @@ function Ensure-StateDir {
     if (-not (Test-Path $installerDir)) {
         New-Item -ItemType Directory -Path $installerDir | Out-Null
     }
+
+    if (-not (Test-Path $pythonInstallRoot)) {
+        New-Item -ItemType Directory -Path $pythonInstallRoot | Out-Null
+    }
 }
 
 function Update-Stamp($stampPath) {
@@ -414,7 +450,12 @@ function Invoke-Setup {
     $null = Ensure-Node
     $null = Ensure-Ffmpeg
 
-    if (-not (Test-Path $venvPython)) {
+    if ((Test-Path $venvDir) -and (-not (Test-UsableVenv))) {
+        Write-Host "Existing virtual environment is invalid. Recreating it ..."
+        Remove-Item $venvDir -Recurse -Force
+    }
+
+    if (-not (Test-UsableVenv)) {
         Write-Host "Creating virtual environment ..."
         Invoke-Python $pythonSpec @("-m", "venv", ".venv")
     }
