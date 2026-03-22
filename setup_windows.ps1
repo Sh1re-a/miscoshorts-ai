@@ -6,19 +6,76 @@ $venvDir = Join-Path $root ".venv"
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
 $stateDir = Join-Path $root ".setup-state"
 $installerDir = Join-Path $stateDir "installers"
+$logPath = Join-Path $stateDir "windows-setup.log"
 $pythonInstallerVersion = "3.12.10"
 $pythonInstallerArch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "amd64" }
 $pythonInstallerName = "python-$pythonInstallerVersion-$pythonInstallerArch.exe"
 $pythonInstallerPath = Join-Path $installerDir $pythonInstallerName
 $pythonInstallerUrl = "https://www.python.org/ftp/python/$pythonInstallerVersion/$pythonInstallerName"
+$nodeInstallerVersion = "24.14.0"
+$nodeInstallerArch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
+$nodeInstallerName = "node-v$nodeInstallerVersion-$nodeInstallerArch.msi"
+$nodeInstallerPath = Join-Path $installerDir $nodeInstallerName
+$nodeInstallerUrl = "https://nodejs.org/dist/v$nodeInstallerVersion/$nodeInstallerName"
+$ffmpegArchiveName = "ffmpeg-release-essentials.zip"
+$ffmpegArchivePath = Join-Path $installerDir $ffmpegArchiveName
+$ffmpegArchiveUrl = "https://www.gyan.dev/ffmpeg/builds/$ffmpegArchiveName"
+$ffmpegInstallRoot = Join-Path $stateDir "ffmpeg"
+$ffmpegCurrentDir = Join-Path $ffmpegInstallRoot "current"
+$ffmpegBinDir = Join-Path $ffmpegCurrentDir "bin"
 $pythonDepsStamp = Join-Path $stateDir "python-deps.stamp"
 $frontendDepsStamp = Join-Path $stateDir "frontend-deps.stamp"
 $frontendBuildStamp = Join-Path $stateDir "frontend-build.stamp"
+
+function Show-FailureAndExit($message) {
+    Write-Host ""
+    Write-Host "Setup failed." -ForegroundColor Red
+    Write-Host $message -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Log file: $logPath"
+    [void](Read-Host "Press Enter to close this window")
+    exit 1
+}
 
 function Refresh-SessionPath {
     $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
     $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
     $env:Path = "$machinePath;$userPath"
+}
+
+function Add-DirectoryToSessionPath($directory) {
+    if (-not $directory -or -not (Test-Path $directory)) {
+        return
+    }
+
+    $segments = ($env:Path -split ';') | Where-Object { $_ }
+    if ($segments -contains $directory) {
+        return
+    }
+
+    $env:Path = "$directory;$env:Path"
+}
+
+function Add-DirectoryToUserPath($directory) {
+    if (-not $directory -or -not (Test-Path $directory)) {
+        return
+    }
+
+    $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
+    $segments = ($userPath -split ';') | Where-Object { $_ }
+    if ($segments -contains $directory) {
+        return
+    }
+
+    $newPath = if ([string]::IsNullOrWhiteSpace($userPath)) {
+        $directory
+    }
+    else {
+        "$userPath;$directory"
+    }
+
+    [System.Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+    Add-DirectoryToSessionPath $directory
 }
 
 function Test-Command($name) {
@@ -80,6 +137,11 @@ function Invoke-Python($pythonSpec, $arguments) {
     & $pythonSpec.Command @($pythonSpec.Arguments + $arguments)
 }
 
+function Invoke-Download($url, $destinationPath, $label) {
+    Write-Host "Downloading $label ..."
+    Invoke-WebRequest -Uri $url -OutFile $destinationPath
+}
+
 function Install-WithWinget($packageId, $label) {
     if (-not (Test-Command "winget")) {
         throw "winget was not found. Install App Installer from Microsoft Store first, then run launch_app.bat again."
@@ -93,12 +155,7 @@ function Install-WithWinget($packageId, $label) {
 function Install-PythonDirectly {
     Ensure-StateDir
 
-    if (-not (Test-Path $installerDir)) {
-        New-Item -ItemType Directory -Path $installerDir | Out-Null
-    }
-
-    Write-Host "Downloading Python installer from python.org ..."
-    Invoke-WebRequest -Uri $pythonInstallerUrl -OutFile $pythonInstallerPath
+    Invoke-Download $pythonInstallerUrl $pythonInstallerPath "Python installer from python.org"
 
     Write-Host "Running Python installer ..."
     $installerArgs = @(
@@ -115,6 +172,90 @@ function Install-PythonDirectly {
         throw "Python installer exited with code $($process.ExitCode)."
     }
 
+    Refresh-SessionPath
+}
+
+function Find-NodeCommand {
+    if (Test-Command "npm") {
+        return "npm"
+    }
+
+    $candidatePaths = @(
+        (Join-Path $env:ProgramFiles "nodejs\npm.cmd"),
+        (Join-Path ${env:ProgramFiles(x86)} "nodejs\npm.cmd")
+    ) | Where-Object { $_ }
+
+    foreach ($candidate in $candidatePaths) {
+        if (Test-Path $candidate) {
+            Add-DirectoryToSessionPath (Split-Path -Parent $candidate)
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
+function Install-NodeDirectly {
+    Ensure-StateDir
+    Invoke-Download $nodeInstallerUrl $nodeInstallerPath "Node.js installer from nodejs.org"
+
+    Write-Host "Running Node.js installer ..."
+    $process = Start-Process -FilePath "msiexec.exe" -ArgumentList @("/i", $nodeInstallerPath, "/qn", "/norestart") -Wait -PassThru
+    if ($process.ExitCode -ne 0) {
+        throw "Node.js installer exited with code $($process.ExitCode)."
+    }
+
+    Refresh-SessionPath
+}
+
+function Find-FfmpegCommand {
+    if (Test-Command "ffmpeg") {
+        return "ffmpeg"
+    }
+
+    $candidatePaths = @(
+        (Join-Path $ffmpegBinDir "ffmpeg.exe"),
+        (Join-Path $env:ProgramFiles "FFmpeg\bin\ffmpeg.exe"),
+        (Join-Path ${env:ProgramFiles(x86)} "FFmpeg\bin\ffmpeg.exe")
+    ) | Where-Object { $_ }
+
+    foreach ($candidate in $candidatePaths) {
+        if (Test-Path $candidate) {
+            Add-DirectoryToSessionPath (Split-Path -Parent $candidate)
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
+function Install-FfmpegDirectly {
+    Ensure-StateDir
+    if (-not (Test-Path $ffmpegInstallRoot)) {
+        New-Item -ItemType Directory -Path $ffmpegInstallRoot | Out-Null
+    }
+
+    Invoke-Download $ffmpegArchiveUrl $ffmpegArchivePath "FFmpeg package"
+
+    $extractDir = Join-Path $ffmpegInstallRoot "extract"
+    if (Test-Path $extractDir) {
+        Remove-Item $extractDir -Recurse -Force
+    }
+
+    Write-Host "Extracting FFmpeg ..."
+    Expand-Archive -Path $ffmpegArchivePath -DestinationPath $extractDir -Force
+
+    $packageDir = Get-ChildItem -Path $extractDir -Directory | Where-Object { Test-Path (Join-Path $_.FullName "bin\ffmpeg.exe") } | Select-Object -First 1
+    if ($null -eq $packageDir) {
+        throw "Could not find ffmpeg.exe after extracting the FFmpeg package."
+    }
+
+    if (Test-Path $ffmpegCurrentDir) {
+        Remove-Item $ffmpegCurrentDir -Recurse -Force
+    }
+
+    Move-Item -Path $packageDir.FullName -Destination $ffmpegCurrentDir
+    Add-DirectoryToUserPath $ffmpegBinDir
     Refresh-SessionPath
 }
 
@@ -156,28 +297,74 @@ function Ensure-Python {
 }
 
 function Ensure-Node {
-    if (Test-Command "npm") { return }
-
-    Install-WithWinget "OpenJS.NodeJS.LTS" "Node.js"
-
-    if (-not (Test-Command "npm")) {
-        throw "Node.js installation finished but npm is still unavailable. Close this window and run launch_app.bat again."
+    $nodeCommand = Find-NodeCommand
+    if ($null -ne $nodeCommand) {
+        return $nodeCommand
     }
+
+    if (Test-Command "winget") {
+        try {
+            Install-WithWinget "OpenJS.NodeJS.LTS" "Node.js"
+            $nodeCommand = Find-NodeCommand
+            if ($null -ne $nodeCommand) {
+                return $nodeCommand
+            }
+        }
+        catch {
+            Write-Warning "winget Node.js install failed: $($_.Exception.Message)"
+        }
+    }
+    else {
+        Write-Warning "winget was not found. Falling back to a direct Node.js installer download."
+    }
+
+    Install-NodeDirectly
+    $nodeCommand = Find-NodeCommand
+    if ($null -eq $nodeCommand) {
+        throw "Node.js installation finished but npm is still unavailable."
+    }
+
+    return $nodeCommand
 }
 
 function Ensure-Ffmpeg {
-    if (Test-Command "ffmpeg") { return }
-
-    Install-WithWinget "Gyan.FFmpeg" "FFmpeg"
-
-    if (-not (Test-Command "ffmpeg")) {
-        throw "FFmpeg installation finished but ffmpeg is still unavailable. Close this window and run launch_app.bat again."
+    $ffmpegCommand = Find-FfmpegCommand
+    if ($null -ne $ffmpegCommand) {
+        return $ffmpegCommand
     }
+
+    if (Test-Command "winget") {
+        try {
+            Install-WithWinget "Gyan.FFmpeg" "FFmpeg"
+            $ffmpegCommand = Find-FfmpegCommand
+            if ($null -ne $ffmpegCommand) {
+                return $ffmpegCommand
+            }
+        }
+        catch {
+            Write-Warning "winget FFmpeg install failed: $($_.Exception.Message)"
+        }
+    }
+    else {
+        Write-Warning "winget was not found. Falling back to a direct FFmpeg download."
+    }
+
+    Install-FfmpegDirectly
+    $ffmpegCommand = Find-FfmpegCommand
+    if ($null -eq $ffmpegCommand) {
+        throw "FFmpeg installation finished but ffmpeg is still unavailable."
+    }
+
+    return $ffmpegCommand
 }
 
 function Ensure-StateDir {
     if (-not (Test-Path $stateDir)) {
         New-Item -ItemType Directory -Path $stateDir | Out-Null
+    }
+
+    if (-not (Test-Path $installerDir)) {
+        New-Item -ItemType Directory -Path $installerDir | Out-Null
     }
 }
 
@@ -217,51 +404,85 @@ function Test-Stale($stampPath, $paths) {
     return $false
 }
 
-Set-Location $root
+function Invoke-Setup {
+    Set-Location $root
 
-Write-Host "Preparing Miscoshorts AI for Windows..."
-Refresh-SessionPath
-Ensure-StateDir
-$pythonSpec = Ensure-Python
-Ensure-Node
-Ensure-Ffmpeg
+    Write-Host "Preparing Miscoshorts AI for Windows..."
+    Refresh-SessionPath
+    Ensure-StateDir
+    $pythonSpec = Ensure-Python
+    $null = Ensure-Node
+    $null = Ensure-Ffmpeg
 
-if (-not (Test-Path $venvPython)) {
-    Write-Host "Creating virtual environment ..."
-    Invoke-Python $pythonSpec @("-m", "venv", ".venv")
+    if (-not (Test-Path $venvPython)) {
+        Write-Host "Creating virtual environment ..."
+        Invoke-Python $pythonSpec @("-m", "venv", ".venv")
+    }
+
+    if (Test-Stale $pythonDepsStamp @((Join-Path $root "requirements.txt"), $venvPython)) {
+        Write-Host "Installing Python packages ..."
+        & $venvPython -m pip install --upgrade pip
+        & $venvPython -m pip install -r requirements.txt
+        Update-Stamp $pythonDepsStamp
+    }
+    else {
+        Write-Host "Python packages are already installed. Skipping reinstall."
+    }
+
+    if (Test-Stale $frontendDepsStamp @((Join-Path $frontendDir "package.json"), (Join-Path $frontendDir "package-lock.json"))) {
+        Write-Host "Installing frontend packages ..."
+        Push-Location $frontendDir
+        try {
+            npm install
+        }
+        finally {
+            Pop-Location
+        }
+        Update-Stamp $frontendDepsStamp
+    }
+    else {
+        Write-Host "Frontend packages are already installed. Skipping npm install."
+    }
+
+    if (Test-Stale $frontendBuildStamp @((Join-Path $frontendDir "src"), (Join-Path $frontendDir "index.html"), (Join-Path $frontendDir "package.json"), (Join-Path $frontendDir "vite.config.ts"))) {
+        Write-Host "Building frontend ..."
+        Push-Location $frontendDir
+        try {
+            npm run build
+        }
+        finally {
+            Pop-Location
+        }
+        Update-Stamp $frontendBuildStamp
+    }
+    else {
+        Write-Host "Frontend build is up to date. Skipping build."
+    }
+
+    Write-Host "Launching app ..."
+    & $venvPython app_launcher.py
 }
 
-if (Test-Stale $pythonDepsStamp @((Join-Path $root "requirements.txt"), $venvPython)) {
-    Write-Host "Installing Python packages ..."
-    & $venvPython -m pip install --upgrade pip
-    & $venvPython -m pip install -r requirements.txt
-    Update-Stamp $pythonDepsStamp
-}
-else {
-    Write-Host "Python packages are already installed. Skipping reinstall."
-}
+try {
+    Ensure-StateDir
+    if (Test-Path $logPath) {
+        Remove-Item $logPath -Force
+    }
 
-if (Test-Stale $frontendDepsStamp @((Join-Path $frontendDir "package.json"), (Join-Path $frontendDir "package-lock.json"))) {
-    Write-Host "Installing frontend packages ..."
-    Push-Location $frontendDir
-    npm install
-    Pop-Location
-    Update-Stamp $frontendDepsStamp
+    Start-Transcript -Path $logPath -Force | Out-Null
+    Invoke-Setup
 }
-else {
-    Write-Host "Frontend packages are already installed. Skipping npm install."
+catch {
+    $errorMessage = $_.Exception.Message
+    if ($_.ScriptStackTrace) {
+        Write-Host $_.ScriptStackTrace -ForegroundColor DarkYellow
+    }
+    Show-FailureAndExit $errorMessage
 }
-
-if (Test-Stale $frontendBuildStamp @((Join-Path $frontendDir "src"), (Join-Path $frontendDir "index.html"), (Join-Path $frontendDir "package.json"), (Join-Path $frontendDir "vite.config.ts"))) {
-    Write-Host "Building frontend ..."
-    Push-Location $frontendDir
-    npm run build
-    Pop-Location
-    Update-Stamp $frontendBuildStamp
+finally {
+    try {
+        Stop-Transcript | Out-Null
+    }
+    catch {
+    }
 }
-else {
-    Write-Host "Frontend build is up to date. Skipping build."
-}
-
-Write-Host "Launching app ..."
-& $venvPython app_launcher.py
