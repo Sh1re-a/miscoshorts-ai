@@ -1,6 +1,8 @@
+import functools
 import os
 import platform
 import re
+from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 
 import numpy as np
@@ -10,6 +12,8 @@ from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont
 
 FONT_PRESETS = {
     "clean": [
+        "Satoshi-Black",
+        "Satoshi-Bold",
         "TheBoldFont",
         "Inter ExtraBold",
         "Inter-Bold",
@@ -29,6 +33,7 @@ FONT_PRESETS = {
         "DejaVuSans-Bold",
     ],
     "bold": [
+        "Satoshi-Black",
         "TheBoldFont",
         "Inter ExtraBold",
         "Inter-Bold",
@@ -47,8 +52,10 @@ FONT_PRESETS = {
         "DejaVuSans-Bold",
     ],
     "soft": [
+        "Satoshi-Bold",
         "Inter-Bold",
         "Montserrat-Bold",
+        "Raleway-Bold",
         "SF Pro Rounded Semibold",
         "Avenir Next Medium",
         "Avenir Next Demi Bold",
@@ -65,18 +72,18 @@ FONT_PRESETS = {
 }
 
 COLOR_PRESETS = {
-    "sun": {"base_color": "#ffffff", "active_color": "#ffd700", "stroke_color": None},
-    "ivory": {"base_color": "#ffffff", "active_color": "#ffd700", "stroke_color": None},
-    "mint": {"base_color": "#ffffff", "active_color": "#ffd700", "stroke_color": None},
+    "sun": {"base_color": "#ffffff", "active_color": "#ffd700", "stroke_color": "#000000"},
+    "ivory": {"base_color": "#ffffff", "active_color": "#ffd700", "stroke_color": "#000000"},
+    "mint": {"base_color": "#ffffff", "active_color": "#ffd700", "stroke_color": "#000000"},
 }
 
 HEADER_COLOR = "#f5f5f5"
 HEADER_REASON_COLOR = "#dddddd"
-HEADER_PANEL_FILL = (0, 0, 0, 166)
-HEADER_PANEL_BORDER = (255, 255, 255, 26)
-SUBTITLE_SHADOW_ALPHA = 76
+HEADER_PANEL_FILL = (10, 10, 14, 200)
+HEADER_PANEL_BORDER = (255, 255, 255, 50)
+SUBTITLE_SHADOW_ALPHA = 160
 SUBTITLE_SHADOW_COLOR = (0, 0, 0, SUBTITLE_SHADOW_ALPHA)
-SUBTITLE_INACTIVE_ALPHA = 128
+SUBTITLE_INACTIVE_ALPHA = 220
 GRADIENT_TOP_ALPHA = 76
 GRADIENT_BOTTOM_ALPHA = 102
 
@@ -137,10 +144,11 @@ SUBTITLE_Y_RATIO = 0.75
 SUBTITLE_SAFE_WIDTH_RATIO = 0.85
 SUBTITLE_MAX_HEIGHT_RATIO = 0.24
 SUBTITLE_BASE_FONT_RATIO = 70 / 1920
-SUBTITLE_MIN_FONT_SIZE = 70
-SUBTITLE_MAX_FONT_SIZE = 70
+SUBTITLE_MIN_FONT_SIZE = 58
+SUBTITLE_MAX_FONT_SIZE = 82
 ACTIVE_WORD_SCALE = 1.08
 ACTIVE_WORD_SETTLE_SCALE = 1.03
+HIGHLIGHT_TRANSITION_DURATION = 0.06
 ENABLE_TOP_DESCRIPTION_OVERLAY = False
 SUBTITLE_HORIZONTAL_MARGIN_RATIO = 0.1
 SUBTITLE_VERTICAL_MARGIN_RATIO = 0.1
@@ -154,21 +162,23 @@ HEADER_TOP_RATIO = 0.1
 HEADER_PANEL_PADDING_X = 28
 HEADER_PANEL_PADDING_Y = 18
 HEADER_PANEL_GAP = 12
-HEADER_PANEL_RADIUS = 24
-HEADER_TITLE_FONT_RATIO = 0.035
-HEADER_REASON_FONT_RATIO = 0.018
-HEADER_TITLE_MIN_RATIO = 0.028
-HEADER_TITLE_MAX_RATIO = 0.042
+HEADER_PANEL_RADIUS = 28
+HEADER_TITLE_FONT_RATIO = 0.040
+HEADER_REASON_FONT_RATIO = 0.020
+HEADER_TITLE_MIN_RATIO = 0.032
+HEADER_TITLE_MAX_RATIO = 0.048
 HEADER_REASON_MIN_RATIO = 0.014
 HEADER_REASON_MAX_RATIO = 0.022
-SUBTITLE_FADE_IN = 0.08
-SUBTITLE_FADE_OUT = 0.08
+SUBTITLE_FADE_IN = 0.14
+SUBTITLE_FADE_OUT = 0.14
 HEADER_FADE_IN = 0.5
 HEADER_FADE_OUT = 0.5
 HEADER_DURATION = 3.0
-HEADER_PANEL_MIN_HEIGHT = 120
+HEADER_PANEL_MIN_HEIGHT = 140
 
 TITLE_FONT_PRESETS = [
+    "Satoshi-Black",
+    "Satoshi-Bold",
     "TheBoldFont",
     "Inter ExtraBold",
     "Inter-Bold",
@@ -190,14 +200,20 @@ HEADER_TITLE_LETTER_SPACING = 3
 HEADER_REASON_LETTER_SPACING = 0
 
 
+def _existing_font_paths(*paths):
+    return [path for path in paths if os.path.exists(path)]
+
+
+def _existing_ttc_fonts(*entries):
+    return [(path, index) for path, index in entries if os.path.exists(path)]
+
+
 def get_preferred_fonts():
     system_name = platform.system().lower()
-
-    def existing_paths(*paths):
-        return [path for path in paths if os.path.exists(path)]
+    user_fonts_dir = os.path.expanduser('~/Library/Fonts')
 
     if system_name == 'windows':
-        windows_font_paths = existing_paths(
+        windows_font_paths = _existing_font_paths(
             r"C:\Windows\Fonts\Inter-ExtraBold.ttf",
             r"C:\Windows\Fonts\Inter-Bold.ttf",
             r"C:\Windows\Fonts\Montserrat-ExtraBold.ttf",
@@ -213,31 +229,36 @@ def get_preferred_fonts():
         return [*windows_font_paths, 'Aptos Display Bold', 'Aptos Bold', 'Segoe UI Semibold', 'Segoe UI Bold', 'Arial-Bold', 'Arial', 'Calibri', 'NotoSans-Bold', 'DejaVuSans-Bold']
     if system_name == 'darwin':
         return [
-            *existing_paths(
+            *_existing_font_paths(
+                os.path.join(user_fonts_dir, 'Satoshi-Black.otf'),
+                os.path.join(user_fonts_dir, 'Satoshi-Bold.otf'),
+                os.path.join(user_fonts_dir, 'Raleway-Bold.ttf'),
                 '/Library/Fonts/Inter-ExtraBold.ttf',
                 '/Library/Fonts/Inter-Bold.ttf',
                 '/Library/Fonts/Montserrat-ExtraBold.ttf',
                 '/Library/Fonts/Montserrat-Bold.ttf',
-                '/Library/Fonts/Arial Bold.ttf',
+            ),
+            *_existing_ttc_fonts(
+                ('/System/Library/Fonts/Avenir Next.ttc', 8),
+                ('/System/Library/Fonts/Avenir Next.ttc', 0),
+                ('/System/Library/Fonts/HelveticaNeue.ttc', 1),
+                ('/System/Library/Fonts/HelveticaNeue.ttc', 10),
+                ('/System/Library/Fonts/Supplemental/Futura.ttc', 2),
+            ),
+            *_existing_font_paths(
+                '/System/Library/Fonts/Supplemental/DIN Alternate Bold.ttf',
                 '/System/Library/Fonts/Supplemental/Arial Bold.ttf',
                 '/System/Library/Fonts/Supplemental/Arial.ttf',
-                '/System/Library/Fonts/Helvetica.ttc',
-                '/System/Library/Fonts/Supplemental/Helvetica.ttf',
                 '/System/Library/Fonts/Supplemental/Trebuchet MS Bold.ttf',
             ),
             'SF Pro Display Semibold',
             'SF Pro Display Bold',
-            'Avenir Next Bold',
-            'Avenir Next Demi Bold',
-            'Helvetica Neue Medium',
-            'Helvetica Neue Bold',
-            'Helvetica-Bold',
             'Arial-Bold',
             'Arial',
             'DejaVuSans-Bold',
         ]
     return [
-        *existing_paths(
+        *_existing_font_paths(
             '/usr/share/fonts/truetype/inter/Inter-ExtraBold.ttf',
             '/usr/share/fonts/truetype/inter/Inter-Bold.ttf',
             '/usr/share/fonts/truetype/montserrat/Montserrat-ExtraBold.ttf',
@@ -649,7 +670,21 @@ def _load_pil_font(font, font_size):
     if font == AUTO_FONT:
         return None
 
+    font_key = font if isinstance(font, (str, tuple)) else str(font)
+    return _load_pil_font_cached(font_key, font_size)
+
+
+@functools.lru_cache(maxsize=64)
+def _load_pil_font_cached(font_key, font_size):
+    """Cached font loader — font_key is either a string name or a (path, index) tuple."""
+    return _load_pil_font_uncached(font_key, font_size)
+
+
+def _load_pil_font_uncached(font, font_size):
     try:
+        if isinstance(font, tuple):
+            path, face_index = font
+            return ImageFont.truetype(path, font_size, index=face_index)
         return ImageFont.truetype(font, font_size)
     except Exception:
         return None
@@ -876,6 +911,49 @@ def _build_locked_text_layout(
             except Exception as error:
                 last_error = error
 
+    if display_words:
+        safe_max_chars = max(6, int(max_width / 20))
+        safe_words = [w[:safe_max_chars] + "…" if len(w) > safe_max_chars else w for w in display_words[:3]]
+        safe_cue = dict(cue)
+        safe_cue["words"] = safe_words
+        safe_cue["text"] = " ".join(safe_words)
+        safe_cue["highlightIndex"] = min(cue.get("highlightIndex", 0), len(safe_words) - 1)
+        for font in get_font_candidates(subtitle_style["fontPreset"]):
+            for font_size in _build_font_size_candidates_custom(video_clip, base_font_ratio, min_font_ratio * 0.7, max_font_ratio):
+                pil_font = _load_pil_font(font, font_size)
+                if pil_font is None:
+                    continue
+                try:
+                    space_width = max(4, round(probe_draw.textlength(' ', font=pil_font)))
+                    measured = [
+                        {"text": w, "index": i, **_measure_tracked_text(probe_draw, w, pil_font, stroke_width, tracking)}
+                        for i, w in enumerate(safe_words)
+                    ]
+                    if any(word["width"] > max_width for word in measured):
+                        continue
+                    lines = _wrap_caption_words(measured, max_width, space_width, max_lines=max_lines)
+                    if lines is None:
+                        continue
+                    content_width = max(line["width"] for line in lines)
+                    content_height = sum(line["height"] for line in lines) + line_gap * (len(lines) - 1)
+                    canvas_width = content_width + padding_x * 2
+                    canvas_height = content_height + padding_y * 2 + shadow_offset_y
+                    if canvas_height > max_height:
+                        continue
+                    positioned_words = []
+                    current_y = padding_y
+                    for line in lines:
+                        line_left = padding_x + int((content_width - line["width"]) / 2)
+                        baseline_y = current_y + line["ascent"]
+                        current_x = line_left
+                        for word in line["words"]:
+                            positioned_words.append({"index": word["index"], "text": word["text"], "anchor_x": current_x - word["bbox"][0], "baseline_y": baseline_y, "tracking": tracking})
+                            current_x += word["width"] + space_width
+                        current_y += line["height"] + line_gap
+                    return {"font": pil_font, "stroke_width": stroke_width, "stroke_fill": ImageColor.getrgb(stroke_color or colors["stroke_color"]) if (stroke_color or colors["stroke_color"]) else None, "shadow_offset_y": shadow_offset_y, "size": (canvas_width, canvas_height), "words": sorted(positioned_words, key=lambda entry: entry["index"])}
+                except Exception:
+                    pass
+
     raise RuntimeError("Could not render subtitles with a glyph-safe PIL font.") from last_error
 
 
@@ -896,7 +974,9 @@ def _render_locked_text_image(
     inactive_channel = max(0, min(255, round(255 * inactive_alpha)))
     image = Image.new('RGBA', layout["size"], (0, 0, 0, 0))
     shadow_layer = Image.new('RGBA', layout["size"], (0, 0, 0, 0))
+    glow_layer = Image.new('RGBA', layout["size"], (0, 0, 0, 0))
     shadow_draw = ImageDraw.Draw(shadow_layer)
+    glow_draw = ImageDraw.Draw(glow_layer)
     draw = ImageDraw.Draw(image)
 
     for word in layout["words"]:
@@ -911,6 +991,16 @@ def _render_locked_text_image(
             word.get("tracking", 0),
             anchor='ls',
         )
+        if is_active:
+            _draw_tracked_text(
+                glow_draw,
+                (word["anchor_x"], word["baseline_y"]),
+                word["text"],
+                layout["font"],
+                (*active_rgb, 100),
+                word.get("tracking", 0),
+                anchor='ls',
+            )
         _draw_tracked_text(
             draw,
             (word["anchor_x"], word["baseline_y"]),
@@ -923,8 +1013,10 @@ def _render_locked_text_image(
             stroke_fill=layout["stroke_fill"],
         )
 
-    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=5))
-    return Image.alpha_composite(shadow_layer, image)
+    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=8))
+    glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(radius=12))
+    result = Image.alpha_composite(shadow_layer, glow_layer)
+    return Image.alpha_composite(result, image)
 
 
 def _render_subtitle_bitmap_image(cue, video_clip, subtitle_style):
@@ -1056,9 +1148,17 @@ def _render_header_panel_layers(video_clip, title_clip, reason_clip):
         radius=HEADER_PANEL_RADIUS,
         fill=HEADER_PANEL_FILL,
     )
+    # Premium border — subtle white outline around the full panel
+    draw.rounded_rectangle(
+        (0, 0, panel_width - 1, panel_height - 1),
+        radius=HEADER_PANEL_RADIUS,
+        outline=HEADER_PANEL_BORDER,
+        width=2,
+    )
+    # Bottom accent line — slightly brighter
     draw.line(
         [(HEADER_PANEL_RADIUS, panel_height - 1), (panel_width - HEADER_PANEL_RADIUS, panel_height - 1)],
-        fill=HEADER_PANEL_BORDER,
+        fill=(255, 255, 255, 70),
         width=1,
     )
 
@@ -1356,28 +1456,40 @@ def _position_subtitle_clip(clip, video_clip):
     return clip.with_position((x, y))
 
 
+def _font_display_name(font):
+    if isinstance(font, tuple):
+        return f"{font[0]}#{font[1]}"
+    return str(font)
+
+
 def assert_subtitle_rendering_ready(subtitle_style=None):
     resolved_style = normalize_subtitle_style(subtitle_style)
     tested_fonts = []
     last_error = None
+    test_sizes = [70, 54, 40]
 
     for font in get_font_candidates(resolved_style["fontPreset"]):
-        tested_fonts.append(font)
+        tested_fonts.append(_font_display_name(font))
         try:
-            pil_font = _load_pil_font(font, 48)
-            if pil_font is None:
-                continue
+            all_sizes_ok = True
+            for size in test_sizes:
+                pil_font = _load_pil_font(font, size)
+                if pil_font is None:
+                    all_sizes_ok = False
+                    break
 
-            probe = Image.new('RGBA', (512, 256), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(probe)
-            draw.text(
-                (24, 96),
-                'SUBTITLE PROBE',
-                font=pil_font,
-                fill=(255, 255, 255, 255),
-                anchor='ls',
-            )
-            return font
+                probe = Image.new('RGBA', (1080, 512), (0, 0, 0, 0))
+                draw = ImageDraw.Draw(probe)
+                draw.text(
+                    (24, 200),
+                    'SUBTITLE PROBE TEST',
+                    font=pil_font,
+                    fill=(255, 255, 255, 255),
+                    anchor='ls',
+                )
+            if not all_sizes_ok:
+                continue
+            return _font_display_name(font)
         except Exception as error:
             last_error = error
 
@@ -1415,6 +1527,56 @@ def create_top_description_overlay(video_clip, title, reason, subtitle_style):
     return _render_header_panel_layers(video_clip, title_clip, reason_clip)
 
 
+def _build_word_boundaries(cue):
+    """Build sorted list of word start timestamps (local to cue) for transition detection."""
+    word_entries = cue.get("wordEntries") or []
+    if not word_entries:
+        return []
+    cue_start = float(cue.get("start", 0.0))
+    boundaries = []
+    for entry in word_entries:
+        boundary = float(entry["start"]) - cue_start
+        if boundary > 0:
+            boundaries.append(boundary)
+    return sorted(set(boundaries))
+
+
+def _resolve_highlight_blend(cue, local_time, transition_duration, word_boundaries):
+    """Return (index_a, index_b, blend_factor) for smooth highlight crossfade.
+
+    blend_factor=0.0 means fully index_a, 1.0 means fully index_b.
+    When no transition is happening, index_a == index_b.
+    """
+    if not word_boundaries or transition_duration <= 0:
+        active = _resolve_active_index_for_time(cue, local_time)
+        return active, active, 0.0
+
+    half_t = transition_duration / 2.0
+    for boundary in word_boundaries:
+        if boundary - half_t <= local_time <= boundary + half_t:
+            before_time = boundary - half_t - 0.001
+            after_time = boundary + half_t + 0.001
+            index_before = _resolve_active_index_for_time(cue, max(0.0, before_time))
+            index_after = _resolve_active_index_for_time(cue, after_time)
+            if index_before == index_after:
+                return index_before, index_before, 0.0
+            progress = (local_time - (boundary - half_t)) / transition_duration
+            blend = _cubic_ease(max(0.0, min(1.0, progress)))
+            return index_before, index_after, blend
+
+    active = _resolve_active_index_for_time(cue, local_time)
+    return active, active, 0.0
+
+
+def _blend_frames(frame_a, frame_b, factor):
+    """Alpha-blend two RGBA numpy arrays. factor=0 → frame_a, factor=1 → frame_b."""
+    if factor <= 0.0:
+        return frame_a
+    if factor >= 1.0:
+        return frame_b
+    return np.round(frame_a.astype(np.float32) * (1.0 - factor) + frame_b.astype(np.float32) * factor).astype(np.uint8)
+
+
 def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_style=None, clip_title=None, clip_reason=None):
     print("📝 Building subtitle layers...")
     resolved_style = normalize_subtitle_style(subtitle_style)
@@ -1422,7 +1584,9 @@ def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_sty
     header_duration = _header_overlay_duration(video_duration)
 
     subtitle_cues = build_subtitle_plan(whisper_segments, clip_start_time, video_duration)
-    subtitle_layers = []
+
+    # --- Pre-build layouts for all cues ---
+    cue_layouts = []
     for cue in subtitle_cues:
         locked_layout = _build_locked_text_layout(
             cue,
@@ -1438,32 +1602,64 @@ def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_sty
             line_gap_ratio=0.008,
             tracking=SUBTITLE_LETTER_SPACING,
         )
-        rendered_states = {}
         candidate_indexes = {-1}
         if cue.get("wordEntries"):
             candidate_indexes.update(range(len(cue["wordEntries"])))
         else:
             candidate_indexes.add(cue.get("highlightIndex", -1))
+        cue_layouts.append((cue, locked_layout, candidate_indexes))
 
+    # --- Parallel pre-render all highlight states ---
+    def _render_state(args):
+        layout, style, active_index = args
+        return active_index, np.array(
+            _render_locked_text_image(
+                layout,
+                style,
+                highlight_index=active_index,
+                inactive_alpha=SUBTITLE_INACTIVE_ALPHA / 255,
+            )
+        )
+
+    all_render_jobs = []
+    for cue, locked_layout, candidate_indexes in cue_layouts:
         for active_index in candidate_indexes:
-            if active_index not in rendered_states:
-                rendered_states[active_index] = np.array(
-                    _render_locked_text_image(
-                        locked_layout,
-                        resolved_style,
-                        highlight_index=active_index,
-                        inactive_alpha=SUBTITLE_INACTIVE_ALPHA / 255,
-                    )
-                )
+            all_render_jobs.append((cue, locked_layout, candidate_indexes, active_index))
+
+    # Render in parallel using threads (PIL releases GIL during heavy operations)
+    render_tasks = [(layout, resolved_style, idx) for (_, layout, _, idx) in all_render_jobs]
+    with ThreadPoolExecutor(max_workers=min(4, len(render_tasks) or 1)) as executor:
+        results = list(executor.map(_render_state, render_tasks))
+
+    # Map results back to per-cue dicts
+    job_index = 0
+    cue_rendered_states = []
+    for cue, locked_layout, candidate_indexes in cue_layouts:
+        rendered_states = {}
+        for active_index in candidate_indexes:
+            _, frame = results[job_index]
+            rendered_states[active_index] = frame
+            job_index += 1
+        cue_rendered_states.append(rendered_states)
+
+    # --- Build subtitle video clips with smooth crossfade ---
+    subtitle_layers = []
+    for cue_idx, (cue, locked_layout, candidate_indexes) in enumerate(cue_layouts):
+        rendered_states = cue_rendered_states[cue_idx]
+        word_boundaries = _build_word_boundaries(cue)
 
         cue_start = float(cue["start"])
         cue_end = float(cue["end"])
         cue_duration = _safe_duration(cue_end - cue_start)
 
-        def cue_frame_provider(local_t, *, current_cue=cue, states=rendered_states, duration=cue_duration):
+        def cue_frame_provider(local_t, *, current_cue=cue, states=rendered_states, duration=cue_duration, boundaries=word_boundaries):
             timestamp = min(max(float(local_t), 0.0), max(0.0, duration - 1e-6))
-            active_index = _resolve_active_index_for_time(current_cue, timestamp)
-            return states.get(active_index, states.get(-1))
+            idx_a, idx_b, blend = _resolve_highlight_blend(current_cue, timestamp, HIGHLIGHT_TRANSITION_DURATION, boundaries)
+            frame_a = states.get(idx_a, states.get(-1))
+            if blend <= 0.01 or idx_a == idx_b:
+                return frame_a
+            frame_b = states.get(idx_b, states.get(-1))
+            return _blend_frames(frame_a, frame_b, blend)
 
         subtitle_clip = _create_rgba_video_clip(
             cue_frame_provider,

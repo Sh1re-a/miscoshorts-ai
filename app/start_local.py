@@ -50,7 +50,7 @@ def wait_for_url(url: str, timeout: float, process: subprocess.Popen[str], name:
             with urllib.request.urlopen(url, timeout=2):
                 return
         except urllib.error.URLError:
-            time.sleep(1)
+            time.sleep(0.25)
 
     raise TimeoutError(f"Timed out while waiting for {name} to start.")
 
@@ -91,14 +91,14 @@ def main() -> None:
 
     frontend_process = None
     try:
-        if backend_process is not None:
-            wait_for_url(BACKEND_HEALTH_URL, timeout=20, process=backend_process, name="backend")
-
         print(f"Starting React frontend on {frontend_url} ...")
         frontend_process = subprocess.Popen(
             [npm_command(), "run", "dev", "--", "--port", str(frontend_port), "--strictPort"],
             cwd=FRONTEND_DIR,
         )
+
+        if backend_process is not None:
+            wait_for_url(BACKEND_HEALTH_URL, timeout=20, process=backend_process, name="backend")
 
         wait_for_url(frontend_url, timeout=30, process=frontend_process, name="frontend")
 

@@ -24,7 +24,7 @@ def wait_for_url(url: str, timeout: float, process: subprocess.Popen[str] | None
             with urllib.request.urlopen(url, timeout=2):
                 return
         except urllib.error.URLError:
-            time.sleep(1)
+            time.sleep(0.25)
 
     raise TimeoutError(f"Timed out while waiting for {name} to start.")
 

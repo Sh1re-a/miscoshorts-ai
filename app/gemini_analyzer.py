@@ -1,6 +1,7 @@
-import google.generativeai as genai
 import os
 from dotenv import load_dotenv
+from google import genai
+from google.genai import errors, types
 
 from app.paths import ENV_FILE
 
@@ -23,16 +24,9 @@ def find_viral_clip(whisper_segments, api_key=None):
 def find_viral_clips(whisper_segments, api_key=None, clip_count=3):
     print("✨ Asking Gemini with timestamps...")
 
-    genai.configure(api_key=get_gemini_api_key(api_key))
-
     timed_text = ""
     for segment in whisper_segments:
         timed_text += f"[{segment['start']:.1f}s] {segment['text']}\n"
-
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
-        generation_config={"temperature": 0.7}
-    )
 
     prompt = f"""
     Act as a professional video editor. Analyze this transcript with timestamps.
@@ -58,5 +52,23 @@ def find_viral_clips(whisper_segments, api_key=None, clip_count=3):
     Continue until CLIP {clip_count}.
     """
 
-    response = model.generate_content(prompt)
-    return response.text
+    client = genai.Client(api_key=get_gemini_api_key(api_key))
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.7,
+                response_mime_type="text/plain",
+            ),
+        )
+    except errors.APIError as error:
+        raise RuntimeError(f"Gemini request failed: {error.message}") from error
+    finally:
+        client.close()
+
+    text = (response.text or "").strip()
+    if not text:
+        raise RuntimeError("Gemini returned an empty response.")
+
+    return text

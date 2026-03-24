@@ -246,7 +246,7 @@ function Install-PythonDirectly {
     $installerArgs = @(
         "/quiet",
         "InstallAllUsers=0",
-        "TargetDir=$pythonCurrentDir",
+        "TargetDir=`"$pythonCurrentDir`"",
         "PrependPath=0",
         "Include_launcher=0",
         "InstallLauncherAllUsers=0",
@@ -294,7 +294,7 @@ function Install-NodeDirectly {
     Invoke-Download $nodeInstallerUrl $nodeInstallerPath "Node.js installer from nodejs.org"
 
     Write-SetupAction "Running Node.js installer ..."
-    $process = Start-Process -FilePath "msiexec.exe" -ArgumentList @("/i", $nodeInstallerPath, "/qn", "/norestart") -Wait -PassThru
+    $process = Start-Process -FilePath "msiexec.exe" -ArgumentList @("/i", "`"$nodeInstallerPath`"", "/qn", "/norestart") -Wait -PassThru
     if ($process.ExitCode -ne 0) {
         throw "Node.js installer exited with code $($process.ExitCode)."
     }
@@ -499,9 +499,11 @@ function Get-PathFingerprint($path) {
         return "file:$((Get-FileHash -Algorithm SHA256 -Path $item.FullName).Hash)"
     }
 
+    # Use file sizes + modification times for faster directory fingerprinting
+    $root = $item.FullName
     $entries = Get-ChildItem -Path $item.FullName -Recurse -File | Sort-Object FullName | ForEach-Object {
-        $relativePath = [System.IO.Path]::GetRelativePath($root, $_.FullName).Replace("\", "/")
-        "$relativePath|$((Get-FileHash -Algorithm SHA256 -Path $_.FullName).Hash)"
+        $relativePath = $_.FullName.Substring($root.Length).TrimStart('\', '/').Replace("\", "/")
+        "$relativePath|$($_.Length)|$($_.LastWriteTimeUtc.Ticks)"
     }
 
     return "dir:$(Get-StringHash ($entries -join "`n"))"
@@ -577,7 +579,7 @@ function Invoke-Setup {
 
     if (-not (Test-StateMatch $pythonDepsStamp $pythonDepsSignature)) {
         Write-SetupAction "Installing Python packages ..."
-        Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "-r", "requirements.txt") "Installing Python dependencies failed."
+        Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "--quiet", "-r", "requirements.txt") "Installing Python dependencies failed."
         Write-StateValue $pythonDepsStamp $pythonDepsSignature
         Write-SetupDone "Python packages are up to date."
     }

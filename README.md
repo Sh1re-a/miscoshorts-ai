@@ -81,6 +81,8 @@ The current browser flow is intentionally simplified: it runs the default 3-clip
 - FFmpeg installed and available in `PATH`
 - A Gemini API key
 
+The Python Gemini integration now uses the supported `google-genai` SDK.
+
 For packaged Windows releases that already include `frontend/dist`, Node.js is not required for the end user.
 
 ## Developer Setup
