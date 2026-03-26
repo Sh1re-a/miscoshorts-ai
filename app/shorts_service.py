@@ -1766,33 +1766,462 @@ def build_vertical_master_clip(clip: VideoFileClip) -> tuple[VideoFileClip, str,
             return clip.resized(new_size=(OUTPUT_WIDTH, OUTPUT_HEIGHT)), _CONTENT_MIXED, fallback_meta
 
 
-def write_high_quality_video(clip: VideoFileClip, output_path: str | Path) -> None:
-    clip.write_videofile(
-        str(output_path),
-        codec="libx264",
-        audio_codec="aac",
-        fps=get_render_fps(clip),
-        audio_bitrate=VIDEO_AUDIO_BITRATE,
-        threads=RENDER_THREADS,
-        preset=VIDEO_PRESET,
-        ffmpeg_params=[
-            "-crf",
-            VIDEO_CRF,
-            "-maxrate",
-            VIDEO_MAXRATE,
-            "-bufsize",
-            VIDEO_BUFSIZE,
-            "-movflags",
-            "+faststart",
-            "-pix_fmt",
-            "yuv420p",
-            "-profile:v",
-            "high",
-            "-level:v",
-            "4.2",
-        ],
-        logger=None,
+def write_high_quality_video(
+    clip: VideoFileClip,
+    output_path: str | Path,
+    audio_path: Path | None = None,
+) -> None:
+    """Write the clip to disk.
+
+    When *audio_path* is supplied the render is two-pass:
+      1. Write video-only (no MoviePy audio reader involved).
+      2. Mux the pre-extracted WAV in via a direct FFmpeg subprocess call.
+
+    This completely bypasses MoviePy's FFMPEG_AudioReader whose ``proc``
+    attribute can become ``None`` during long renders, causing:
+      AttributeError: 'NoneType' object has no attribute 'stdout'
+    """
+    fps = get_render_fps(clip)
+    # Predictable GOP: keyframe every 2 s with no scene-cut interruptions.
+    keyint = str(fps * 2)
+    keyint_min = str(fps)
+    output_path = Path(output_path)
+
+    base_ffmpeg_params = [
+        "-crf", VIDEO_CRF,
+        "-maxrate", VIDEO_MAXRATE,
+        "-bufsize", VIDEO_BUFSIZE,
+        "-movflags", "+faststart",
+        "-pix_fmt", "yuv420p",
+        "-profile:v", "high",
+        "-level:v", "4.2",
+        "-g", keyint,
+        "-keyint_min", keyint_min,
+        "-sc_threshold", "0",
+    ]
+
+    if audio_path is not None and Path(audio_path).exists():
+        # Pass 1: write video-only — no audio reader whatsoever
+        video_only_path = output_path.with_suffix(".videoonly.mp4")
+        try:
+            clip.write_videofile(
+                str(video_only_path),
+                codec="libx264",
+                audio=False,
+                fps=fps,
+                threads=RENDER_THREADS,
+                preset=VIDEO_PRESET,
+                ffmpeg_params=base_ffmpeg_params,
+                logger=None,
+            )
+            # Pass 2: mux audio with direct FFmpeg — never touches MoviePy readers
+            ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+            mux_proc = subprocess.run(
+                [
+                    ffmpeg_bin, "-y",
+                    "-i", str(video_only_path),
+                    "-i", str(audio_path),
+                    "-c:v", "copy",
+                    "-c:a", "aac",
+                    "-b:a", VIDEO_AUDIO_BITRATE,
+                    "-movflags", "+faststart",
+                    "-shortest",
+                    str(output_path),
+                ],
+                capture_output=True,
+                timeout=300,
+            )
+            if mux_proc.returncode != 0:
+                raise RuntimeError(
+                    f"FFmpeg audio mux failed (rc={mux_proc.returncode}): "
+                    f"{mux_proc.stderr.decode(errors='replace')[:500]}"
+                )
+        finally:
+            if video_only_path.exists():
+                video_only_path.unlink(missing_ok=True)
+    else:
+        # No pre-extracted audio — write directly (silent or with MoviePy audio)
+        clip.write_videofile(
+            str(output_path),
+            codec="libx264",
+            audio_codec="aac" if clip.audio is not None else None,
+            fps=fps,
+            audio_bitrate=VIDEO_AUDIO_BITRATE,
+            threads=RENDER_THREADS,
+            preset=VIDEO_PRESET,
+            ffmpeg_params=base_ffmpeg_params,
+            logger=None,
+        )
+
+
+def _extract_audio_segment(
+    video_path: Path,
+    start: float,
+    end: float,
+    temp_dir: Path,
+) -> Path | None:
+    """Pre-extract an audio segment to a WAV file using a direct FFmpeg call.
+
+    Returns the WAV path on success, or None if the source has no audio or
+    FFmpeg fails.  Using a standalone WAV file avoids MoviePy's chained
+    FFMPEG_AudioReader whose ``proc`` can be None under complex clip chains,
+    causing ``AttributeError: 'NoneType' object has no attribute 'stdout'``.
+    """
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if not ffmpeg_bin:
+        return None
+
+    out_path = temp_dir / f"audio_tmp_{start:.3f}_{end:.3f}.wav"
+    duration = end - start
+    try:
+        proc = subprocess.run(
+            [
+                ffmpeg_bin, "-y",
+                "-ss", f"{start:.6f}",
+                "-t", f"{duration:.6f}",
+                "-i", str(video_path),
+                "-vn",
+                "-acodec", "pcm_s16le",
+                "-ar", "44100",
+                "-ac", "2",
+                str(out_path),
+            ],
+            capture_output=True,
+            timeout=120,
+        )
+        if proc.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
+            return None
+        return out_path
+    except Exception:
+        return None
+
+
+def ensure_dependencies() -> None:
+    if shutil.which("ffmpeg"):
+        return
+
+    raise EnvironmentError(
+        "FFmpeg is not installed or not available in PATH. On Windows, install it with 'winget install Gyan.FFmpeg'."
     )
+
+
+def _get_whisper_model_candidates() -> list[str]:
+    return [candidate.strip() for candidate in WHISPER_MODEL.split(",") if candidate.strip()] or ["base"]
+
+
+def load_whisper_model() -> tuple[str, object]:
+    last_error = None
+    with _whisper_model_lock:
+        for model_name in _get_whisper_model_candidates():
+            cached_model = _whisper_model_cache.get(model_name)
+            if cached_model is not None:
+                return model_name, cached_model
+
+            try:
+                model = whisper.load_model(model_name)
+                _whisper_model_cache[model_name] = model
+                return model_name, model
+            except Exception as error:
+                last_error = error
+
+    raise RuntimeError("Could not load any configured Whisper model.") from last_error
+
+
+def transcribe_media(media_path: Path, *, word_timestamps: bool) -> dict:
+    model_name, model = load_whisper_model()
+    transcribe_options = {
+        "fp16": False,
+        "verbose": False,
+        "condition_on_previous_text": False,
+        "temperature": 0.0,
+    }
+    if word_timestamps:
+        transcribe_options["word_timestamps"] = True
+
+    try:
+        return model.transcribe(str(media_path), **transcribe_options)
+    except TypeError:
+        fallback_options = dict(transcribe_options)
+        fallback_options.pop("word_timestamps", None)
+        return model.transcribe(str(media_path), **fallback_options)
+    except Exception as error:
+        if model_name != "base":
+            with _whisper_model_lock:
+                _whisper_model_cache.pop(model_name, None)
+                base_model = _whisper_model_cache.get("base")
+                if base_model is None:
+                    base_model = whisper.load_model("base")
+                    _whisper_model_cache["base"] = base_model
+            fallback_options = dict(transcribe_options)
+            try:
+                return base_model.transcribe(str(media_path), **fallback_options)
+            except TypeError:
+                fallback_options.pop("word_timestamps", None)
+                return base_model.transcribe(str(media_path), **fallback_options)
+        raise RuntimeError("Whisper transcription failed.") from error
+
+
+def transcribe_video_fast(video_path: Path) -> dict:
+    return transcribe_media(video_path, word_timestamps=True)
+
+
+def transcribe_clip_for_subtitles(clip: VideoFileClip, output_dir: Path, clip_index: int) -> dict:
+    if clip.audio is None:
+        return {"text": "", "segments": []}
+
+    audio_path = output_dir / f"clip_audio_{clip_index:02d}.wav"
+    try:
+        clip.audio.write_audiofile(
+            str(audio_path),
+            fps=16000,
+            nbytes=2,
+            ffmpeg_params=["-ac", "1"],
+            logger=None,
+        )
+        return transcribe_media(audio_path, word_timestamps=True)
+    finally:
+        if audio_path.exists():
+            audio_path.unlink()
+
+
+def _slice_segment_words(words: list[dict], clip_start_time: float, clip_end_time: float) -> list[dict]:
+    clip_duration = max(0.0, clip_end_time - clip_start_time)
+    sliced_words: list[dict] = []
+
+    for word in words:
+        raw_text = (word.get("word") or "").strip()
+        raw_start = word.get("start")
+        raw_end = word.get("end")
+        if not raw_text or raw_start is None or raw_end is None:
+            continue
+
+        try:
+            word_start = float(raw_start)
+            word_end = float(raw_end)
+        except (TypeError, ValueError):
+            continue
+
+        if word_end <= clip_start_time or word_start >= clip_end_time:
+            continue
+
+        relative_start = max(0.0, word_start - clip_start_time)
+        relative_end = min(clip_duration, word_end - clip_start_time)
+        if relative_end <= relative_start:
+            relative_end = min(clip_duration, relative_start + 0.12)
+
+        sliced_words.append(
+            {
+                "word": raw_text,
+                "start": relative_start,
+                "end": relative_end,
+            }
+        )
+
+    return sliced_words
+
+
+def extract_clip_transcript_from_full(full_transcript: dict, clip_start_time: float, clip_end_time: float) -> tuple[dict, bool]:
+    clip_duration = max(0.0, clip_end_time - clip_start_time)
+    clip_segments: list[dict] = []
+    transcript_text_parts: list[str] = []
+    requires_precise_fallback = False
+
+    for raw_segment in full_transcript.get("segments") or []:
+        raw_start = raw_segment.get("start")
+        raw_end = raw_segment.get("end")
+        if raw_start is None or raw_end is None:
+            continue
+
+        try:
+            segment_start = float(raw_start)
+            segment_end = float(raw_end)
+        except (TypeError, ValueError):
+            continue
+
+        if segment_end <= clip_start_time or segment_start >= clip_end_time:
+            continue
+
+        relative_start = max(0.0, segment_start - clip_start_time)
+        relative_end = min(clip_duration, segment_end - clip_start_time)
+        if relative_end <= relative_start:
+            continue
+
+        sliced_words = _slice_segment_words(raw_segment.get("words") or [], clip_start_time, clip_end_time)
+        if sliced_words:
+            segment_text = " ".join(word["word"] for word in sliced_words)
+        else:
+            segment_text = (raw_segment.get("text") or "").strip()
+            if segment_start < clip_start_time or segment_end > clip_end_time:
+                requires_precise_fallback = True
+
+        if not segment_text and not sliced_words:
+            continue
+
+        clipped_segment = {
+            "start": relative_start,
+            "end": relative_end,
+            "text": segment_text,
+        }
+        if sliced_words:
+            clipped_segment["words"] = sliced_words
+
+        clip_segments.append(clipped_segment)
+        if segment_text:
+            transcript_text_parts.append(segment_text)
+
+    return {
+        "text": " ".join(transcript_text_parts).strip(),
+        "segments": clip_segments,
+    }, requires_precise_fallback
+
+
+def download_video(url: str, destination_base: Path, progress_callback: ProgressCallback | None = None) -> Path:
+    last_reported: dict[str, int] = {"pct": -1}
+
+    def _ydl_progress(d: dict) -> None:
+        if d.get("status") != "downloading":
+            return
+        total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+        downloaded = d.get("downloaded_bytes") or 0
+        if total > 0:
+            pct = int(downloaded / total * 100)
+            # Report at most every 10%
+            if pct >= last_reported["pct"] + 10:
+                last_reported["pct"] = pct
+                speed = d.get("speed") or 0
+                speed_mb = speed / 1_048_576 if speed else 0
+                eta = d.get("eta") or 0
+                msg = f"Downloading... {pct}%"
+                if speed_mb >= 0.1:
+                    msg += f"  ({speed_mb:.1f} MB/s"
+                    if eta:
+                        msg += f", ~{eta}s left"
+                    msg += ")"
+                _emit(progress_callback, "downloading", msg)
+        elif d.get("info_dict"):
+            # No size info yet — just confirm it started
+            if last_reported["pct"] < 0:
+                last_reported["pct"] = 0
+                _emit(progress_callback, "downloading", "Downloading video… (size unknown)")
+
+    ydl_opts = {
+        "format": DOWNLOAD_FORMAT,
+        "outtmpl": str(destination_base.with_suffix(".%(ext)s")),
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "concurrent_fragment_downloads": 4,
+        "progress_hooks": [_ydl_progress],
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+    _emit(progress_callback, "downloading", "Download complete.")
+    return _resolve_downloaded_video_path(destination_base)
+
+
+def _extract_gemini_clip_blocks(text: str) -> list[dict[str, str]]:
+    clips: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        if GEMINI_CLIP_PATTERN.match(line):
+            if current:
+                clips.append(current)
+            current = {}
+            continue
+
+        match = GEMINI_FIELD_PATTERN.match(line)
+        if not match:
+            continue
+
+        key = match.group(1).lower()
+        value = match.group(2).strip()
+
+        if key == "title" and current.get("title") and current.get("start") and current.get("end"):
+            clips.append(current)
+            current = {}
+
+        current[key] = value
+
+    if current:
+        clips.append(current)
+
+    return clips
+
+
+def _parse_gemini_float(raw_value: str | None, field_name: str) -> float:
+    if raw_value is None or not raw_value.strip():
+        raise ValueError(f"Gemini response is missing {field_name.upper()}.")
+
+    try:
+        return float(raw_value.strip())
+    except ValueError as error:
+        raise ValueError(f"Gemini returned an invalid {field_name.upper()} value: {raw_value!r}") from error
+
+
+def _normalize_gemini_clip(raw_clip: dict[str, str]) -> dict:
+    start = _parse_gemini_float(raw_clip.get("start"), "start")
+    end = _parse_gemini_float(raw_clip.get("end"), "end")
+    if end <= start:
+        raise ValueError(f"Gemini returned an invalid clip interval: start={start}, end={end}")
+
+    title = (raw_clip.get("title") or "").strip() or None
+    reason = (raw_clip.get("reason") or "").strip() or None
+    return {
+        "title": title,
+        "start": start,
+        "end": end,
+        "reason": reason,
+    }
+
+
+def parse_gemini_response(text: str) -> dict:
+    clips = parse_gemini_responses(text)
+    if not clips:
+        raise ValueError("Gemini did not return any valid clip intervals.")
+    return clips[0]
+
+
+def parse_gemini_responses(text: str) -> list[dict]:
+    raw_clips = _extract_gemini_clip_blocks(text)
+    normalized: list[dict] = []
+    seen_ranges: set[tuple[int, int]] = set()
+    parse_errors: list[str] = []
+
+    for raw_clip in raw_clips:
+        try:
+            clip = _normalize_gemini_clip(raw_clip)
+        except ValueError as error:
+            parse_errors.append(str(error))
+            continue
+
+        key = (round(clip["start"] * 10), round(clip["end"] * 10))
+        if key in seen_ranges:
+            continue
+
+        seen_ranges.add(key)
+        normalized.append(clip)
+
+    if normalized:
+        return normalized
+
+    if parse_errors:
+        raise ValueError(parse_errors[0])
+
+    return []
+
+
+def create_output_dir(base_dir: str | Path = OUTPUTS_DIR, job_id: str | None = None) -> tuple[str, Path]:
+    job_id = job_id or uuid.uuid4().hex[:10]
+    output_dir = Path(base_dir) / job_id
+    (output_dir / "clips").mkdir(parents=True, exist_ok=True)
+    (output_dir / "meta").mkdir(parents=True, exist_ok=True)
+    return job_id, output_dir
 
 
 def create_short_from_url(
@@ -1814,7 +2243,9 @@ def create_short_from_url(
     subtitles.assert_subtitle_rendering_ready(subtitle_style)
 
     job_id, output_dir = create_output_dir(base_dir=base_dir, job_id=job_id)
-    transcript_path = output_dir / "full_transcript.txt"
+    meta_dir = output_dir / "meta"
+    clips_dir = output_dir / "clips"
+    transcript_path = meta_dir / "full_transcript.txt"
     temp_base = output_dir / "video_temp"
 
     video_path = None
@@ -1825,7 +2256,7 @@ def create_short_from_url(
 
     try:
         _emit(progress_callback, "downloading", "Downloading the highest-quality source video and audio from YouTube...")
-        video_path = download_video(video_url, temp_base)
+        video_path = download_video(video_url, temp_base, progress_callback)
 
         _emit(progress_callback, "transcribing", f"Transcribing full video once with Whisper ({_get_whisper_model_candidates()[0]}) for analysis and subtitles...")
         result = transcribe_video_fast(video_path)
@@ -1843,21 +2274,51 @@ def create_short_from_url(
             clip_candidates = [parse_gemini_response(analysis)]
 
         clip_candidates = clip_candidates[:clip_count]
+
+        # Validate clip timestamps against actual video duration
         clips_output = []
         source_video = VideoFileClip(str(video_path))
+        video_duration = source_video.duration or 0.0
+
+        valid_candidates = []
+        for cd in clip_candidates:
+            s, e = cd["start"], cd["end"]
+            # Clamp endpoints to video boundaries
+            s = max(0.0, min(s, video_duration - 1.0))
+            e = max(s + 5.0, min(e, video_duration))
+            if e - s < 5.0:
+                print(f"  ⚠️  Skipping clip {cd.get('title', 'unknown')}: too short after clamping ({e - s:.1f}s)")
+                continue
+            cd["start"] = round(s, 2)
+            cd["end"] = round(e, 2)
+            valid_candidates.append(cd)
+
+        if not valid_candidates:
+            raise ValueError("No valid clips remain after timestamp validation against video duration.")
+
+        clip_candidates = valid_candidates
 
         for index, clip_data in enumerate(clip_candidates, start=1):
             start = clip_data["start"]
             end = clip_data["end"]
             current_filename = build_clip_filename(output_filename, index, len(clip_candidates))
-            output_path = output_dir / current_filename
+            output_path = clips_dir / current_filename
 
             _emit(progress_callback, "rendering", f"Rendering clip {index} of {len(clip_candidates)}...")
             clip = source_video.subclipped(start, end)
 
-            clip_vertical = build_vertical_master_clip(clip)
+            _emit(progress_callback, "rendering", f"Analysing visual content for clip {index}...")
+            clip_vertical, content_type, clip_analytics = build_vertical_master_clip(clip)
+            ct_label = _CONTENT_LABELS.get(content_type, content_type)
+            _emit(progress_callback, "rendering", f"Clip {index} detected as {ct_label} — composing vertical frame...")
+
+            # Pre-extract audio to a WAV file via direct FFmpeg.
+            # Audio is muxed in by write_high_quality_video (2-pass) so that
+            # MoviePy's FFMPEG_AudioReader is never used during the render,
+            # preventing the proc=None crash on long clips.
+            audio_temp_path: Path | None = None
             if clip.audio is not None:
-                clip_vertical = clip_vertical.with_audio(clip.audio.with_duration(clip_vertical.duration))
+                audio_temp_path = _extract_audio_segment(video_path, start, end, output_dir)
 
             _emit(progress_callback, "rendering", f"Preparing subtitle timing for clip {index}...")
             clip_transcript, requires_precise_fallback = extract_clip_transcript_from_full(result, start, end)
@@ -1870,7 +2331,7 @@ def create_short_from_url(
                 0,
                 clip_vertical.duration,
             )
-            subtitle_plan_path = output_dir / f"clip_{index:02d}_subtitles.json"
+            subtitle_plan_path = meta_dir / f"clip_{index:02d}_subtitles.json"
             subtitle_plan_path.write_text(
                 json.dumps(subtitles.export_subtitle_plan(subtitle_plan), ensure_ascii=True, indent=2),
                 encoding="utf-8",
@@ -1880,7 +2341,7 @@ def create_short_from_url(
                 subtitle_plan,
                 subtitle_style,
             )
-            subtitle_preflight_path = output_dir / f"clip_{index:02d}_subtitle_preflight.json"
+            subtitle_preflight_path = meta_dir / f"clip_{index:02d}_subtitle_preflight.json"
             subtitle_preflight_path.write_text(
                 json.dumps(subtitle_preflight, ensure_ascii=True, indent=2),
                 encoding="utf-8",
@@ -1895,7 +2356,7 @@ def create_short_from_url(
                 clip_title=clip_data.get("title"),
                 clip_reason=clip_data.get("reason"),
             )
-            write_high_quality_video(clip_final, output_path)
+            write_high_quality_video(clip_final, output_path, audio_path=audio_temp_path)
 
             clips_output.append(
                 {
@@ -1904,6 +2365,8 @@ def create_short_from_url(
                     "reason": clip_data.get("reason"),
                     "start": start,
                     "end": end,
+                    "contentType": content_type,
+                    "analytics": clip_analytics,
                     "outputFilename": current_filename,
                     "outputPath": str(output_path),
                     "subtitlePlanPath": str(subtitle_plan_path),
@@ -1915,6 +2378,9 @@ def create_short_from_url(
 
             clip_final.close()
             clip_final = None
+            if audio_temp_path is not None and audio_temp_path.exists():
+                audio_temp_path.unlink(missing_ok=True)
+                audio_temp_path = None
             clip_vertical.close()
             clip_vertical = None
             clip.close()
