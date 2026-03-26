@@ -1,6 +1,6 @@
-import { useEffect, useEffectEvent, useMemo, useState } from 'react'
+import { useCallback, useEffect, useEffectEvent, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
-import { CheckCircle2, Download, LoaderCircle, PlaySquare, RotateCcw } from 'lucide-react'
+import { CheckCircle2, Download, LoaderCircle, PlaySquare, RotateCcw, ThumbsUp, ThumbsDown, BarChart3 } from 'lucide-react'
 
 import { Badge } from './components/ui/badge'
 import { Button } from './components/ui/button'
@@ -45,7 +45,43 @@ type JobClip = {
   start: number
   end: number
   outputFilename: string
+  contentType?: string
+  analytics?: Record<string, unknown>
 }
+
+type ClipFeedback = {
+  rating: 'good' | 'bad'
+  tags: string[]
+  saving?: boolean
+  saved?: boolean
+}
+
+type AnalyticsInsights = {
+  totalClips: number
+  totalRated: number
+  totalGood: number
+  totalBad: number
+  overallApprovalRate: number | null
+  perContentType: Record<string, {
+    clipCount: number
+    avgConfidence: number | null
+    rated: number
+    good: number
+    bad: number
+    approvalRate: number | null
+  }>
+}
+
+const feedbackTags = [
+  { id: 'great_content', label: 'Great content', positive: true },
+  { id: 'good_framing', label: 'Good framing', positive: true },
+  { id: 'good_subtitles', label: 'Good subtitles', positive: true },
+  { id: 'boring_content', label: 'Boring content', positive: false },
+  { id: 'bad_crop', label: 'Bad crop', positive: false },
+  { id: 'wrong_layout', label: 'Wrong layout', positive: false },
+  { id: 'bad_subtitles', label: 'Bad subtitles', positive: false },
+  { id: 'audio_issue', label: 'Audio issue', positive: false },
+] as const
 
 type JobPayload = {
   status: JobStatus
@@ -170,6 +206,9 @@ function App() {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [apiKeyNotice, setApiKeyNotice] = useState(apiKey ? 'Saved locally in this browser.' : 'Not saved yet.')
   const [nowMs, setNowMs] = useState(() => Date.now())
+  const [clipFeedback, setClipFeedback] = useState<Record<number, ClipFeedback>>({})
+  const [analyticsData, setAnalyticsData] = useState<AnalyticsInsights | null>(null)
+  const [showAnalytics, setShowAnalytics] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -270,7 +309,79 @@ function App() {
     setRequestError(null)
     setIsSubmitting(false)
     setOutputFilename('short_con_subs.mp4')
+    setClipFeedback({})
   }
+
+  const handleRating = useCallback(async (clipIndex: number, rating: 'good' | 'bad') => {
+    if (!jobId) return
+
+    setClipFeedback(prev => ({
+      ...prev,
+      [clipIndex]: { ...prev[clipIndex], rating, tags: prev[clipIndex]?.tags ?? [], saving: true, saved: false },
+    }))
+
+    try {
+      const existing = clipFeedback[clipIndex]
+      await fetch(`/api/jobs/${jobId}/clips/${clipIndex}/feedback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rating, tags: existing?.tags ?? [] }),
+      })
+      setClipFeedback(prev => ({
+        ...prev,
+        [clipIndex]: { ...prev[clipIndex]!, saving: false, saved: true },
+      }))
+    } catch {
+      setClipFeedback(prev => ({
+        ...prev,
+        [clipIndex]: { ...prev[clipIndex]!, saving: false },
+      }))
+    }
+  }, [jobId, clipFeedback])
+
+  const handleTagToggle = useCallback(async (clipIndex: number, tagId: string) => {
+    if (!jobId) return
+
+    const existing = clipFeedback[clipIndex]
+    if (!existing?.rating) return
+
+    const tags = existing.tags.includes(tagId)
+      ? existing.tags.filter(t => t !== tagId)
+      : [...existing.tags, tagId]
+
+    setClipFeedback(prev => ({
+      ...prev,
+      [clipIndex]: { ...prev[clipIndex]!, tags, saving: true },
+    }))
+
+    try {
+      await fetch(`/api/jobs/${jobId}/clips/${clipIndex}/feedback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rating: existing.rating, tags }),
+      })
+      setClipFeedback(prev => ({
+        ...prev,
+        [clipIndex]: { ...prev[clipIndex]!, saving: false, saved: true },
+      }))
+    } catch {
+      setClipFeedback(prev => ({
+        ...prev,
+        [clipIndex]: { ...prev[clipIndex]!, saving: false },
+      }))
+    }
+  }, [jobId, clipFeedback])
+
+  const loadAnalytics = useCallback(async () => {
+    try {
+      const res = await fetch('/api/analytics')
+      if (res.ok) {
+        setAnalyticsData(await res.json() as AnalyticsInsights)
+      }
+    } catch {
+      // silently fail
+    }
+  }, [])
 
   function clearSavedApiKey() {
     try {
@@ -511,13 +622,23 @@ function App() {
                     </div>
 
                     <div className="space-y-3">
-                      {job.result.clips.map((clip) => (
+                      {job.result.clips.map((clip) => {
+                        const fb = clipFeedback[clip.index]
+                        return (
                         <div key={clip.index} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                             <div className="space-y-2">
                               <p className="text-sm font-semibold text-slate-950">{clip.title ?? `Clip ${clip.index}`}</p>
                               <p className="text-sm text-slate-600">{clip.reason ?? 'Gemini selected a strong moment from the source video.'}</p>
-                              <p className="text-xs text-slate-500">{clip.start.toFixed(1)}s to {clip.end.toFixed(1)}s</p>
+                              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                                <span>{clip.start.toFixed(1)}s to {clip.end.toFixed(1)}s</span>
+                                {clip.contentType ? (
+                                  <Badge variant="outline" className="border-slate-300 text-xs">{clip.contentType}</Badge>
+                                ) : null}
+                                {clip.analytics?.confidence != null ? (
+                                  <span className="text-slate-400">conf {String(clip.analytics.confidence)}</span>
+                                ) : null}
+                              </div>
                             </div>
                             <Button asChild className="bg-sky-600 text-white hover:bg-sky-700 sm:w-auto">
                               <a href={`/api/jobs/${jobId}/download/video/${clip.index}`}>
@@ -525,8 +646,64 @@ function App() {
                               </a>
                             </Button>
                           </div>
+
+                          {/* Feedback section */}
+                          <div className="mt-3 border-t border-slate-200 pt-3">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-slate-500">Rate this clip:</span>
+                              <button
+                                type="button"
+                                onClick={() => void handleRating(clip.index, 'good')}
+                                className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs font-medium transition-colors ${
+                                  fb?.rating === 'good'
+                                    ? 'bg-emerald-100 text-emerald-700 ring-1 ring-emerald-300'
+                                    : 'bg-slate-100 text-slate-500 hover:bg-emerald-50 hover:text-emerald-600'
+                                }`}
+                              >
+                                <ThumbsUp className="h-3.5 w-3.5" /> Good
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleRating(clip.index, 'bad')}
+                                className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs font-medium transition-colors ${
+                                  fb?.rating === 'bad'
+                                    ? 'bg-red-100 text-red-700 ring-1 ring-red-300'
+                                    : 'bg-slate-100 text-slate-500 hover:bg-red-50 hover:text-red-600'
+                                }`}
+                              >
+                                <ThumbsDown className="h-3.5 w-3.5" /> Bad
+                              </button>
+                              {fb?.saved ? (
+                                <span className="text-xs text-emerald-600">Saved</span>
+                              ) : null}
+                            </div>
+
+                            {fb?.rating ? (
+                              <div className="mt-2 flex flex-wrap gap-1.5">
+                                {feedbackTags
+                                  .filter(t => fb.rating === 'good' ? t.positive : !t.positive)
+                                  .map(tag => (
+                                    <button
+                                      key={tag.id}
+                                      type="button"
+                                      onClick={() => void handleTagToggle(clip.index, tag.id)}
+                                      className={`rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors ${
+                                        fb.tags.includes(tag.id)
+                                          ? fb.rating === 'good'
+                                            ? 'bg-emerald-100 text-emerald-700 ring-1 ring-emerald-200'
+                                            : 'bg-red-100 text-red-700 ring-1 ring-red-200'
+                                          : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                                      }`}
+                                    >
+                                      {tag.label}
+                                    </button>
+                                  ))}
+                              </div>
+                            ) : null}
+                          </div>
                         </div>
-                      ))}
+                        )
+                      })}
                     </div>
 
                     <Button asChild variant="secondary" className="w-full">
@@ -534,6 +711,85 @@ function App() {
                         <Download className="mr-2 h-4 w-4" /> Download transcript
                       </a>
                     </Button>
+
+                    {/* Analytics section */}
+                    <div className="border-t border-slate-200 pt-4">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowAnalytics(prev => !prev)
+                          if (!analyticsData) void loadAnalytics()
+                        }}
+                        className="flex items-center gap-2 text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors"
+                      >
+                        <BarChart3 className="h-4 w-4" />
+                        {showAnalytics ? 'Hide' : 'Show'} performance insights
+                      </button>
+
+                      {showAnalytics && analyticsData ? (
+                        <div className="mt-3 space-y-3 rounded-xl border border-slate-200 bg-white p-4 text-sm">
+                          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                            <div className="rounded-lg bg-slate-50 p-3 text-center">
+                              <p className="text-lg font-bold text-slate-900">{analyticsData.totalClips}</p>
+                              <p className="text-xs text-slate-500">Total clips</p>
+                            </div>
+                            <div className="rounded-lg bg-slate-50 p-3 text-center">
+                              <p className="text-lg font-bold text-slate-900">{analyticsData.totalRated}</p>
+                              <p className="text-xs text-slate-500">Rated</p>
+                            </div>
+                            <div className="rounded-lg bg-emerald-50 p-3 text-center">
+                              <p className="text-lg font-bold text-emerald-700">{analyticsData.totalGood}</p>
+                              <p className="text-xs text-emerald-600">Good</p>
+                            </div>
+                            <div className="rounded-lg bg-red-50 p-3 text-center">
+                              <p className="text-lg font-bold text-red-700">{analyticsData.totalBad}</p>
+                              <p className="text-xs text-red-600">Bad</p>
+                            </div>
+                          </div>
+
+                          {analyticsData.overallApprovalRate != null ? (
+                            <div className="rounded-lg bg-sky-50 p-3">
+                              <p className="text-sm text-sky-800">
+                                Overall approval rate: <span className="font-bold">{(analyticsData.overallApprovalRate * 100).toFixed(0)}%</span>
+                                <span className="ml-1 text-xs text-sky-600">across {analyticsData.totalRated} rated clips</span>
+                              </p>
+                            </div>
+                          ) : null}
+
+                          {Object.keys(analyticsData.perContentType).length > 0 ? (
+                            <div>
+                              <p className="mb-2 text-xs font-medium text-slate-700">Per content type</p>
+                              <div className="space-y-1.5">
+                                {Object.entries(analyticsData.perContentType).map(([ct, stats]) => (
+                                  <div key={ct} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-xs">
+                                    <span className="font-medium text-slate-700">{ct}</span>
+                                    <div className="flex items-center gap-3 text-slate-500">
+                                      <span>{stats.clipCount} clips</span>
+                                      {stats.avgConfidence != null ? <span>conf {stats.avgConfidence}</span> : null}
+                                      {stats.approvalRate != null ? (
+                                        <span className={stats.approvalRate >= 0.7 ? 'text-emerald-600' : stats.approvalRate < 0.5 ? 'text-red-600' : 'text-amber-600'}>
+                                          {(stats.approvalRate * 100).toFixed(0)}% approved
+                                        </span>
+                                      ) : null}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ) : null}
+
+                          <button
+                            type="button"
+                            onClick={() => void loadAnalytics()}
+                            className="text-xs text-sky-600 hover:text-sky-800 transition-colors"
+                          >
+                            Refresh insights
+                          </button>
+                        </div>
+                      ) : showAnalytics ? (
+                        <p className="mt-2 text-xs text-slate-500">Loading insights...</p>
+                      ) : null}
+                    </div>
                   </>
                 ) : (
                   <div className="space-y-3 rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-5 text-sm text-slate-600">
