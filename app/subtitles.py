@@ -143,9 +143,9 @@ WORD_HIGHLIGHT_TAIL = 0.08
 SUBTITLE_Y_RATIO = 0.75
 SUBTITLE_SAFE_WIDTH_RATIO = 0.85
 SUBTITLE_MAX_HEIGHT_RATIO = 0.24
-SUBTITLE_BASE_FONT_RATIO = 70 / 1920
-SUBTITLE_MIN_FONT_SIZE = 58
-SUBTITLE_MAX_FONT_SIZE = 82
+SUBTITLE_BASE_FONT_RATIO = 80 / 1920
+SUBTITLE_MIN_FONT_SIZE = 64
+SUBTITLE_MAX_FONT_SIZE = 88
 ACTIVE_WORD_SCALE = 1.08
 ACTIVE_WORD_SETTLE_SCALE = 1.03
 HIGHLIGHT_TRANSITION_DURATION = 0.06
@@ -378,13 +378,28 @@ def _word_entries_are_reliable(segment_text, word_entries):
     return suspicious_words <= max(1, len(word_entries) // 4)
 
 
+# Words with high emotional/viral weight — always highlighted when present
+IMPACT_WORDS = {
+    "never", "always", "biggest", "worst", "best", "insane", "crazy", "shocking",
+    "secret", "truth", "lie", "lies", "fake", "real", "actually", "literally",
+    "unbelievable", "incredible", "impossible", "dangerous", "critical", "urgent",
+    "breaking", "exclusive", "revealed", "exposed", "banned", "deleted",
+    "killed", "died", "dead", "billions", "millions", "trillion", "zero",
+    "first", "last", "only", "every", "nobody", "everybody", "nobody",
+    "wrong", "right", "must", "stop", "warning", "alert", "crisis",
+    "why", "how", "what", "proven", "failed", "won", "lost",
+}
+
+
 def _score_highlight_word(word_text):
     cleaned = re.sub(r"[^A-Za-z0-9'%]+", "", (word_text or "")).lower()
     if not cleaned:
         return -999
 
     score = 0
-    if cleaned not in LOW_VALUE_WORDS:
+    if cleaned in IMPACT_WORDS:
+        score += 12
+    elif cleaned not in LOW_VALUE_WORDS:
         score += 4
     if any(char.isdigit() for char in cleaned):
         score += 5

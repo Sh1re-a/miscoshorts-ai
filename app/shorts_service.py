@@ -153,10 +153,10 @@ OUTPUT_HEIGHT = 1920
 TARGET_ASPECT_RATIO = OUTPUT_WIDTH / OUTPUT_HEIGHT
 VIDEO_CRF = os.getenv("VIDEO_CRF", "13")
 VIDEO_PRESET = os.getenv("VIDEO_PRESET", "medium")
-VIDEO_BITRATE = os.getenv("VIDEO_BITRATE", "14M")
-VIDEO_MAXRATE = os.getenv("VIDEO_MAXRATE", "20M")
-VIDEO_BUFSIZE = os.getenv("VIDEO_BUFSIZE", "28M")
-VIDEO_AUDIO_BITRATE = os.getenv("VIDEO_AUDIO_BITRATE", "192k")
+VIDEO_BITRATE = os.getenv("VIDEO_BITRATE", "8M")
+VIDEO_MAXRATE = os.getenv("VIDEO_MAXRATE", "12M")
+VIDEO_BUFSIZE = os.getenv("VIDEO_BUFSIZE", "16M")
+VIDEO_AUDIO_BITRATE = os.getenv("VIDEO_AUDIO_BITRATE", "256k")
 DOWNLOAD_FORMAT = os.getenv(
     "YTDLP_FORMAT",
     "bestvideo*[height<=2160]+bestaudio/best[height<=2160]/best",
@@ -1530,7 +1530,7 @@ def _build_broll_ken_burns_clip(clip: VideoFileClip) -> VideoFileClip:
 
         # Ken Burns parameters: zoom from 1.0x to 1.05x, pan from centre
         zoom_start = 1.00
-        zoom_end = 1.05
+        zoom_end = 1.08
         # Pan direction: slowly drift right and up
         pan_x_start = 0.50  # centre
         pan_x_end = 0.52    # slight right drift
@@ -1782,8 +1782,8 @@ def write_high_quality_video(
       AttributeError: 'NoneType' object has no attribute 'stdout'
     """
     fps = get_render_fps(clip)
-    # Predictable GOP: keyframe every 2 s with no scene-cut interruptions.
-    keyint = str(fps * 2)
+    # Predictable GOP: keyframe every 1 s for precise seeking (YouTube Shorts).
+    keyint = str(fps * 1)
     keyint_min = str(fps)
     output_path = Path(output_path)
 
@@ -1824,6 +1824,7 @@ def write_high_quality_video(
                     "-c:v", "copy",
                     "-c:a", "aac",
                     "-b:a", VIDEO_AUDIO_BITRATE,
+                    "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
                     "-movflags", "+faststart",
                     "-shortest",
                     str(output_path),
@@ -2286,8 +2287,8 @@ def create_short_from_url(
             # Clamp endpoints to video boundaries
             s = max(0.0, min(s, video_duration - 1.0))
             e = max(s + 5.0, min(e, video_duration))
-            if e - s < 5.0:
-                print(f"  ⚠️  Skipping clip {cd.get('title', 'unknown')}: too short after clamping ({e - s:.1f}s)")
+            if e - s < 20.0:
+                print(f"  ⚠️  Skipping clip {cd.get('title', 'unknown')}: too short after clamping ({e - s:.1f}s < 20 s minimum)")
                 continue
             cd["start"] = round(s, 2)
             cd["end"] = round(e, 2)

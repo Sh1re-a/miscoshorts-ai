@@ -99,7 +99,7 @@ type BootstrapPayload = {
   frontendBuilt: boolean
 }
 
-const defaultClipCount = 3
+
 
 const progressByStatus: Record<JobStatus, number> = {
   idle: 0,
@@ -209,6 +209,7 @@ function App() {
   const [clipFeedback, setClipFeedback] = useState<Record<number, ClipFeedback>>({})
   const [analyticsData, setAnalyticsData] = useState<AnalyticsInsights | null>(null)
   const [showAnalytics, setShowAnalytics] = useState(false)
+  const [selectedClipCount, setSelectedClipCount] = useState(3)
 
   useEffect(() => {
     let cancelled = false
@@ -298,10 +299,10 @@ function App() {
   const hasAvailableApiKey = Boolean(apiKey.trim()) || hasConfiguredApiKey
   const canSubmit = Boolean(videoUrl.trim()) && hasAvailableApiKey && !isSubmitting && !isWorking
   const startButtonLabel = isSubmitting || isWorking ? 'Job running' : 'Start studio render'
-  const etaWindow = useMemo(() => getEtaWindow(job, defaultClipCount, nowMs), [job, nowMs])
+  const etaWindow = useMemo(() => getEtaWindow(job, selectedClipCount, nowMs), [job, selectedClipCount, nowMs])
   const etaLabel = etaWindow ? `${formatEta(etaWindow[0])} to ${formatEta(etaWindow[1])}` : null
   const hasStarted = job.status !== 'idle' || isSubmitting || jobId !== null
-  const effectiveClipCount = job.result?.clipCount ?? job.clipCount ?? defaultClipCount
+  const effectiveClipCount = job.result?.clipCount ?? job.clipCount ?? selectedClipCount
 
   function resetFlow() {
     setJobId(null)
@@ -410,7 +411,7 @@ function App() {
           videoUrl,
           apiKey,
           outputFilename,
-          clipCount: defaultClipCount,
+          clipCount: selectedClipCount,
         }),
       })
 
@@ -423,7 +424,7 @@ function App() {
       setJobId(payload.jobId)
       setJob({
         status: payload.status ?? 'queued',
-        message: `The job is running locally and will render ${payload.clipCount ?? defaultClipCount} clip(s).`,
+        message: `The job is running locally and will render ${payload.clipCount ?? selectedClipCount} clip(s).`,
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unexpected error'
@@ -504,8 +505,29 @@ function App() {
 
                 <div className="rounded-[24px] border border-sky-100 bg-sky-50/80 px-4 py-4 text-sm leading-6 text-slate-700">
                   <p className="font-semibold text-slate-900">{renderProfileLabel}</p>
-                  <p className="mt-2">The app runs a focused Shorts workflow: 3 selected clips, centered reframing, stronger H.264 settings, AAC audio, and more dynamic voice-following subtitles.</p>
+                  <p className="mt-2">The app runs a focused Shorts workflow: centered reframing, stronger H.264 settings, AAC audio, and more dynamic voice-following subtitles.</p>
                   <p className="mt-2">Keep the launcher window open while the job runs. Finished files appear here and in the local outputs folder.</p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Number of clips</Label>
+                  <div className="flex gap-2">
+                    {[1, 2, 3, 4, 5].map((n) => (
+                      <button
+                        key={n}
+                        type="button"
+                        onClick={() => setSelectedClipCount(n)}
+                        className={`flex h-10 w-10 items-center justify-center rounded-xl border text-sm font-medium transition-colors ${
+                          selectedClipCount === n
+                            ? 'border-sky-500 bg-sky-500 text-white'
+                            : 'border-slate-200 bg-white text-slate-700 hover:border-sky-300 hover:bg-sky-50'
+                        }`}
+                      >
+                        {n}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-slate-500">How many Shorts clips to generate from this video.</p>
                 </div>
 
                 <Button className="h-12 w-full rounded-2xl bg-sky-600 text-white hover:bg-sky-700" type="submit" disabled={!canSubmit}>

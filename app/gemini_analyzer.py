@@ -41,12 +41,20 @@ identify the {clip_count} strongest non-overlapping segments.
 SELECTION CRITERIA (in priority order):
 1. STRONG HOOK — The segment MUST open with something immediately attention-grabbing:
    a bold claim, surprising fact, emotional statement, or provocative question.
+   The best hooks fit one of these viral trigger patterns:
+   • "I never expected…" / "Nobody talks about…" / "Here's what they don't tell you…"
+   • A contrarian statement that challenges a common belief
+   • A shocking number, statistic, or outcome stated in the first sentence
+   • A sudden reveal or unexpected twist in the speaker's story
+   • A strong personal conviction delivered with visible emotion
    If the first sentence is boring, the Short will be skipped.
 2. SELF-CONTAINED — Each segment must deliver a complete thought or argument.
    Never cut mid-sentence or mid-argument. The viewer must understand the point
    without having seen the full video.
 3. EMOTIONAL ENGAGEMENT — Prefer moments with strong conviction, passion, humour,
    disagreement, or surprise. Avoid calm, monotone, or meandering discussion.
+   Signs of high emotional engagement: raised voice, laughter, long pause before
+   a reveal, use of words like "never", "always", "I can't believe", "the truth is".
 4. CLARITY — Prefer sections with ONE clear speaker talking with energy.
    Avoid sections where multiple people talk over each other, where speech is
    filler-heavy ("um", "uh", long pauses).
@@ -70,10 +78,18 @@ CONTENT-TYPE AWARENESS — this video may be any of the following:
   speaker or a cropped frame.
 • News / broadcast — skip anchor hand-offs, weather, and sports scores.
   Pick the most newsworthy, emotional, or opinion-heavy sound bites.
-• Interview / podcast (two or more people) — pick distinct story beats,
-  stand-out quotes, genuine emotion, laughter, or heated disagreement.
-  Prefer exchanges where one person delivers a strong statement — avoid back-
-  and-forth crosstalk that loses context in 30 seconds.
+  Prioritise: exclusive revelations, eyewitness accounts, expert verdicts,
+  or a moment where a person says something surprising or controversial on camera.
+• Interview / podcast (two or more people) — pick moments where ONE person
+  delivers a strong, standalone statement. The ideal clip is a single compelling
+  monologue (20–60 s) where the speaker makes a bold claim, tells a personal
+  story, or expresses a strong opinion.
+  AVOID: back-and-forth crosstalk that loses context in isolation; soft
+  "yeah, totally, I agree" exchanges; the host asking a question without
+  the answer appearing in the same segment.
+  PREFER: the guest's most quotable answer, a story with a clear arc ("I
+  used to think X, but then…"), or a heated disagreement where one side
+  makes a memorable point.
 • Solo content / vlog / tutorial — pick the most hook-worthy, quotable moments.
   Prefer "aha" moments, demonstrations, and strong personal opinions.
 
@@ -87,7 +103,7 @@ IMPORTANT FILTERING — ALWAYS skip segments that contain:
 • Meta-commentary about the meeting/call: "we're running out of time", "sorry
   for the technical difficulties", "can everyone see my screen?"
 
-Each segment should be 25–60 seconds long.
+Each segment should be between 30 and 60 seconds long.
 
 Transcript:
 {timed_text}
