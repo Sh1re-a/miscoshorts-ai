@@ -1,3 +1,7 @@
+# Local dev/test scripts (not part of the app)
+_test_*.py
+_verify_*.py
+
 # Python
 __pycache__/
 *.py[cod]
