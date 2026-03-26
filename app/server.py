@@ -17,6 +17,7 @@ from app.shorts_service import (
     sanitize_output_filename,
     validate_video_url,
 )
+from app import analytics
 
 
 app = Flask(__name__, static_folder=str(FRONTEND_DIST_DIR), static_url_path="/")
@@ -228,6 +229,56 @@ def download_transcript(job_id: str):
         return jsonify({"error": "Transcript file is unavailable"}), 404
 
     return send_file(transcript_path, as_attachment=True)
+
+
+# ── Feedback & analytics ─────────────────────────────────────────────
+
+@app.post("/api/jobs/<job_id>/clips/<int:clip_index>/feedback")
+def submit_feedback(job_id: str, clip_index: int):
+    """Save user feedback (rating + optional tags) for a specific clip."""
+    job = _get_job(job_id)
+    if not job or job.get("status") != "completed":
+        return jsonify({"error": "Job not found or not completed"}), 404
+
+    clips = job.get("result", {}).get("clips") or []
+    if clip_index < 1 or clip_index > len(clips):
+        return jsonify({"error": "Clip not found"}), 404
+
+    payload = request.get_json(silent=True) or {}
+    rating = (payload.get("rating") or "").strip().lower()
+    tags = payload.get("tags") or []
+    note = (payload.get("note") or "").strip()
+
+    if not isinstance(tags, list):
+        tags = []
+
+    try:
+        fb = analytics.save_feedback(job_id, clip_index, rating, tags, note)
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+
+    return jsonify(fb), 201
+
+
+@app.get("/api/jobs/<job_id>/clips/<int:clip_index>/feedback")
+def get_feedback(job_id: str, clip_index: int):
+    """Retrieve existing feedback for a clip."""
+    fb = analytics.get_feedback(job_id, clip_index)
+    if fb is None:
+        return jsonify(None), 200
+    return jsonify(fb)
+
+
+@app.get("/api/analytics")
+def get_analytics():
+    """Return aggregated insights and threshold suggestions."""
+    return jsonify(analytics.get_insights())
+
+
+@app.post("/api/analytics/refresh")
+def refresh_analytics():
+    """Force-rebuild insights from all job data."""
+    return jsonify(analytics.build_insights())
 
 
 @app.get("/")
