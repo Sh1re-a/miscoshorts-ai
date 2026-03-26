@@ -816,6 +816,11 @@ def _wrap_caption_words(measured_words, max_width, space_width, max_lines=SUBTIT
     return lines
 
 
+# Per-preset cache of the first font that successfully renders on this system.
+# Avoids re-scanning the full font priority list for every subtitle cue after the first.
+_LAYOUT_FONT_WINNER: dict[str, object] = {}
+
+
 def _build_locked_text_layout(
     cue,
     video_clip,
@@ -850,8 +855,17 @@ def _build_locked_text_layout(
     if not display_words:
         raise RuntimeError("Subtitle cue has no renderable words.")
 
+    font_preset = subtitle_style["fontPreset"]
+    all_font_candidates = get_font_candidates(font_preset)
+    cached_font = _LAYOUT_FONT_WINNER.get(font_preset)
+    if cached_font is not None:
+        # Promote cached winner to front — subsequent cues skip the full priority scan
+        font_candidates = [cached_font] + [f for f in all_font_candidates if f != cached_font]
+    else:
+        font_candidates = all_font_candidates
+
     last_error = None
-    for font in get_font_candidates(subtitle_style["fontPreset"]):
+    for font in font_candidates:
         for font_size in _build_font_size_candidates_custom(video_clip, base_font_ratio, min_font_ratio, max_font_ratio):
             pil_font = _load_pil_font(font, font_size)
             if pil_font is None:
@@ -900,6 +914,7 @@ def _build_locked_text_layout(
                         current_x += word["width"] + space_width
                     current_y += line["height"] + line_gap
 
+                _LAYOUT_FONT_WINNER[font_preset] = font
                 return {
                     "font": pil_font,
                     "stroke_width": stroke_width,
@@ -918,7 +933,7 @@ def _build_locked_text_layout(
         safe_cue["words"] = safe_words
         safe_cue["text"] = " ".join(safe_words)
         safe_cue["highlightIndex"] = min(cue.get("highlightIndex", 0), len(safe_words) - 1)
-        for font in get_font_candidates(subtitle_style["fontPreset"]):
+        for font in font_candidates:
             for font_size in _build_font_size_candidates_custom(video_clip, base_font_ratio, min_font_ratio * 0.7, max_font_ratio):
                 pil_font = _load_pil_font(font, font_size)
                 if pil_font is None:
@@ -950,11 +965,34 @@ def _build_locked_text_layout(
                             positioned_words.append({"index": word["index"], "text": word["text"], "anchor_x": current_x - word["bbox"][0], "baseline_y": baseline_y, "tracking": tracking})
                             current_x += word["width"] + space_width
                         current_y += line["height"] + line_gap
+                    _LAYOUT_FONT_WINNER[font_preset] = font
                     return {"font": pil_font, "stroke_width": stroke_width, "stroke_fill": ImageColor.getrgb(stroke_color or colors["stroke_color"]) if (stroke_color or colors["stroke_color"]) else None, "shadow_offset_y": shadow_offset_y, "size": (canvas_width, canvas_height), "words": sorted(positioned_words, key=lambda entry: entry["index"])}
                 except Exception:
                     pass
 
     raise RuntimeError("Could not render subtitles with a glyph-safe PIL font.") from last_error
+
+
+def _render_shadow_for_layout(layout):
+    """Render the blurred drop-shadow for a cue layout.
+
+    The shadow colour and position are identical for every highlight state of
+    the same cue.  Pre-rendering once and reusing across all N word-states
+    eliminates N redundant GaussianBlur(radius=8) calls per cue.
+    """
+    shadow_layer = Image.new('RGBA', layout["size"], (0, 0, 0, 0))
+    shadow_draw = ImageDraw.Draw(shadow_layer)
+    for word in layout["words"]:
+        _draw_tracked_text(
+            shadow_draw,
+            (word["anchor_x"] + 2, word["baseline_y"] + layout["shadow_offset_y"]),
+            word["text"],
+            layout["font"],
+            SUBTITLE_SHADOW_COLOR,
+            word.get("tracking", 0),
+            anchor='ls',
+        )
+    return shadow_layer.filter(ImageFilter.GaussianBlur(radius=8))
 
 
 def _render_locked_text_image(
@@ -966,41 +1004,56 @@ def _render_locked_text_image(
     active_color=None,
     inactive_alpha=1.0,
     shadow_fill=None,
+    prebuilt_shadow=None,
 ):
     colors = COLOR_PRESETS[subtitle_style["colorPreset"]]
     base_rgb = ImageColor.getrgb(base_color or colors["base_color"])
     active_rgb = ImageColor.getrgb(active_color or colors["active_color"])
-    shadow_rgba = shadow_fill or SUBTITLE_SHADOW_COLOR
     inactive_channel = max(0, min(255, round(255 * inactive_alpha)))
-    image = Image.new('RGBA', layout["size"], (0, 0, 0, 0))
-    shadow_layer = Image.new('RGBA', layout["size"], (0, 0, 0, 0))
-    glow_layer = Image.new('RGBA', layout["size"], (0, 0, 0, 0))
-    shadow_draw = ImageDraw.Draw(shadow_layer)
-    glow_draw = ImageDraw.Draw(glow_layer)
-    draw = ImageDraw.Draw(image)
 
-    for word in layout["words"]:
-        is_active = word["index"] == highlight_index
-        fill = (*active_rgb, 255) if is_active else (*base_rgb, inactive_channel)
-        _draw_tracked_text(
-            shadow_draw,
-            (word["anchor_x"] + 2, word["baseline_y"] + layout["shadow_offset_y"]),
-            word["text"],
-            layout["font"],
-            shadow_rgba,
-            word.get("tracking", 0),
-            anchor='ls',
-        )
-        if is_active:
+    # Reuse the pre-rendered shadow when available — avoids a redraw + GaussianBlur per state
+    if prebuilt_shadow is not None:
+        shadow_composite = prebuilt_shadow
+    else:
+        shadow_rgba = shadow_fill or SUBTITLE_SHADOW_COLOR
+        shadow_layer = Image.new('RGBA', layout["size"], (0, 0, 0, 0))
+        shadow_draw = ImageDraw.Draw(shadow_layer)
+        for word in layout["words"]:
             _draw_tracked_text(
-                glow_draw,
-                (word["anchor_x"], word["baseline_y"]),
+                shadow_draw,
+                (word["anchor_x"] + 2, word["baseline_y"] + layout["shadow_offset_y"]),
                 word["text"],
                 layout["font"],
-                (*active_rgb, 100),
+                shadow_rgba,
                 word.get("tracking", 0),
                 anchor='ls',
             )
+        shadow_composite = shadow_layer.filter(ImageFilter.GaussianBlur(radius=8))
+
+    # Glow only exists when a word is actively highlighted — skip entirely for inactive state
+    if highlight_index >= 0:
+        glow_layer = Image.new('RGBA', layout["size"], (0, 0, 0, 0))
+        glow_draw = ImageDraw.Draw(glow_layer)
+        for word in layout["words"]:
+            if word["index"] == highlight_index:
+                _draw_tracked_text(
+                    glow_draw,
+                    (word["anchor_x"], word["baseline_y"]),
+                    word["text"],
+                    layout["font"],
+                    (*active_rgb, 100),
+                    word.get("tracking", 0),
+                    anchor='ls',
+                )
+        base = Image.alpha_composite(shadow_composite, glow_layer.filter(ImageFilter.GaussianBlur(radius=12)))
+    else:
+        base = shadow_composite
+
+    image = Image.new('RGBA', layout["size"], (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    for word in layout["words"]:
+        is_active = word["index"] == highlight_index
+        fill = (*active_rgb, 255) if is_active else (*base_rgb, inactive_channel)
         _draw_tracked_text(
             draw,
             (word["anchor_x"], word["baseline_y"]),
@@ -1012,11 +1065,7 @@ def _render_locked_text_image(
             stroke_width=layout["stroke_width"],
             stroke_fill=layout["stroke_fill"],
         )
-
-    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=8))
-    glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(radius=12))
-    result = Image.alpha_composite(shadow_layer, glow_layer)
-    return Image.alpha_composite(result, image)
+    return Image.alpha_composite(base, image)
 
 
 def _render_subtitle_bitmap_image(cue, video_clip, subtitle_style):
@@ -1574,7 +1623,10 @@ def _blend_frames(frame_a, frame_b, factor):
         return frame_a
     if factor >= 1.0:
         return frame_b
-    return np.round(frame_a.astype(np.float32) * (1.0 - factor) + frame_b.astype(np.float32) * factor).astype(np.uint8)
+    # Single lerp: fa + (fb - fa) * t  — one fewer multiply vs the two-weight form,
+    # and avoids allocating a second scaled array.
+    fa = frame_a.astype(np.float32)
+    return (fa + (frame_b.astype(np.float32) - fa) * factor + 0.5).astype(np.uint8)
 
 
 def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_style=None, clip_title=None, clip_reason=None):
@@ -1585,120 +1637,142 @@ def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_sty
 
     subtitle_cues = build_subtitle_plan(whisper_segments, clip_start_time, video_duration)
 
-    # --- Pre-build layouts for all cues ---
-    cue_layouts = []
-    for cue in subtitle_cues:
-        locked_layout = _build_locked_text_layout(
-            cue,
-            video_clip,
-            resolved_style,
-            max_width_ratio=SUBTITLE_SAFE_WIDTH_RATIO,
-            max_height_ratio=SUBTITLE_MAX_HEIGHT_RATIO,
-            base_font_ratio=SUBTITLE_BASE_FONT_RATIO,
-            min_font_ratio=SUBTITLE_MIN_FONT_RATIO,
-            max_font_ratio=SUBTITLE_MAX_FONT_RATIO,
-            padding_x=SUBTITLE_TEXT_PADDING_X,
-            padding_y=SUBTITLE_TEXT_PADDING_Y,
-            line_gap_ratio=0.008,
-            tracking=SUBTITLE_LETTER_SPACING,
-        )
-        candidate_indexes = {-1}
-        if cue.get("wordEntries"):
-            candidate_indexes.update(range(len(cue["wordEntries"])))
-        else:
-            candidate_indexes.add(cue.get("highlightIndex", -1))
-        cue_layouts.append((cue, locked_layout, candidate_indexes))
+    # Track all allocated clips for cleanup on failure
+    _allocated_clips: list = []
 
-    # --- Parallel pre-render all highlight states ---
-    def _render_state(args):
-        layout, style, active_index = args
-        return active_index, np.array(
-            _render_locked_text_image(
-                layout,
-                style,
-                highlight_index=active_index,
-                inactive_alpha=SUBTITLE_INACTIVE_ALPHA / 255,
+    try:
+        # --- Pre-build layouts for all cues ---
+        cue_layouts = []
+        for cue in subtitle_cues:
+            locked_layout = _build_locked_text_layout(
+                cue,
+                video_clip,
+                resolved_style,
+                max_width_ratio=SUBTITLE_SAFE_WIDTH_RATIO,
+                max_height_ratio=SUBTITLE_MAX_HEIGHT_RATIO,
+                base_font_ratio=SUBTITLE_BASE_FONT_RATIO,
+                min_font_ratio=SUBTITLE_MIN_FONT_RATIO,
+                max_font_ratio=SUBTITLE_MAX_FONT_RATIO,
+                padding_x=SUBTITLE_TEXT_PADDING_X,
+                padding_y=SUBTITLE_TEXT_PADDING_Y,
+                line_gap_ratio=0.008,
+                tracking=SUBTITLE_LETTER_SPACING,
             )
-        )
-
-    all_render_jobs = []
-    for cue, locked_layout, candidate_indexes in cue_layouts:
-        for active_index in candidate_indexes:
-            all_render_jobs.append((cue, locked_layout, candidate_indexes, active_index))
-
-    # Render in parallel using threads (PIL releases GIL during heavy operations)
-    render_tasks = [(layout, resolved_style, idx) for (_, layout, _, idx) in all_render_jobs]
-    with ThreadPoolExecutor(max_workers=min(4, len(render_tasks) or 1)) as executor:
-        results = list(executor.map(_render_state, render_tasks))
-
-    # Map results back to per-cue dicts
-    job_index = 0
-    cue_rendered_states = []
-    for cue, locked_layout, candidate_indexes in cue_layouts:
-        rendered_states = {}
-        for active_index in candidate_indexes:
-            _, frame = results[job_index]
-            rendered_states[active_index] = frame
-            job_index += 1
-        cue_rendered_states.append(rendered_states)
-
-    # --- Build subtitle video clips with smooth crossfade ---
-    subtitle_layers = []
-    for cue_idx, (cue, locked_layout, candidate_indexes) in enumerate(cue_layouts):
-        rendered_states = cue_rendered_states[cue_idx]
-        word_boundaries = _build_word_boundaries(cue)
-
-        cue_start = float(cue["start"])
-        cue_end = float(cue["end"])
-        cue_duration = _safe_duration(cue_end - cue_start)
-
-        def cue_frame_provider(local_t, *, current_cue=cue, states=rendered_states, duration=cue_duration, boundaries=word_boundaries):
-            timestamp = min(max(float(local_t), 0.0), max(0.0, duration - 1e-6))
-            idx_a, idx_b, blend = _resolve_highlight_blend(current_cue, timestamp, HIGHLIGHT_TRANSITION_DURATION, boundaries)
-            frame_a = states.get(idx_a, states.get(-1))
-            if blend <= 0.01 or idx_a == idx_b:
-                return frame_a
-            frame_b = states.get(idx_b, states.get(-1))
-            return _blend_frames(frame_a, frame_b, blend)
-
-        subtitle_clip = _create_rgba_video_clip(
-            cue_frame_provider,
-            locked_layout["size"],
-            cue_duration,
-            fade_in_duration=SUBTITLE_FADE_IN,
-            fade_out_duration=SUBTITLE_FADE_OUT,
-        )
-        subtitle_clip = _with_clip_timing(subtitle_clip, cue_start, cue_end)
-        subtitle_clip = _position_subtitle_clip(subtitle_clip, video_clip)
-        subtitle_layers.append(subtitle_clip)
-
-    top_description_layers = []
-    for layer in create_top_description_overlay(video_clip, clip_title, clip_reason, resolved_style):
-        frame = layer.get_frame(0)
-        if frame.ndim == 3 and frame.shape[2] == 3:
-            if layer.mask is not None:
-                alpha_channel = np.clip(layer.mask.get_frame(0) * 255.0, 0, 255).astype(np.uint8)
+            candidate_indexes = {-1}
+            if cue.get("wordEntries"):
+                candidate_indexes.update(range(len(cue["wordEntries"])))
             else:
-                alpha_channel = np.full((frame.shape[0], frame.shape[1]), 255, dtype=np.uint8)
-            frame = np.dstack([frame, alpha_channel])
-        position = layer.pos(0)
-        layer.close()
-        header_clip = _create_static_rgba_clip(
-            frame,
-            header_duration,
-            fade_in_duration=HEADER_FADE_IN,
-            fade_out_duration=HEADER_FADE_OUT,
-        )
-        top_description_layers.append(_with_clip_timing(header_clip.with_position(position), 0, header_duration))
+                candidate_indexes.add(cue.get("highlightIndex", -1))
+            cue_layouts.append((cue, locked_layout, candidate_indexes))
 
-    gradient_layers = [
-        _with_clip_timing(_render_vertical_gradient_clip(video_clip, height_ratio=0.2, anchor='top', max_alpha=GRADIENT_TOP_ALPHA), 0, video_duration),
-        _with_clip_timing(_render_vertical_gradient_clip(video_clip, height_ratio=0.24, anchor='bottom', max_alpha=GRADIENT_BOTTOM_ALPHA), 0, video_duration),
-    ]
+        # --- Parallel pre-render all highlight states ---
+        def _render_state(args):
+            layout, style, active_index, shadow = args
+            return active_index, np.array(
+                _render_locked_text_image(
+                    layout,
+                    style,
+                    highlight_index=active_index,
+                    inactive_alpha=SUBTITLE_INACTIVE_ALPHA / 255,
+                    prebuilt_shadow=shadow,
+                )
+            )
 
-    layers = [video_clip, *gradient_layers, *top_description_layers, *subtitle_layers]
-    final_clip = CompositeVideoClip(layers, size=video_clip.size).with_duration(video_duration)
-    if video_clip.audio is not None:
-        final_clip = final_clip.with_audio(video_clip.audio.with_duration(video_duration))
+        all_render_jobs = []
+        for cue, locked_layout, candidate_indexes in cue_layouts:
+            for active_index in candidate_indexes:
+                all_render_jobs.append((cue, locked_layout, candidate_indexes, active_index))
 
-    return final_clip
+        layout_shadows: dict[int, object] = {}
+        for _, locked_layout, _ in cue_layouts:
+            lid = id(locked_layout)
+            if lid not in layout_shadows:
+                layout_shadows[lid] = _render_shadow_for_layout(locked_layout)
+
+        render_tasks = [(layout, resolved_style, idx, layout_shadows[id(layout)]) for (_, layout, _, idx) in all_render_jobs]
+        with ThreadPoolExecutor(max_workers=min(8, len(render_tasks) or 1)) as executor:
+            results = list(executor.map(_render_state, render_tasks))
+
+        job_index = 0
+        cue_rendered_states = []
+        for cue, locked_layout, candidate_indexes in cue_layouts:
+            rendered_states = {}
+            for active_index in candidate_indexes:
+                _, frame = results[job_index]
+                rendered_states[active_index] = frame
+                job_index += 1
+            cue_rendered_states.append(rendered_states)
+
+        # --- Build subtitle video clips with smooth crossfade ---
+        subtitle_layers = []
+        for cue_idx, (cue, locked_layout, candidate_indexes) in enumerate(cue_layouts):
+            rendered_states = cue_rendered_states[cue_idx]
+            word_boundaries = _build_word_boundaries(cue)
+
+            cue_start = float(cue["start"])
+            cue_end = float(cue["end"])
+            cue_duration = _safe_duration(cue_end - cue_start)
+
+            def cue_frame_provider(local_t, *, current_cue=cue, states=rendered_states, duration=cue_duration, boundaries=word_boundaries):
+                timestamp = min(max(float(local_t), 0.0), max(0.0, duration - 1e-6))
+                idx_a, idx_b, blend = _resolve_highlight_blend(current_cue, timestamp, HIGHLIGHT_TRANSITION_DURATION, boundaries)
+                frame_a = states.get(idx_a, states.get(-1))
+                if blend <= 0.01 or idx_a == idx_b:
+                    return frame_a
+                frame_b = states.get(idx_b, states.get(-1))
+                return _blend_frames(frame_a, frame_b, blend)
+
+            subtitle_clip = _create_rgba_video_clip(
+                cue_frame_provider,
+                locked_layout["size"],
+                cue_duration,
+                fade_in_duration=SUBTITLE_FADE_IN,
+                fade_out_duration=SUBTITLE_FADE_OUT,
+            )
+            subtitle_clip = _with_clip_timing(subtitle_clip, cue_start, cue_end)
+            subtitle_clip = _position_subtitle_clip(subtitle_clip, video_clip)
+            subtitle_layers.append(subtitle_clip)
+            _allocated_clips.append(subtitle_clip)
+
+        top_description_layers = []
+        for layer in create_top_description_overlay(video_clip, clip_title, clip_reason, resolved_style):
+            frame = layer.get_frame(0)
+            if frame.ndim == 3 and frame.shape[2] == 3:
+                if layer.mask is not None:
+                    alpha_channel = np.clip(layer.mask.get_frame(0) * 255.0, 0, 255).astype(np.uint8)
+                else:
+                    alpha_channel = np.full((frame.shape[0], frame.shape[1]), 255, dtype=np.uint8)
+                frame = np.dstack([frame, alpha_channel])
+            position = layer.pos(0)
+            layer.close()
+            header_clip = _create_static_rgba_clip(
+                frame,
+                header_duration,
+                fade_in_duration=HEADER_FADE_IN,
+                fade_out_duration=HEADER_FADE_OUT,
+            )
+            timed_header = _with_clip_timing(header_clip.with_position(position), 0, header_duration)
+            top_description_layers.append(timed_header)
+            _allocated_clips.append(timed_header)
+
+        gradient_layers = [
+            _with_clip_timing(_render_vertical_gradient_clip(video_clip, height_ratio=0.2, anchor='top', max_alpha=GRADIENT_TOP_ALPHA), 0, video_duration),
+            _with_clip_timing(_render_vertical_gradient_clip(video_clip, height_ratio=0.24, anchor='bottom', max_alpha=GRADIENT_BOTTOM_ALPHA), 0, video_duration),
+        ]
+        _allocated_clips.extend(gradient_layers)
+
+        layers = [video_clip, *gradient_layers, *top_description_layers, *subtitle_layers]
+        final_clip = CompositeVideoClip(layers, size=video_clip.size).with_duration(video_duration)
+        if video_clip.audio is not None:
+            final_clip = final_clip.with_audio(video_clip.audio.with_duration(video_duration))
+
+        return final_clip
+
+    except Exception:
+        # Clean up any allocated clips on failure to prevent resource leaks
+        for c in _allocated_clips:
+            try:
+                c.close()
+            except Exception:
+                pass
+        raise

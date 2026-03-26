@@ -173,7 +173,8 @@ def main():
         print(f"🚀 Rendering the short ({start}s to {end}s) in {shorts_service.RENDER_PROFILE_LABEL}...")
         clip = VideoFileClip(video_path).subclipped(start, end)
 
-        clip_vertical = shorts_service.build_vertical_master_clip(clip)
+        clip_vertical, content_type, _clip_meta = shorts_service.build_vertical_master_clip(clip)
+        print(f"  📐 Content type: {content_type}")
         if clip.audio is not None:
             clip_vertical = clip_vertical.with_audio(clip.audio.with_duration(clip_vertical.duration))
 
