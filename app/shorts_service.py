@@ -391,7 +391,35 @@ def extract_clip_transcript_from_full(full_transcript: dict, clip_start_time: fl
     }, requires_precise_fallback
 
 
-def download_video(url: str, destination_base: Path) -> Path:
+def download_video(url: str, destination_base: Path, progress_callback: ProgressCallback | None = None) -> Path:
+    last_reported: dict[str, int] = {"pct": -1}
+
+    def _ydl_progress(d: dict) -> None:
+        if d.get("status") != "downloading":
+            return
+        total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+        downloaded = d.get("downloaded_bytes") or 0
+        if total > 0:
+            pct = int(downloaded / total * 100)
+            # Report at most every 10%
+            if pct >= last_reported["pct"] + 10:
+                last_reported["pct"] = pct
+                speed = d.get("speed") or 0
+                speed_mb = speed / 1_048_576 if speed else 0
+                eta = d.get("eta") or 0
+                msg = f"Downloading... {pct}%"
+                if speed_mb >= 0.1:
+                    msg += f"  ({speed_mb:.1f} MB/s"
+                    if eta:
+                        msg += f", ~{eta}s left"
+                    msg += ")"
+                _emit(progress_callback, "downloading", msg)
+        elif d.get("info_dict"):
+            # No size info yet — just confirm it started
+            if last_reported["pct"] < 0:
+                last_reported["pct"] = 0
+                _emit(progress_callback, "downloading", "Downloading video… (size unknown)")
+
     ydl_opts = {
         "format": DOWNLOAD_FORMAT,
         "outtmpl": str(destination_base.with_suffix(".%(ext)s")),
@@ -399,9 +427,12 @@ def download_video(url: str, destination_base: Path) -> Path:
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        "concurrent_fragment_downloads": 4,
+        "progress_hooks": [_ydl_progress],
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
+    _emit(progress_callback, "downloading", "Download complete.")
     return _resolve_downloaded_video_path(destination_base)
 
 
