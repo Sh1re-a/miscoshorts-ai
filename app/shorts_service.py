@@ -14,9 +14,22 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
 
-import whisper
 import yt_dlp
 from moviepy import CompositeVideoClip, ImageClip, VideoFileClip
+
+try:
+    from faster_whisper import WhisperModel as _FasterWhisperModel
+    _FASTER_WHISPER_AVAILABLE = True
+except Exception:
+    _FasterWhisperModel = None
+    _FASTER_WHISPER_AVAILABLE = False
+
+try:
+    import whisper
+    _OPENAI_WHISPER_AVAILABLE = True
+except Exception:
+    whisper = None
+    _OPENAI_WHISPER_AVAILABLE = False
 
 try:
     import cv2 as _cv2
@@ -164,6 +177,7 @@ DOWNLOAD_FORMAT = os.getenv(
     "bestvideo*[height<=2160]+bestaudio/best[height<=2160]/best",
 )
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "turbo,base")
+WHISPER_BACKEND = os.getenv("WHISPER_BACKEND", "auto").strip().lower() or "auto"
 RENDER_THREADS = max(4, min(12, os.cpu_count() or 4))
 DEFAULT_CLIP_COUNT = 3
 DEFAULT_RENDER_PROFILE = os.getenv("DEFAULT_RENDER_PROFILE", "studio").strip().lower() or "studio"
@@ -2203,17 +2217,80 @@ def _get_whisper_model_candidates() -> list[str]:
     return [candidate.strip() for candidate in WHISPER_MODEL.split(",") if candidate.strip()] or ["base"]
 
 
-def load_whisper_model() -> tuple[str, object]:
+def _normalize_faster_whisper_result(segments, info) -> dict:
+    normalized_segments = []
+    full_text_parts: list[str] = []
+
+    for segment in segments:
+        text = (segment.text or "").strip()
+        words = []
+        for word in getattr(segment, "words", None) or []:
+            if word.start is None or word.end is None:
+                continue
+            words.append(
+                {
+                    "word": (word.word or "").strip(),
+                    "start": float(word.start),
+                    "end": float(word.end),
+                }
+            )
+
+        normalized_segments.append(
+            {
+                "start": float(segment.start),
+                "end": float(segment.end),
+                "text": text,
+                "words": words,
+            }
+        )
+        if text:
+            full_text_parts.append(text)
+
+    language = getattr(info, "language", None)
+    return {
+        "text": " ".join(full_text_parts).strip(),
+        "segments": normalized_segments,
+        "language": language,
+    }
+
+
+def _load_faster_whisper_model() -> tuple[str, object]:
+    if not _FASTER_WHISPER_AVAILABLE:
+        raise RuntimeError("faster-whisper is not installed.")
+
     last_error = None
     with _whisper_model_lock:
         for model_name in _get_whisper_model_candidates():
-            cached_model = _whisper_model_cache.get(model_name)
+            cache_key = f"faster::{model_name}"
+            cached_model = _whisper_model_cache.get(cache_key)
+            if cached_model is not None:
+                return model_name, cached_model
+
+            try:
+                model = _FasterWhisperModel(model_name, device="auto", compute_type="auto")
+                _whisper_model_cache[cache_key] = model
+                return model_name, model
+            except Exception as error:
+                last_error = error
+
+    raise RuntimeError("Could not load any configured faster-whisper model.") from last_error
+
+
+def _load_openai_whisper_model() -> tuple[str, object]:
+    if not _OPENAI_WHISPER_AVAILABLE or whisper is None:
+        raise RuntimeError("openai-whisper is not installed.")
+
+    last_error = None
+    with _whisper_model_lock:
+        for model_name in _get_whisper_model_candidates():
+            cache_key = f"openai::{model_name}"
+            cached_model = _whisper_model_cache.get(cache_key)
             if cached_model is not None:
                 return model_name, cached_model
 
             try:
                 model = whisper.load_model(model_name)
-                _whisper_model_cache[model_name] = model
+                _whisper_model_cache[cache_key] = model
                 return model_name, model
             except Exception as error:
                 last_error = error
@@ -2221,8 +2298,49 @@ def load_whisper_model() -> tuple[str, object]:
     raise RuntimeError("Could not load any configured Whisper model.") from last_error
 
 
+def load_whisper_model() -> tuple[str, str, object]:
+    backend_order = {
+        "auto": ["faster-whisper", "openai-whisper"],
+        "faster-whisper": ["faster-whisper", "openai-whisper"],
+        "openai-whisper": ["openai-whisper"],
+    }.get(WHISPER_BACKEND, ["faster-whisper", "openai-whisper"])
+
+    last_error = None
+    for backend in backend_order:
+        try:
+            if backend == "faster-whisper":
+                model_name, model = _load_faster_whisper_model()
+                return backend, model_name, model
+            model_name, model = _load_openai_whisper_model()
+            return backend, model_name, model
+        except Exception as error:
+            last_error = error
+
+    raise RuntimeError("Could not load any configured transcription backend.") from last_error
+
+
 def transcribe_media(media_path: Path, *, word_timestamps: bool) -> dict:
-    model_name, model = load_whisper_model()
+    backend, model_name, model = load_whisper_model()
+    if backend == "faster-whisper":
+        try:
+            segments, info = model.transcribe(
+                str(media_path),
+                beam_size=5,
+                word_timestamps=word_timestamps,
+                vad_filter=True,
+                condition_on_previous_text=False,
+                temperature=0.0,
+            )
+            return _normalize_faster_whisper_result(list(segments), info)
+        except Exception as error:
+            if WHISPER_BACKEND == "faster-whisper":
+                raise RuntimeError("faster-whisper transcription failed.") from error
+            # fallback to openai-whisper
+            if _OPENAI_WHISPER_AVAILABLE:
+                backend, model_name, model = "openai-whisper", *_load_openai_whisper_model()
+            else:
+                raise RuntimeError("faster-whisper transcription failed.") from error
+
     transcribe_options = {
         "fp16": False,
         "verbose": False,
@@ -2239,13 +2357,13 @@ def transcribe_media(media_path: Path, *, word_timestamps: bool) -> dict:
         fallback_options.pop("word_timestamps", None)
         return model.transcribe(str(media_path), **fallback_options)
     except Exception as error:
-        if model_name != "base":
+        if model_name != "base" and whisper is not None:
             with _whisper_model_lock:
-                _whisper_model_cache.pop(model_name, None)
-                base_model = _whisper_model_cache.get("base")
+                _whisper_model_cache.pop(f"openai::{model_name}", None)
+                base_model = _whisper_model_cache.get("openai::base")
                 if base_model is None:
                     base_model = whisper.load_model("base")
-                    _whisper_model_cache["base"] = base_model
+                    _whisper_model_cache["openai::base"] = base_model
             fallback_options = dict(transcribe_options)
             try:
                 return base_model.transcribe(str(media_path), **fallback_options)

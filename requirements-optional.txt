@@ -1,1 +1,2 @@
 pyannote.audio
+faster-whisper

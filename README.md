@@ -91,6 +91,7 @@ Optional server-oriented environment variables:
 - `LOCAL_CACHE_ENABLED` to enable local source/transcript reuse
 - `SPEAKER_DIARIZATION_MODE` to choose `auto`, `heuristic`, or `pyannote`
 - `PYANNOTE_AUTH_TOKEN` or `HF_TOKEN` to enable optional higher-accuracy pyannote diarization
+- `WHISPER_BACKEND` to choose `auto`, `faster-whisper`, or `openai-whisper`
 
 ## Free Pro Stack
 
@@ -100,11 +101,13 @@ For the strongest free local setup:
 - use the `studio` render profile for final exports
 - keep `LOCAL_CACHE_ENABLED=1` so repeat runs are faster
 - install optional diarization support with `pip install -r requirements-optional.txt`
+- let transcription default to `faster-whisper`
 - set `PYANNOTE_AUTH_TOKEN` and keep `SPEAKER_DIARIZATION_MODE=auto`
 
 That gives you:
 
 - free local Whisper transcription
+- faster local transcription through `faster-whisper` when installed
 - free local heuristic speaker analysis by default
 - optional higher-accuracy local pyannote diarization when available
 - higher-quality H.264 exports with stronger rate control and AAC audio
