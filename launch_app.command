@@ -143,8 +143,8 @@ if stamp_matches "$PYTHON_DEPS_STAMP" "$CURRENT_SIGNATURE"; then
 else
 	action "Installing Python packages..."
 	"$VENV_PYTHON" -m pip install --disable-pip-version-check --quiet -r requirements.txt >> "$LOG_PATH" 2>&1 || fail "pip install failed. Check $LOG_PATH for details."
-	if [[ -f "requirements-optional.txt" ]]; then
-		action "Installing free pro add-ons..."
+	if [[ -f "requirements-optional.txt" && ( -n "${PYANNOTE_AUTH_TOKEN:-}" || -n "${HF_TOKEN:-}" || "${AUTO_INSTALL_PRO_DEPS:-0}" == "1" ) ]]; then
+		action "Installing optional pro diarization add-ons..."
 		"$VENV_PYTHON" -m pip install --disable-pip-version-check --quiet -r requirements-optional.txt >> "$LOG_PATH" 2>&1 || fail "Optional pro dependency install failed. Check $LOG_PATH for details."
 	fi
 	echo "$CURRENT_SIGNATURE" > "$PYTHON_DEPS_STAMP"

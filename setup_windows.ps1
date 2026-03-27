@@ -580,8 +580,15 @@ function Invoke-Setup {
     if (-not (Test-StateMatch $pythonDepsStamp $pythonDepsSignature)) {
         Write-SetupAction "Installing Python packages ..."
         Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "--quiet", "-r", "requirements.txt") "Installing Python dependencies failed."
-        if (Test-Path (Join-Path $root "requirements-optional.txt")) {
-            Write-SetupAction "Installing free pro add-ons ..."
+        $shouldInstallOptional = (
+            (Test-Path (Join-Path $root "requirements-optional.txt")) -and (
+                -not [string]::IsNullOrWhiteSpace($env:PYANNOTE_AUTH_TOKEN) -or
+                -not [string]::IsNullOrWhiteSpace($env:HF_TOKEN) -or
+                $env:AUTO_INSTALL_PRO_DEPS -eq "1"
+            )
+        )
+        if ($shouldInstallOptional) {
+            Write-SetupAction "Installing optional pro diarization add-ons ..."
             Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "--quiet", "-r", "requirements-optional.txt") "Installing optional pro dependencies failed."
         }
         Write-StateValue $pythonDepsStamp $pythonDepsSignature
