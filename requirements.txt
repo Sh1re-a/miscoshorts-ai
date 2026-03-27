@@ -2,7 +2,6 @@ yt-dlp
 moviepy
 Pillow
 google-genai
-openai-whisper
 python-dotenv
 Flask
 opencv-python

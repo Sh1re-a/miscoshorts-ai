@@ -37,7 +37,8 @@ $ffmpegArchiveUrl = "https://www.gyan.dev/ffmpeg/builds/$ffmpegArchiveName"
 $ffmpegInstallRoot = Join-Path $runtimeDir "ffmpeg"
 $ffmpegCurrentDir = Join-Path $ffmpegInstallRoot "current"
 $ffmpegBinDir = Join-Path $ffmpegCurrentDir "bin"
-$pythonDepsStamp = Join-Path $stateDir "python-deps.state"
+$pythonCoreStamp = Join-Path $stateDir "python-core.state"
+$pythonOptionalStamp = Join-Path $stateDir "python-optional.state"
 $frontendDepsStamp = Join-Path $stateDir "frontend-deps.state"
 $frontendBuildStamp = Join-Path $stateDir "frontend-build.state"
 $script:SetupStep = 0
@@ -398,6 +399,14 @@ function Test-UsableVenv {
     return Test-UsablePython $venvPython
 }
 
+function Remove-PythonDependencyStamps {
+    foreach ($stampPath in @($pythonCoreStamp, $pythonOptionalStamp)) {
+        if (Test-Path $stampPath) {
+            Remove-Item $stampPath -Force
+        }
+    }
+}
+
 function Ensure-Node {
     $nodeCommand = Find-NodeCommand
     if ($null -ne $nodeCommand) {
@@ -568,11 +577,12 @@ function Invoke-Setup {
     Write-SetupDone "Python is ready."
     $null = Ensure-Ffmpeg
     Write-SetupDone "FFmpeg is ready."
+    $pythonCoreSignature = Get-StateSignature @("requirements.txt")
     $optionalDepsMode = "off"
     if (Test-ShouldInstallOptionalPythonDeps) {
         $optionalDepsMode = "on"
     }
-    $pythonDepsSignature = "{0}|optional={1}" -f (Get-StateSignature @("requirements.txt", "requirements-optional.txt", "app")), $optionalDepsMode
+    $pythonOptionalSignature = "{0}|optional={1}" -f (Get-StateSignature @("requirements-optional.txt")), $optionalDepsMode
     $frontendDepsSignature = Get-StateSignature @("frontend/package.json", "frontend/package-lock.json")
     $frontendBuildSignature = Get-StateSignature @("frontend/src", "frontend/index.html", "frontend/package.json", "frontend/vite.config.ts")
 
@@ -580,6 +590,7 @@ function Invoke-Setup {
     if ((Test-Path $venvDir) -and (-not (Test-UsableVenv))) {
         Write-SetupAction "Existing Python environment is invalid. Recreating it ..."
         Remove-Item $venvDir -Recurse -Force
+        Remove-PythonDependencyStamps
     }
 
     if (-not (Test-UsableVenv)) {
@@ -591,19 +602,29 @@ function Invoke-Setup {
         Write-SetupReuse "existing local Python environment"
     }
 
-    if (-not (Test-StateMatch $pythonDepsStamp $pythonDepsSignature)) {
+    if (-not (Test-StateMatch $pythonCoreStamp $pythonCoreSignature)) {
         Write-SetupAction "Installing Python packages ..."
-        Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "--quiet", "-r", "requirements.txt") "Installing Python dependencies failed."
-        $shouldInstallOptional = Test-ShouldInstallOptionalPythonDeps
-        if ($shouldInstallOptional) {
-            Write-SetupAction "Installing optional pro diarization add-ons ..."
-            Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "--quiet", "-r", "requirements-optional.txt") "Installing optional pro dependencies failed."
-        }
-        Write-StateValue $pythonDepsStamp $pythonDepsSignature
-        Write-SetupDone "Python packages are up to date."
+        Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "--prefer-binary", "--quiet", "-r", "requirements.txt") "Installing Python dependencies failed."
+        Write-StateValue $pythonCoreStamp $pythonCoreSignature
+        Write-SetupDone "Python core packages are up to date."
     }
     else {
-        Write-SetupReuse "Python packages already installed"
+        Write-SetupReuse "Python core packages already installed"
+    }
+
+    $shouldInstallOptional = Test-ShouldInstallOptionalPythonDeps
+    if ($shouldInstallOptional) {
+        if (-not (Test-StateMatch $pythonOptionalStamp $pythonOptionalSignature)) {
+            Write-SetupAction "Installing optional pro diarization add-ons ..."
+            Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "--prefer-binary", "--quiet", "-r", "requirements-optional.txt") "Installing optional pro dependencies failed."
+            Write-StateValue $pythonOptionalStamp $pythonOptionalSignature
+            Write-SetupDone "Optional Python add-ons are up to date."
+        }
+        else {
+            Write-SetupReuse "Optional Python add-ons already installed"
+        }
+    } else {
+        Write-SetupReuse "Optional Python add-ons disabled"
     }
 
     Start-SetupStep "Preparing app interface"

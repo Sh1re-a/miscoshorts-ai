@@ -17,8 +17,10 @@ SETUP_DIR="$INTERNAL_DIR/setup"
 VENV_DIR="$RUNTIME_DIR/venv"
 VENV_PYTHON="$VENV_DIR/bin/python3"
 LOG_PATH="$SETUP_DIR/macos-setup.log"
-PYTHON_DEPS_STAMP="$SETUP_DIR/python-deps.state"
-FRONTEND_STAMP="$SETUP_DIR/frontend.state"
+PYTHON_CORE_STAMP="$SETUP_DIR/python-core.state"
+PYTHON_OPTIONAL_STAMP="$SETUP_DIR/python-optional.state"
+FRONTEND_DEPS_STAMP="$SETUP_DIR/frontend-deps.state"
+FRONTEND_BUILD_STAMP="$SETUP_DIR/frontend-build.state"
 
 STEP=0
 TOTAL_STEPS=4
@@ -51,8 +53,11 @@ sha_file() {
 	fi
 }
 
-deps_signature() {
+core_deps_signature() {
 	sha_file requirements.txt
+}
+
+optional_deps_signature() {
 	sha_file requirements-optional.txt
 	if [[ -n "${PYANNOTE_AUTH_TOKEN:-}" || -n "${HF_TOKEN:-}" || "${AUTO_INSTALL_PRO_DEPS:-0}" == "1" ]]; then
 		echo "optional:on"
@@ -61,8 +66,12 @@ deps_signature() {
 	fi
 }
 
-frontend_signature() {
-	find frontend/src frontend/package.json -type f -print0 2>/dev/null | sort -z | xargs -0 shasum -a 256 2>/dev/null | shasum -a 256 | awk '{print $1}'
+frontend_deps_signature() {
+	find frontend/package.json frontend/package-lock.json -type f -print0 2>/dev/null | sort -z | xargs -0 shasum -a 256 2>/dev/null | shasum -a 256 | awk '{print $1}'
+}
+
+frontend_build_signature() {
+	find frontend/src frontend/index.html frontend/package.json frontend/vite.config.ts -type f -print0 2>/dev/null | sort -z | xargs -0 shasum -a 256 2>/dev/null | shasum -a 256 | awk '{print $1}'
 }
 
 stamp_matches() {
@@ -131,6 +140,7 @@ if [[ -f "$VENV_PYTHON" ]]; then
 	if ! "$VENV_PYTHON" -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" 2>/dev/null; then
 		action "Existing venv is invalid, recreating..."
 		rm -rf "$VENV_DIR"
+		rm -f "$PYTHON_CORE_STAMP" "$PYTHON_OPTIONAL_STAMP"
 	fi
 fi
 
@@ -142,29 +152,41 @@ else
 	reuse "existing virtual environment"
 fi
 
-CURRENT_SIGNATURE=$(deps_signature)
-if stamp_matches "$PYTHON_DEPS_STAMP" "$CURRENT_SIGNATURE"; then
-	reuse "Python packages (unchanged)"
+CURRENT_CORE_SIGNATURE=$(core_deps_signature)
+CURRENT_OPTIONAL_SIGNATURE=$(optional_deps_signature)
+
+if stamp_matches "$PYTHON_CORE_STAMP" "$CURRENT_CORE_SIGNATURE"; then
+	reuse "Python core packages (unchanged)"
 else
 	action "Installing Python packages..."
-	"$VENV_PYTHON" -m pip install --disable-pip-version-check --quiet -r requirements.txt >> "$LOG_PATH" 2>&1 || fail "pip install failed. Check $LOG_PATH for details."
-	if [[ -f "requirements-optional.txt" && ( -n "${PYANNOTE_AUTH_TOKEN:-}" || -n "${HF_TOKEN:-}" || "${AUTO_INSTALL_PRO_DEPS:-0}" == "1" ) ]]; then
+	"$VENV_PYTHON" -m pip install --disable-pip-version-check --prefer-binary --quiet -r requirements.txt >> "$LOG_PATH" 2>&1 || fail "pip install failed. Check $LOG_PATH for details."
+	echo "$CURRENT_CORE_SIGNATURE" > "$PYTHON_CORE_STAMP"
+	done_msg "Python core packages installed"
+fi
+
+if [[ -f "requirements-optional.txt" && ( -n "${PYANNOTE_AUTH_TOKEN:-}" || -n "${HF_TOKEN:-}" || "${AUTO_INSTALL_PRO_DEPS:-0}" == "1" ) ]]; then
+	if stamp_matches "$PYTHON_OPTIONAL_STAMP" "$CURRENT_OPTIONAL_SIGNATURE"; then
+		reuse "Optional Python add-ons (unchanged)"
+	else
 		action "Installing optional pro diarization add-ons..."
-		"$VENV_PYTHON" -m pip install --disable-pip-version-check --quiet -r requirements-optional.txt >> "$LOG_PATH" 2>&1 || fail "Optional pro dependency install failed. Check $LOG_PATH for details."
+		"$VENV_PYTHON" -m pip install --disable-pip-version-check --prefer-binary --quiet -r requirements-optional.txt >> "$LOG_PATH" 2>&1 || fail "Optional pro dependency install failed. Check $LOG_PATH for details."
+		echo "$CURRENT_OPTIONAL_SIGNATURE" > "$PYTHON_OPTIONAL_STAMP"
+		done_msg "Optional Python add-ons installed"
 	fi
-	echo "$CURRENT_SIGNATURE" > "$PYTHON_DEPS_STAMP"
-	done_msg "Python packages installed"
+else
+	reuse "Optional Python add-ons disabled"
 fi
 
 # ─── Step 3: Frontend ───
 step "Preparing app interface"
 
-FRONTEND_SIG=$(frontend_signature)
+FRONTEND_DEPS_SIG=$(frontend_deps_signature)
+FRONTEND_BUILD_SIG=$(frontend_build_signature)
 FRONTEND_NEEDS_BUILD=false
 
 if [[ ! -f "frontend/dist/index.html" ]]; then
 	FRONTEND_NEEDS_BUILD=true
-elif ! stamp_matches "$FRONTEND_STAMP" "$FRONTEND_SIG"; then
+elif ! stamp_matches "$FRONTEND_BUILD_STAMP" "$FRONTEND_BUILD_SIG"; then
 	FRONTEND_NEEDS_BUILD=true
 fi
 
@@ -186,15 +208,20 @@ else
 		fi
 	fi
 
-	action "Installing frontend packages..."
-	(cd frontend && npm ci --silent >> "../$LOG_PATH" 2>&1) || fail "npm ci failed."
+	if stamp_matches "$FRONTEND_DEPS_STAMP" "$FRONTEND_DEPS_SIG"; then
+		reuse "frontend packages (unchanged)"
+	else
+		action "Installing frontend packages..."
+		(cd frontend && npm ci --silent >> "../$LOG_PATH" 2>&1) || fail "npm ci failed."
+		echo "$FRONTEND_DEPS_SIG" > "$FRONTEND_DEPS_STAMP"
+	fi
 	action "Building frontend..."
 	(cd frontend && npm run build >> "../$LOG_PATH" 2>&1) || fail "Frontend build failed."
 
 	if [[ ! -f "frontend/dist/index.html" ]]; then
 		fail "Frontend build completed but dist/index.html was not created."
 	fi
-	echo "$FRONTEND_SIG" > "$FRONTEND_STAMP"
+	echo "$FRONTEND_BUILD_SIG" > "$FRONTEND_BUILD_STAMP"
 	done_msg "Frontend built successfully"
 fi
 
