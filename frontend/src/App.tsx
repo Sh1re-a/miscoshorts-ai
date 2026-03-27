@@ -11,7 +11,6 @@ import { Progress } from './components/ui/progress'
 import { feedbackTags, progressByStatus, stageDescriptions, statusTitles } from './features/jobs/config'
 import type { AnalyticsInsights, BootstrapPayload, ClipFeedback, JobPayload, JobStatus } from './features/jobs/types'
 import { apiKeyStorageKey, formatEta, formatLogTime, getEtaWindow, loadSavedApiKey } from './features/jobs/utils'
-import type { SubtitlePreviewPayload } from './features/preview/types'
 
 const fallbackRenderProfile = 'studio'
 const fallbackRenderProfiles = {
@@ -19,8 +18,7 @@ const fallbackRenderProfiles = {
   balanced: 'Balanced 1080x1920 MP4',
   studio: 'Studio HQ 1080x1920 MP4',
 }
-const fontPresetOptions = ['soft', 'clean', 'bold'] as const
-const colorPresetOptions = ['editorial', 'ivory', 'mint', 'sun'] as const
+const lockedSubtitleStyle = { fontPreset: 'soft', colorPreset: 'editorial' } as const
 
 function App() {
   const [videoUrl, setVideoUrl] = useState('')
@@ -30,12 +28,6 @@ function App() {
   const [selectedRenderProfile, setSelectedRenderProfile] = useState(fallbackRenderProfile)
   const [speakerMode, setSpeakerMode] = useState('auto')
   const [hasPyannoteToken, setHasPyannoteToken] = useState(false)
-  const [selectedFontPreset, setSelectedFontPreset] = useState<'soft' | 'clean' | 'bold'>('soft')
-  const [selectedColorPreset, setSelectedColorPreset] = useState<'editorial' | 'ivory' | 'mint' | 'sun'>('editorial')
-  const [previewTitle, setPreviewTitle] = useState('A calm, premium headline')
-  const [previewReason, setPreviewReason] = useState('Subtle captions, refined hierarchy, and a more editorial finish.')
-  const [previewData, setPreviewData] = useState<SubtitlePreviewPayload | null>(null)
-  const [previewLoading, setPreviewLoading] = useState(false)
   const [outputFilename, setOutputFilename] = useState('short_con_subs.mp4')
   const [jobId, setJobId] = useState<string | null>(null)
   const [job, setJob] = useState<JobPayload>({ status: 'idle' })
@@ -150,45 +142,6 @@ function App() {
   const effectiveClipCount = job.result?.clipCount ?? job.clipCount ?? selectedClipCount
   const currentRenderProfileLabel = renderProfiles[selectedRenderProfile] ?? renderProfiles[fallbackRenderProfile] ?? 'Studio HQ 1080x1920 MP4'
   const progressValue = job.overallProgress ?? progressByStatus[job.status]
-  const selectedSubtitleStyle = useMemo(() => ({ fontPreset: selectedFontPreset, colorPreset: selectedColorPreset }), [selectedColorPreset, selectedFontPreset])
-
-  useEffect(() => {
-    let cancelled = false
-    const timeoutId = window.setTimeout(async () => {
-      setPreviewLoading(true)
-      try {
-        const response = await fetch('/api/subtitle-preview', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            subtitleStyle: selectedSubtitleStyle,
-            title: previewTitle,
-            reason: previewReason,
-          }),
-        })
-        if (!response.ok) {
-          return
-        }
-        const payload = await response.json() as SubtitlePreviewPayload
-        if (!cancelled) {
-          setPreviewData(payload)
-        }
-      } catch {
-        // Keep the app usable if preview generation fails.
-      } finally {
-        if (!cancelled) {
-          setPreviewLoading(false)
-        }
-      }
-    }, 250)
-
-    return () => {
-      cancelled = true
-      window.clearTimeout(timeoutId)
-    }
-  }, [previewReason, previewTitle, selectedSubtitleStyle])
 
   function resetFlow() {
     setJobId(null)
@@ -299,7 +252,7 @@ function App() {
           outputFilename,
           clipCount: selectedClipCount,
           renderProfile: selectedRenderProfile,
-          subtitleStyle: selectedSubtitleStyle,
+          subtitleStyle: lockedSubtitleStyle,
         }),
       })
 
@@ -398,12 +351,13 @@ function App() {
 
                 <div className="rounded-[24px] border border-sky-100 bg-sky-50/80 px-4 py-4 text-sm leading-6 text-slate-700">
                   <p className="font-semibold text-slate-900">{currentRenderProfileLabel}</p>
-                  <p className="mt-2">The app runs a focused Shorts workflow: centered reframing, strong H.264 export settings, AAC audio, and calmer editorial subtitles with a more premium header.</p>
+                  <p className="mt-2">The app runs a focused Shorts workflow: centered reframing, strong H.264 export settings, AAC audio, and a locked editorial subtitle system with a calmer premium finish.</p>
                   <p className="mt-2">Keep the launcher window open while the job runs. Finished files appear here and in the local outputs folder.</p>
                   <p className="mt-2 text-slate-500">
                     Speaker engine: {hasPyannoteToken ? 'Pyannote when available, otherwise local heuristic' : 'Local heuristic speaker analysis'}.
                     Current mode: {speakerMode}.
                   </p>
+                  <p className="mt-2 text-slate-500">Subtitle style: fixed professional editorial preset. No manual tweaking in the dashboard.</p>
                 </div>
 
                 <div className="space-y-2">
@@ -449,100 +403,6 @@ function App() {
                     ))}
                   </div>
                   <p className="text-xs text-slate-500">Fast for iteration, balanced for normal use, studio for final delivery.</p>
-                </div>
-
-                <div className="space-y-3 rounded-[24px] border border-slate-200 bg-white p-4">
-                  <div>
-                    <p className="font-semibold text-slate-950">Subtitle Workbench</p>
-                    <p className="mt-1 text-xs text-slate-500">Tune the calm, premium style before running a full render.</p>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label>Font preset</Label>
-                    <div className="flex flex-wrap gap-2">
-                      {fontPresetOptions.map((preset) => (
-                        <button
-                          key={preset}
-                          type="button"
-                          onClick={() => setSelectedFontPreset(preset)}
-                          className={`rounded-xl border px-3 py-2 text-sm transition-colors ${
-                            selectedFontPreset === preset
-                              ? 'border-sky-500 bg-sky-500 text-white'
-                              : 'border-slate-200 bg-slate-50 text-slate-700 hover:border-sky-300 hover:bg-sky-50'
-                          }`}
-                        >
-                          {preset}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label>Color preset</Label>
-                    <div className="flex flex-wrap gap-2">
-                      {colorPresetOptions.map((preset) => (
-                        <button
-                          key={preset}
-                          type="button"
-                          onClick={() => setSelectedColorPreset(preset)}
-                          className={`rounded-xl border px-3 py-2 text-sm transition-colors ${
-                            selectedColorPreset === preset
-                              ? 'border-sky-500 bg-sky-500 text-white'
-                              : 'border-slate-200 bg-slate-50 text-slate-700 hover:border-sky-300 hover:bg-sky-50'
-                          }`}
-                        >
-                          {preset}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="previewTitle">Preview header</Label>
-                    <Input
-                      id="previewTitle"
-                      value={previewTitle}
-                      onChange={(event) => setPreviewTitle(event.target.value)}
-                      autoComplete="off"
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="previewReason">Preview subheader</Label>
-                    <Input
-                      id="previewReason"
-                      value={previewReason}
-                      onChange={(event) => setPreviewReason(event.target.value)}
-                      autoComplete="off"
-                    />
-                  </div>
-
-                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                    <div className="mb-3 flex items-center justify-between">
-                      <p className="text-sm font-medium text-slate-900">Live preview</p>
-                      <span className="text-xs text-slate-500">{previewLoading ? 'Updating…' : 'Synced'}</span>
-                    </div>
-
-                    {previewData ? (
-                      <div className="space-y-3">
-                        {previewData.headerImages[0] ? (
-                          <img src={previewData.headerImages[0]} alt="Subtitle header preview" className="w-full rounded-2xl border border-slate-200" />
-                        ) : null}
-                        <div className="grid gap-3 sm:grid-cols-2">
-                          {previewData.subtitleFrames.slice(0, 2).map((cue) => (
-                            <div key={cue.cue} className="space-y-2">
-                              {cue.frames.dark ? (
-                                <img src={cue.frames.dark} alt={`Subtitle preview ${cue.cue}`} className="w-full rounded-2xl border border-slate-200" />
-                              ) : null}
-                              <p className="text-xs text-slate-500">{cue.text}</p>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ) : (
-                      <p className="text-sm text-slate-500">Preparing subtitle preview…</p>
-                    )}
-                  </div>
                 </div>
 
                 <Button className="h-12 w-full rounded-2xl bg-sky-600 text-white hover:bg-sky-700" type="submit" disabled={!canSubmit}>
