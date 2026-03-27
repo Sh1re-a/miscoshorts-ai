@@ -2801,7 +2801,11 @@ def _summarize_download_info(info: dict | None) -> dict:
         "videoBitrate": video_format.get("tbr") or info.get("tbr"),
         "audioBitrate": audio_format.get("abr") or info.get("abr"),
     }
-    return {key: value for key, value in source_summary.items() if value not in {None, "", []}}
+    return {
+        key: value
+        for key, value in source_summary.items()
+        if value is not None and value != "" and value != []
+    }
 
 
 def _format_download_quality_label(download_info: dict) -> str:
