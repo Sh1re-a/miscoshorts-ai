@@ -81,6 +81,17 @@ The current browser flow is intentionally simplified: it runs the default 3-clip
 - FFmpeg installed and available in `PATH`
 - A Gemini API key
 
+Optional server-oriented environment variables:
+
+- `MAX_CONCURRENT_JOBS` to cap how many renders run at once
+- `MAX_QUEUED_JOBS` to cap how many jobs can wait in line
+- `JOB_RETENTION_HOURS` to auto-delete old job state and rendered outputs
+- `MISCOSHORTS_HOST` and `MISCOSHORTS_PORT` to bind the Flask server
+- `DEFAULT_RENDER_PROFILE` to choose `fast`, `balanced`, or `studio`
+- `LOCAL_CACHE_ENABLED` to enable local source/transcript reuse
+- `SPEAKER_DIARIZATION_MODE` to choose `auto`, `heuristic`, or `pyannote`
+- `PYANNOTE_AUTH_TOKEN` or `HF_TOKEN` to enable optional higher-accuracy pyannote diarization
+
 The Python Gemini integration now uses the supported `google-genai` SDK.
 
 For packaged Windows releases that already include `frontend/dist`, Node.js is not required for the end user.

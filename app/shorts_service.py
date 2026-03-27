@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -7,6 +8,7 @@ import shutil
 import subprocess
 import threading
 import uuid
+import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -144,7 +146,7 @@ _CLS_VOTE_TEXT_NEWS = 0.10          # per-frame text for news vote
 _CLS_SCENE_CHANGE_THRESHOLD = 0.06 # inter-frame diff above this = scene change
 
 from app import gemini_analyzer, subtitles
-from app.paths import OUTPUTS_DIR
+from app.paths import OUTPUTS_DIR, OUTPUT_CACHE_DIR, OUTPUT_JOBS_DIR
 
 
 ProgressCallback = Callable[[str, str], None]
@@ -164,7 +166,39 @@ DOWNLOAD_FORMAT = os.getenv(
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "turbo,base")
 RENDER_THREADS = max(4, min(12, os.cpu_count() or 4))
 DEFAULT_CLIP_COUNT = 3
-RENDER_PROFILE_LABEL = "Studio HQ 1080x1920 MP4"
+DEFAULT_RENDER_PROFILE = os.getenv("DEFAULT_RENDER_PROFILE", "studio").strip().lower() or "studio"
+CACHE_ENABLED = os.getenv("LOCAL_CACHE_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
+SPEAKER_DIARIZATION_MODE = os.getenv("SPEAKER_DIARIZATION_MODE", "auto").strip().lower() or "auto"
+RENDER_PROFILES = {
+    "fast": {
+        "label": "Fast Draft 1080x1920 MP4",
+        "video_crf": "19",
+        "video_preset": "veryfast",
+        "video_bitrate": "6M",
+        "video_maxrate": "8M",
+        "video_bufsize": "12M",
+        "audio_bitrate": "192k",
+    },
+    "balanced": {
+        "label": "Balanced 1080x1920 MP4",
+        "video_crf": "16",
+        "video_preset": "faster",
+        "video_bitrate": "7M",
+        "video_maxrate": "10M",
+        "video_bufsize": "14M",
+        "audio_bitrate": "224k",
+    },
+    "studio": {
+        "label": "Studio HQ 1080x1920 MP4",
+        "video_crf": VIDEO_CRF,
+        "video_preset": VIDEO_PRESET,
+        "video_bitrate": VIDEO_BITRATE,
+        "video_maxrate": VIDEO_MAXRATE,
+        "video_bufsize": VIDEO_BUFSIZE,
+        "audio_bitrate": VIDEO_AUDIO_BITRATE,
+    },
+}
+RENDER_PROFILE_LABEL = RENDER_PROFILES.get(DEFAULT_RENDER_PROFILE, RENDER_PROFILES["studio"])["label"]
 ALLOWED_VIDEO_HOSTS = {
     "youtube.com",
     "www.youtube.com",
@@ -202,6 +236,8 @@ GEMINI_CLIP_PATTERN = re.compile(r"^CLIP\s+\d+\s*:?\s*$", re.IGNORECASE)
 
 _whisper_model_cache: dict[str, object] = {}
 _whisper_model_lock = threading.Lock()
+_pyannote_pipeline_cache: object | None = None
+_pyannote_pipeline_lock = threading.Lock()
 
 
 def _emit(callback: ProgressCallback | None, stage: str, message: str) -> None:
@@ -209,8 +245,137 @@ def _emit(callback: ProgressCallback | None, stage: str, message: str) -> None:
         callback(stage, message)
 
 
+def normalize_requested_render_profile(render_profile: str | None) -> str:
+    normalized = (render_profile or DEFAULT_RENDER_PROFILE).strip().lower()
+    if normalized not in RENDER_PROFILES:
+        raise ValueError(f"renderProfile must be one of: {', '.join(sorted(RENDER_PROFILES))}")
+    return normalized
+
+
+def _get_render_profile_settings(render_profile: str) -> dict[str, str]:
+    return dict(RENDER_PROFILES[normalize_requested_render_profile(render_profile)])
+
+
+def _get_speaker_diarization_token() -> str:
+    return (
+        os.getenv("PYANNOTE_AUTH_TOKEN")
+        or os.getenv("HUGGINGFACE_ACCESS_TOKEN")
+        or os.getenv("HF_TOKEN")
+        or ""
+    ).strip()
+
+
+def _should_use_pyannote() -> bool:
+    if SPEAKER_DIARIZATION_MODE == "heuristic":
+        return False
+    if SPEAKER_DIARIZATION_MODE == "pyannote":
+        return True
+    return bool(_get_speaker_diarization_token())
+
+
+def _load_pyannote_pipeline() -> object | None:
+    global _pyannote_pipeline_cache
+    if not _should_use_pyannote():
+        return None
+
+    with _pyannote_pipeline_lock:
+        if _pyannote_pipeline_cache is not None:
+            return _pyannote_pipeline_cache
+
+        token = _get_speaker_diarization_token()
+        if not token:
+            return None
+
+        try:
+            import torch
+            from pyannote.audio import Pipeline
+        except Exception:
+            return None
+
+        try:
+            pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-community-1",
+                token=token,
+            )
+            if hasattr(pipeline, "to"):
+                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                pipeline.to(device)
+            _pyannote_pipeline_cache = pipeline
+            return pipeline
+        except Exception:
+            return None
+
+
 def _make_even(value: float) -> int:
     return max(2, int(round(value / 2) * 2))
+
+
+def _video_cache_key(video_url: str) -> str:
+    return hashlib.sha1(video_url.encode("utf-8")).hexdigest()[:16]
+
+
+def _cache_dir_for_url(video_url: str) -> Path:
+    return OUTPUT_CACHE_DIR / _video_cache_key(video_url)
+
+
+def _find_cached_video(video_url: str) -> Path | None:
+    if not CACHE_ENABLED:
+        return None
+
+    cache_dir = _cache_dir_for_url(video_url)
+    matches = sorted(cache_dir.glob("source.*"))
+    for match in matches:
+        if match.is_file():
+            return match
+    return None
+
+
+def _restore_cached_video(video_url: str, destination_base: Path) -> Path | None:
+    cached_video = _find_cached_video(video_url)
+    if cached_video is None:
+        return None
+
+    destination_path = destination_base.with_suffix(cached_video.suffix)
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(cached_video, destination_path)
+    return destination_path
+
+
+def _store_cached_video(video_url: str, video_path: Path) -> None:
+    if not CACHE_ENABLED or not video_path.exists():
+        return
+
+    cache_dir = _cache_dir_for_url(video_url)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    for existing in cache_dir.glob("source.*"):
+        existing.unlink(missing_ok=True)
+    shutil.copy2(video_path, cache_dir / f"source{video_path.suffix.lower()}")
+
+
+def _load_cached_transcript(video_url: str) -> dict | None:
+    if not CACHE_ENABLED:
+        return None
+
+    transcript_path = _cache_dir_for_url(video_url) / "transcript.json"
+    if not transcript_path.exists():
+        return None
+
+    try:
+        return json.loads(transcript_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _store_cached_transcript(video_url: str, transcript: dict) -> None:
+    if not CACHE_ENABLED:
+        return
+
+    cache_dir = _cache_dir_for_url(video_url)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    (cache_dir / "transcript.json").write_text(
+        json.dumps(transcript, ensure_ascii=True, indent=2),
+        encoding="utf-8",
+    )
 
 
 def _resolve_downloaded_video_path(destination_base: Path) -> Path:
@@ -862,6 +1027,119 @@ def _count_x_clusters(cx_values: list[float], threshold: float = 0.20) -> int:
             clusters += 1
         prev = v
     return clusters
+
+
+def _estimate_speaker_switches(cache: _FaceCache, src_w: int) -> int:
+    if not cache.per_frame_cx:
+        return 0
+
+    states: list[str] = []
+    for cx in cache.per_frame_cx:
+        if cx < src_w * 0.45:
+            states.append("left")
+        elif cx > src_w * 0.55:
+            states.append("right")
+        else:
+            states.append("center")
+
+    switches = 0
+    previous = states[0]
+    for state in states[1:]:
+        if state != previous and state != "center" and previous != "center":
+            switches += 1
+        previous = state
+    return switches
+
+
+def _estimate_speaker_balance(cache: _FaceCache, src_w: int) -> float | None:
+    if not cache.per_frame_cx:
+        return None
+
+    left = sum(1 for cx in cache.per_frame_cx if cx < src_w * 0.5)
+    right = sum(1 for cx in cache.per_frame_cx if cx >= src_w * 0.5)
+    total = left + right
+    if total == 0:
+        return None
+    return round(min(left, right) / total, 3)
+
+
+def _estimate_tracking_stability(cache: _FaceCache, src_w: int) -> float | None:
+    if len(cache.per_frame_cx) < 2:
+        return None
+    deltas = [abs(curr - prev) / max(1, src_w) for prev, curr in zip(cache.per_frame_cx, cache.per_frame_cx[1:])]
+    if not deltas:
+        return None
+    avg_delta = sum(deltas) / len(deltas)
+    return round(max(0.0, 1.0 - min(1.0, avg_delta * 3.2)), 3)
+
+
+def _augment_meta_with_speaker_data(meta: dict, content_type: str, clip: VideoFileClip) -> dict:
+    cache = _get_face_cache()
+    if cache is None or not cache.populated:
+        return meta
+
+    src_w, src_h = clip.size
+    enriched = dict(meta)
+    enriched["speakerCountEstimate"] = int(max(1, round(meta.get("avg_faces", 1) or 1)))
+    enriched["speakerTrackingMode"] = {
+        _CONTENT_SINGLE_SPEAKER: "smooth_pan",
+        _CONTENT_PODCAST_DUO: "duo_split",
+        _CONTENT_MEETING_GALLERY: "group_frame",
+        _CONTENT_SCREEN_SHARE_WITH_CAM: "pip_focus",
+        _CONTENT_NEWS_BROADCAST: "anchor_focus",
+    }.get(content_type, "fullframe")
+
+    if cache.face_cx is not None:
+        enriched["dominantSpeakerX"] = round(cache.face_cx / max(1, src_w), 4)
+    if cache.face_cy is not None:
+        enriched["dominantSpeakerY"] = round(cache.face_cy / max(1, src_h), 4)
+    if cache.face_bbox is not None:
+        x1, y1, x2, y2 = cache.face_bbox
+        enriched["speakerBBox"] = {
+            "x1": round(x1 / max(1, src_w), 4),
+            "y1": round(y1 / max(1, src_h), 4),
+            "x2": round(x2 / max(1, src_w), 4),
+            "y2": round(y2 / max(1, src_h), 4),
+        }
+    if cache.duo_positions is not None:
+        left_cx, right_cx = cache.duo_positions
+        enriched["speakerSlots"] = [round(left_cx / max(1, src_w), 4), round(right_cx / max(1, src_w), 4)]
+    enriched["speakerSwitches"] = _estimate_speaker_switches(cache, src_w)
+    enriched["speakerBalance"] = _estimate_speaker_balance(cache, src_w)
+    enriched["speakerTrackingStability"] = _estimate_tracking_stability(cache, src_w)
+    enriched["speakerTrackingSamples"] = len(cache.samples)
+    return enriched
+
+
+def _refine_content_type_with_speaker_data(
+    content_type: str,
+    meta: dict,
+    audio_speaker_meta: dict | None = None,
+) -> tuple[str, dict]:
+    adjusted = dict(meta)
+
+    if audio_speaker_meta:
+        adjusted.update(audio_speaker_meta)
+
+    if content_type == _CONTENT_PODCAST_DUO:
+        switches = int(adjusted.get("speakerSwitches") or 0)
+        balance = adjusted.get("speakerBalance")
+        audio_count = int(adjusted.get("audioSpeakerCount") or 0)
+        audio_confidence = float(adjusted.get("audioSpeakerConfidence") or 0.0)
+
+        if audio_count <= 1 and audio_confidence >= 0.5:
+            adjusted["speaker_layout_override"] = "audio_single"
+            adjusted["speaker_override_reason"] = "Audio analysis suggests one dominant speaker."
+            adjusted["confidence"] = round(max(0.25, float(adjusted.get("confidence") or 0.5) - 0.12), 2)
+            return _CONTENT_SINGLE_SPEAKER, adjusted
+
+        if balance is not None and balance < 0.12 and switches <= 1:
+            adjusted["speaker_layout_override"] = "dominant_single"
+            adjusted["speaker_override_reason"] = "Duo candidate is visually dominated by one speaker."
+            adjusted["confidence"] = round(max(0.25, float(adjusted.get("confidence") or 0.5) - 0.18), 2)
+            return _CONTENT_SINGLE_SPEAKER, adjusted
+
+    return content_type, adjusted
 
 
 _CONTENT_LABELS = {
@@ -1696,7 +1974,7 @@ def _ensure_output_size(clip: VideoFileClip, label: str = "") -> VideoFileClip:
         return clip.resized(new_size=(OUTPUT_WIDTH, OUTPUT_HEIGHT))
 
 
-def build_vertical_master_clip(clip: VideoFileClip) -> tuple[VideoFileClip, str, dict]:
+def build_vertical_master_clip(clip: VideoFileClip, audio_speaker_meta: dict | None = None) -> tuple[VideoFileClip, str, dict]:
     """Build a 9:16 vertical clip using adaptive composition.
 
     Classifies the visual content type, populates a face cache, then delegates
@@ -1730,6 +2008,8 @@ def build_vertical_master_clip(clip: VideoFileClip) -> tuple[VideoFileClip, str,
               f"text={meta.get('avg_text',0):.3f}  motion={meta.get('avg_motion',0):.4f}  "
               f"clusters={meta.get('cx_clusters',0)}  scene_transitions={meta.get('scene_change_transitions',0)}")
 
+        meta = _augment_meta_with_speaker_data(meta, content_type, clip)
+        content_type, meta = _refine_content_type_with_speaker_data(content_type, meta, audio_speaker_meta)
         meta["layout_fallback"] = False
 
         # Route to specialised layout
@@ -1770,6 +2050,7 @@ def write_high_quality_video(
     clip: VideoFileClip,
     output_path: str | Path,
     audio_path: Path | None = None,
+    render_profile: str = DEFAULT_RENDER_PROFILE,
 ) -> None:
     """Write the clip to disk.
 
@@ -1786,11 +2067,13 @@ def write_high_quality_video(
     keyint = str(fps * 1)
     keyint_min = str(fps)
     output_path = Path(output_path)
+    render_settings = _get_render_profile_settings(render_profile)
 
     base_ffmpeg_params = [
-        "-crf", VIDEO_CRF,
-        "-maxrate", VIDEO_MAXRATE,
-        "-bufsize", VIDEO_BUFSIZE,
+        "-crf", render_settings["video_crf"],
+        "-b:v", render_settings["video_bitrate"],
+        "-maxrate", render_settings["video_maxrate"],
+        "-bufsize", render_settings["video_bufsize"],
         "-movflags", "+faststart",
         "-pix_fmt", "yuv420p",
         "-profile:v", "high",
@@ -1810,7 +2093,7 @@ def write_high_quality_video(
                 audio=False,
                 fps=fps,
                 threads=RENDER_THREADS,
-                preset=VIDEO_PRESET,
+                preset=render_settings["video_preset"],
                 ffmpeg_params=base_ffmpeg_params,
                 logger=None,
             )
@@ -1823,7 +2106,7 @@ def write_high_quality_video(
                     "-i", str(audio_path),
                     "-c:v", "copy",
                     "-c:a", "aac",
-                    "-b:a", VIDEO_AUDIO_BITRATE,
+                    "-b:a", render_settings["audio_bitrate"],
                     "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
                     "-movflags", "+faststart",
                     "-shortest",
@@ -1847,9 +2130,9 @@ def write_high_quality_video(
             codec="libx264",
             audio_codec="aac" if clip.audio is not None else None,
             fps=fps,
-            audio_bitrate=VIDEO_AUDIO_BITRATE,
+            audio_bitrate=render_settings["audio_bitrate"],
             threads=RENDER_THREADS,
-            preset=VIDEO_PRESET,
+            preset=render_settings["video_preset"],
             ffmpeg_params=base_ffmpeg_params,
             logger=None,
         )
@@ -1983,6 +2266,192 @@ def transcribe_clip_for_subtitles(clip: VideoFileClip, output_dir: Path, clip_in
     finally:
         if audio_path.exists():
             audio_path.unlink()
+
+
+def _load_wav_mono(audio_path: Path) -> tuple[int, "_np.ndarray"] | None:
+    try:
+        with wave.open(str(audio_path), "rb") as wav_file:
+            channels = wav_file.getnchannels()
+            sample_width = wav_file.getsampwidth()
+            frame_rate = wav_file.getframerate()
+            frame_count = wav_file.getnframes()
+            raw = wav_file.readframes(frame_count)
+    except (wave.Error, OSError):
+        return None
+
+    if sample_width != 2:
+        return None
+
+    audio = _np.frombuffer(raw, dtype=_np.int16).astype(_np.float32)
+    if channels > 1:
+        audio = audio.reshape(-1, channels).mean(axis=1)
+    audio /= 32768.0
+    return frame_rate, audio
+
+
+def _extract_audio_features(samples: "_np.ndarray", sample_rate: int) -> list[float]:
+    if len(samples) == 0:
+        return [0.0] * 6
+
+    window = samples - float(samples.mean())
+    rms = float(_np.sqrt(_np.mean(window ** 2)))
+    zcr = float(_np.mean(_np.abs(_np.diff(_np.signbit(window).astype(_np.int8)))))
+
+    spectrum = _np.abs(_np.fft.rfft(window * _np.hanning(len(window))))
+    freqs = _np.fft.rfftfreq(len(window), d=1.0 / sample_rate)
+    spec_sum = float(spectrum.sum()) or 1.0
+    centroid = float((freqs * spectrum).sum() / spec_sum)
+    cumulative = _np.cumsum(spectrum)
+    rolloff = float(freqs[min(len(freqs) - 1, int(_np.searchsorted(cumulative, spec_sum * 0.85)))])
+    peak_freq = float(freqs[int(_np.argmax(spectrum))]) if len(freqs) else 0.0
+    flatness = float(_np.exp(_np.mean(_np.log(spectrum + 1e-9))) / (_np.mean(spectrum + 1e-9) + 1e-9))
+
+    return [rms, zcr, centroid / 4000.0, rolloff / 4000.0, peak_freq / 4000.0, flatness]
+
+
+def _cluster_audio_segments(feature_rows: "_np.ndarray") -> tuple[list[int], float]:
+    if len(feature_rows) < 4:
+        return [0] * len(feature_rows), 0.0
+
+    centroids = _np.array([feature_rows[0], feature_rows[-1]], dtype=_np.float32)
+    labels = _np.zeros(len(feature_rows), dtype=_np.int32)
+
+    for _ in range(10):
+        distances = _np.linalg.norm(feature_rows[:, None, :] - centroids[None, :, :], axis=2)
+        new_labels = distances.argmin(axis=1)
+        if _np.array_equal(labels, new_labels):
+            break
+        labels = new_labels
+        for cluster_index in range(2):
+            members = feature_rows[labels == cluster_index]
+            if len(members) > 0:
+                centroids[cluster_index] = members.mean(axis=0)
+
+    counts = [_np.sum(labels == 0), _np.sum(labels == 1)]
+    if min(counts) < 2:
+        return labels.tolist(), 0.0
+
+    separation = float(_np.linalg.norm(centroids[0] - centroids[1]))
+    intra = 0.0
+    for cluster_index in range(2):
+        members = feature_rows[labels == cluster_index]
+        intra += float(_np.linalg.norm(members - centroids[cluster_index], axis=1).mean())
+    confidence = separation / max(0.05, intra)
+    return labels.tolist(), round(confidence, 3)
+
+
+def _analyze_audio_speakers_pyannote(audio_path: Path) -> dict | None:
+    pipeline = _load_pyannote_pipeline()
+    if pipeline is None:
+        return None
+
+    try:
+        diarization = pipeline(str(audio_path))
+    except Exception:
+        return None
+
+    assignments = []
+    speakers: list[str] = []
+    previous_speaker = None
+    switches = 0
+    for turn, _, speaker in diarization.itertracks(yield_label=True):
+        speaker_label = str(speaker)
+        assignments.append(
+            {
+                "start": round(float(turn.start), 3),
+                "end": round(float(turn.end), 3),
+                "speaker": speaker_label,
+            }
+        )
+        if speaker_label not in speakers:
+            speakers.append(speaker_label)
+        if previous_speaker is not None and previous_speaker != speaker_label:
+            switches += 1
+        previous_speaker = speaker_label
+
+    if not assignments:
+        return None
+
+    return {
+        "audioSpeakerCount": len(speakers),
+        "audioSpeakerSwitches": switches,
+        "audioSpeakerConfidence": 0.92 if len(speakers) > 1 else 0.75,
+        "audioSpeakerAssignments": assignments,
+        "audioSpeakerProvider": "pyannote",
+    }
+
+
+def analyze_audio_speakers(audio_path: Path | None, transcript: dict) -> dict:
+    if audio_path is None or not audio_path.exists():
+        return {"audioSpeakerCount": 0, "audioSpeakerSwitches": 0, "audioSpeakerConfidence": 0.0, "audioSpeakerProvider": "none"}
+
+    pyannote_result = _analyze_audio_speakers_pyannote(audio_path)
+    if pyannote_result is not None:
+        return pyannote_result
+
+    loaded = _load_wav_mono(audio_path)
+    if loaded is None:
+        return {"audioSpeakerCount": 0, "audioSpeakerSwitches": 0, "audioSpeakerConfidence": 0.0, "audioSpeakerProvider": "none"}
+
+    sample_rate, audio = loaded
+    segment_rows: list[dict] = []
+    for index, segment in enumerate(transcript.get("segments") or []):
+        try:
+            start = max(0.0, float(segment.get("start") or 0.0))
+            end = max(start + 0.01, float(segment.get("end") or 0.0))
+        except (TypeError, ValueError):
+            continue
+
+        if end - start < 0.45:
+            continue
+
+        start_idx = int(start * sample_rate)
+        end_idx = min(len(audio), int(end * sample_rate))
+        samples = audio[start_idx:end_idx]
+        if len(samples) < int(sample_rate * 0.35):
+            continue
+
+        segment_rows.append(
+            {
+                "index": index,
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "features": _extract_audio_features(samples, sample_rate),
+            }
+        )
+
+    if len(segment_rows) < 4:
+        return {"audioSpeakerCount": 1, "audioSpeakerSwitches": 0, "audioSpeakerConfidence": 0.0, "audioSpeakerProvider": "heuristic"}
+
+    feature_matrix = _np.array([row["features"] for row in segment_rows], dtype=_np.float32)
+    means = feature_matrix.mean(axis=0)
+    stds = feature_matrix.std(axis=0) + 1e-6
+    normalized = (feature_matrix - means) / stds
+    labels, confidence = _cluster_audio_segments(normalized)
+
+    switches = 0
+    for prev, curr in zip(labels, labels[1:]):
+        if prev != curr:
+            switches += 1
+
+    speaker_count = 2 if confidence >= 1.15 and switches >= 1 else 1
+    assignments = []
+    for row, label in zip(segment_rows, labels):
+        assignments.append(
+            {
+                "start": row["start"],
+                "end": row["end"],
+                "speaker": f"S{label + 1 if speaker_count > 1 else 1}",
+            }
+        )
+
+    return {
+        "audioSpeakerCount": speaker_count,
+        "audioSpeakerSwitches": switches if speaker_count > 1 else 0,
+        "audioSpeakerConfidence": confidence if speaker_count > 1 else round(confidence * 0.4, 3),
+        "audioSpeakerAssignments": assignments,
+        "audioSpeakerProvider": "heuristic",
+    }
 
 
 def _slice_segment_words(words: list[dict], clip_start_time: float, clip_end_time: float) -> list[dict]:
@@ -2217,11 +2686,14 @@ def parse_gemini_responses(text: str) -> list[dict]:
     return []
 
 
-def create_output_dir(base_dir: str | Path = OUTPUTS_DIR, job_id: str | None = None) -> tuple[str, Path]:
+def create_output_dir(base_dir: str | Path = OUTPUT_JOBS_DIR, job_id: str | None = None) -> tuple[str, Path]:
     job_id = job_id or uuid.uuid4().hex[:10]
     output_dir = Path(base_dir) / job_id
+    (output_dir / "source").mkdir(parents=True, exist_ok=True)
+    (output_dir / "audio").mkdir(parents=True, exist_ok=True)
     (output_dir / "clips").mkdir(parents=True, exist_ok=True)
     (output_dir / "meta").mkdir(parents=True, exist_ok=True)
+    (output_dir / "diagnostics").mkdir(parents=True, exist_ok=True)
     return job_id, output_dir
 
 
@@ -2229,25 +2701,31 @@ def create_short_from_url(
     video_url: str,
     api_key: str,
     output_filename: str = "short_con_subs.mp4",
-    base_dir: str | Path = OUTPUTS_DIR,
+    base_dir: str | Path = OUTPUT_JOBS_DIR,
     job_id: str | None = None,
     progress_callback: ProgressCallback | None = None,
     subtitle_style: dict | None = None,
     clip_count: int = DEFAULT_CLIP_COUNT,
+    render_profile: str = DEFAULT_RENDER_PROFILE,
 ) -> dict:
     video_url = validate_video_url(video_url)
     output_filename = sanitize_output_filename(output_filename)
     subtitle_style = normalize_requested_subtitle_style(subtitle_style)
+    render_profile = normalize_requested_render_profile(render_profile)
+    render_settings = _get_render_profile_settings(render_profile)
 
     ensure_dependencies()
     _emit(progress_callback, "validating", "Checking subtitle rendering compatibility...")
     subtitles.assert_subtitle_rendering_ready(subtitle_style)
 
     job_id, output_dir = create_output_dir(base_dir=base_dir, job_id=job_id)
+    source_dir = output_dir / "source"
+    audio_dir = output_dir / "audio"
     meta_dir = output_dir / "meta"
     clips_dir = output_dir / "clips"
+    diagnostics_dir = output_dir / "diagnostics"
     transcript_path = meta_dir / "full_transcript.txt"
-    temp_base = output_dir / "video_temp"
+    temp_base = source_dir / "source_video"
 
     video_path = None
     source_video = None
@@ -2256,12 +2734,22 @@ def create_short_from_url(
     clip_final = None
 
     try:
-        _emit(progress_callback, "downloading", "Downloading the highest-quality source video and audio from YouTube...")
-        video_path = download_video(video_url, temp_base, progress_callback)
+        video_path = _restore_cached_video(video_url, temp_base)
+        if video_path is not None:
+            _emit(progress_callback, "downloading", "Reusing cached source video from a previous local run...")
+        else:
+            _emit(progress_callback, "downloading", "Downloading the highest-quality source video and audio from YouTube...")
+            video_path = download_video(video_url, temp_base, progress_callback)
+            _store_cached_video(video_url, video_path)
 
-        _emit(progress_callback, "transcribing", f"Transcribing full video once with Whisper ({_get_whisper_model_candidates()[0]}) for analysis and subtitles...")
-        result = transcribe_video_fast(video_path)
-        _emit(progress_callback, "transcribing", f"Transcription complete. Found {len(result.get('segments') or [])} segments.")
+        result = _load_cached_transcript(video_url)
+        if result is not None:
+            _emit(progress_callback, "transcribing", "Reusing cached transcript from a previous local run...")
+        else:
+            _emit(progress_callback, "transcribing", f"Transcribing full video once with Whisper ({_get_whisper_model_candidates()[0]}) for analysis and subtitles...")
+            result = transcribe_video_fast(video_path)
+            _store_cached_transcript(video_url, result)
+            _emit(progress_callback, "transcribing", f"Transcription complete. Found {len(result.get('segments') or [])} segments.")
 
         transcript_path.write_text(
             f"URL: {video_url}\n{result['text']}", encoding="utf-8"
@@ -2308,31 +2796,34 @@ def create_short_from_url(
             _emit(progress_callback, "rendering", f"Rendering clip {index} of {len(clip_candidates)}...")
             clip = source_video.subclipped(start, end)
 
-            _emit(progress_callback, "rendering", f"Analysing visual content for clip {index}...")
-            clip_vertical, content_type, clip_analytics = build_vertical_master_clip(clip)
-            ct_label = _CONTENT_LABELS.get(content_type, content_type)
-            _emit(progress_callback, "rendering", f"Clip {index} detected as {ct_label} — composing vertical frame...")
-
             # Pre-extract audio to a WAV file via direct FFmpeg.
             # Audio is muxed in by write_high_quality_video (2-pass) so that
             # MoviePy's FFMPEG_AudioReader is never used during the render,
             # preventing the proc=None crash on long clips.
             audio_temp_path: Path | None = None
             if clip.audio is not None:
-                audio_temp_path = _extract_audio_segment(video_path, start, end, output_dir)
+                audio_temp_path = _extract_audio_segment(video_path, start, end, audio_dir)
 
             _emit(progress_callback, "rendering", f"Preparing subtitle timing for clip {index}...")
             clip_transcript, requires_precise_fallback = extract_clip_transcript_from_full(result, start, end)
             if requires_precise_fallback:
                 _emit(progress_callback, "rendering", f"Refining subtitle timing for clip {index}...")
-                clip_transcript = transcribe_clip_for_subtitles(clip, output_dir, index)
+                clip_transcript = transcribe_clip_for_subtitles(clip, audio_dir, index)
+
+            audio_speaker_meta = analyze_audio_speakers(audio_temp_path, clip_transcript)
+
+            _emit(progress_callback, "rendering", f"Analysing visual content for clip {index}...")
+            clip_vertical, content_type, clip_analytics = build_vertical_master_clip(clip, audio_speaker_meta=audio_speaker_meta)
+            clip_analytics.update(audio_speaker_meta)
+            ct_label = _CONTENT_LABELS.get(content_type, content_type)
+            _emit(progress_callback, "rendering", f"Clip {index} detected as {ct_label} — composing vertical frame...")
 
             subtitle_plan = subtitles.build_subtitle_plan(
                 clip_transcript.get("segments") or [],
                 0,
                 clip_vertical.duration,
             )
-            subtitle_plan_path = meta_dir / f"clip_{index:02d}_subtitles.json"
+            subtitle_plan_path = diagnostics_dir / f"clip_{index:02d}_subtitles.json"
             subtitle_plan_path.write_text(
                 json.dumps(subtitles.export_subtitle_plan(subtitle_plan), ensure_ascii=True, indent=2),
                 encoding="utf-8",
@@ -2342,7 +2833,7 @@ def create_short_from_url(
                 subtitle_plan,
                 subtitle_style,
             )
-            subtitle_preflight_path = meta_dir / f"clip_{index:02d}_subtitle_preflight.json"
+            subtitle_preflight_path = diagnostics_dir / f"clip_{index:02d}_subtitle_preflight.json"
             subtitle_preflight_path.write_text(
                 json.dumps(subtitle_preflight, ensure_ascii=True, indent=2),
                 encoding="utf-8",
@@ -2357,7 +2848,12 @@ def create_short_from_url(
                 clip_title=clip_data.get("title"),
                 clip_reason=clip_data.get("reason"),
             )
-            write_high_quality_video(clip_final, output_path, audio_path=audio_temp_path)
+            write_high_quality_video(
+                clip_final,
+                output_path,
+                audio_path=audio_temp_path,
+                render_profile=render_profile,
+            )
 
             clips_output.append(
                 {
@@ -2401,7 +2897,8 @@ def create_short_from_url(
             "outputPath": first_clip["outputPath"],
             "transcriptPath": str(transcript_path),
             "outputDir": str(output_dir),
-            "renderProfile": RENDER_PROFILE_LABEL,
+            "renderProfile": render_settings["label"],
+            "renderProfileKey": render_profile,
             "clips": clips_output,
             "clipCount": len(clips_output),
         }
