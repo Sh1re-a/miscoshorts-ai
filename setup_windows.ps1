@@ -558,7 +558,7 @@ function Invoke-Setup {
     Write-SetupDone "Python is ready."
     $null = Ensure-Ffmpeg
     Write-SetupDone "FFmpeg is ready."
-    $pythonDepsSignature = Get-StateSignature @("requirements.txt", "app")
+    $pythonDepsSignature = Get-StateSignature @("requirements.txt", "requirements-optional.txt", "app")
     $frontendDepsSignature = Get-StateSignature @("frontend/package.json", "frontend/package-lock.json")
     $frontendBuildSignature = Get-StateSignature @("frontend/src", "frontend/index.html", "frontend/package.json", "frontend/vite.config.ts")
 
@@ -580,6 +580,10 @@ function Invoke-Setup {
     if (-not (Test-StateMatch $pythonDepsStamp $pythonDepsSignature)) {
         Write-SetupAction "Installing Python packages ..."
         Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "--quiet", "-r", "requirements.txt") "Installing Python dependencies failed."
+        if (Test-Path (Join-Path $root "requirements-optional.txt")) {
+            Write-SetupAction "Installing free pro add-ons ..."
+            Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "--quiet", "-r", "requirements-optional.txt") "Installing optional pro dependencies failed."
+        }
         Write-StateValue $pythonDepsStamp $pythonDepsSignature
         Write-SetupDone "Python packages are up to date."
     }

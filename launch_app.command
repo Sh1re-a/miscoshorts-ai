@@ -53,6 +53,7 @@ sha_file() {
 
 deps_signature() {
 	sha_file requirements.txt
+	sha_file requirements-optional.txt
 }
 
 frontend_signature() {
@@ -142,6 +143,10 @@ if stamp_matches "$PYTHON_DEPS_STAMP" "$CURRENT_SIGNATURE"; then
 else
 	action "Installing Python packages..."
 	"$VENV_PYTHON" -m pip install --disable-pip-version-check --quiet -r requirements.txt >> "$LOG_PATH" 2>&1 || fail "pip install failed. Check $LOG_PATH for details."
+	if [[ -f "requirements-optional.txt" ]]; then
+		action "Installing free pro add-ons..."
+		"$VENV_PYTHON" -m pip install --disable-pip-version-check --quiet -r requirements-optional.txt >> "$LOG_PATH" 2>&1 || fail "Optional pro dependency install failed. Check $LOG_PATH for details."
+	fi
 	echo "$CURRENT_SIGNATURE" > "$PYTHON_DEPS_STAMP"
 	done_msg "Python packages installed"
 fi
