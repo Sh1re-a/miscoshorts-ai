@@ -28,6 +28,8 @@ function App() {
   const [hasConfiguredApiKey, setHasConfiguredApiKey] = useState(false)
   const [renderProfiles, setRenderProfiles] = useState<Record<string, string>>(fallbackRenderProfiles)
   const [selectedRenderProfile, setSelectedRenderProfile] = useState(fallbackRenderProfile)
+  const [speakerMode, setSpeakerMode] = useState('auto')
+  const [hasPyannoteToken, setHasPyannoteToken] = useState(false)
   const [selectedFontPreset, setSelectedFontPreset] = useState<'soft' | 'clean' | 'bold'>('soft')
   const [selectedColorPreset, setSelectedColorPreset] = useState<'editorial' | 'ivory' | 'mint' | 'sun'>('editorial')
   const [previewTitle, setPreviewTitle] = useState('A calm, premium headline')
@@ -61,6 +63,8 @@ function App() {
           setHasConfiguredApiKey(payload.hasConfiguredApiKey)
           setRenderProfiles(payload.renderProfiles)
           setSelectedRenderProfile(payload.defaultRenderProfile || fallbackRenderProfile)
+          setSpeakerMode(payload.speakerDiarizationMode)
+          setHasPyannoteToken(payload.hasPyannoteToken)
         }
       } catch {
         // Keep the app usable even if the bootstrap request fails.
@@ -396,6 +400,10 @@ function App() {
                   <p className="font-semibold text-slate-900">{currentRenderProfileLabel}</p>
                   <p className="mt-2">The app runs a focused Shorts workflow: centered reframing, strong H.264 export settings, AAC audio, and calmer editorial subtitles with a more premium header.</p>
                   <p className="mt-2">Keep the launcher window open while the job runs. Finished files appear here and in the local outputs folder.</p>
+                  <p className="mt-2 text-slate-500">
+                    Speaker engine: {hasPyannoteToken ? 'Pyannote when available, otherwise local heuristic' : 'Local heuristic speaker analysis'}.
+                    Current mode: {speakerMode}.
+                  </p>
                 </div>
 
                 <div className="space-y-2">

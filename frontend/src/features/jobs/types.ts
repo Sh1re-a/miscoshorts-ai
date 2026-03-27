@@ -83,4 +83,6 @@ export type BootstrapPayload = {
   frontendBuilt: boolean
   defaultRenderProfile: string
   renderProfiles: Record<string, string>
+  speakerDiarizationMode: string
+  hasPyannoteToken: boolean
 }

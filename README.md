@@ -92,6 +92,23 @@ Optional server-oriented environment variables:
 - `SPEAKER_DIARIZATION_MODE` to choose `auto`, `heuristic`, or `pyannote`
 - `PYANNOTE_AUTH_TOKEN` or `HF_TOKEN` to enable optional higher-accuracy pyannote diarization
 
+## Free Pro Stack
+
+For the strongest free local setup:
+
+- keep `yt-dlp` on the default highest-quality source format
+- use the `studio` render profile for final exports
+- keep `LOCAL_CACHE_ENABLED=1` so repeat runs are faster
+- install optional diarization support with `pip install -r requirements-optional.txt`
+- set `PYANNOTE_AUTH_TOKEN` and keep `SPEAKER_DIARIZATION_MODE=auto`
+
+That gives you:
+
+- free local Whisper transcription
+- free local heuristic speaker analysis by default
+- optional higher-accuracy local pyannote diarization when available
+- higher-quality H.264 exports with stronger rate control and AAC audio
+
 The Python Gemini integration now uses the supported `google-genai` SDK.
 
 For packaged Windows releases that already include `frontend/dist`, Node.js is not required for the end user.

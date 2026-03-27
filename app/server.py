@@ -307,6 +307,10 @@ def bootstrap():
             "frontendBuilt": FRONTEND_DIST_DIR.exists(),
             "defaultRenderProfile": normalize_requested_render_profile(None),
             "renderProfiles": {key: profile["label"] for key, profile in RENDER_PROFILES.items()},
+            "speakerDiarizationMode": os.getenv("SPEAKER_DIARIZATION_MODE", "auto").strip().lower() or "auto",
+            "hasPyannoteToken": bool(
+                (os.getenv("PYANNOTE_AUTH_TOKEN") or os.getenv("HUGGINGFACE_ACCESS_TOKEN") or os.getenv("HF_TOKEN") or "").strip()
+            ),
         }
     )
 

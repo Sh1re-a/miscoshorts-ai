@@ -306,6 +306,15 @@ def _load_pyannote_pipeline() -> object | None:
             return None
 
 
+def _speaker_analysis_backend_label(audio_meta: dict) -> str:
+    provider = str(audio_meta.get("audioSpeakerProvider") or "none")
+    if provider == "pyannote":
+        return "Pyannote diarization"
+    if provider == "heuristic":
+        return "Local heuristic diarization"
+    return "Speaker analysis unavailable"
+
+
 def _make_even(value: float) -> int:
     return max(2, int(round(value / 2) * 2))
 
@@ -2081,6 +2090,7 @@ def write_high_quality_video(
         "-g", keyint,
         "-keyint_min", keyint_min,
         "-sc_threshold", "0",
+        "-x264-params", "aq-mode=3:aq-strength=0.9:deblock=-1,-1",
     ]
 
     if audio_path is not None and Path(audio_path).exists():
@@ -2811,6 +2821,12 @@ def create_short_from_url(
                 clip_transcript = transcribe_clip_for_subtitles(clip, audio_dir, index)
 
             audio_speaker_meta = analyze_audio_speakers(audio_temp_path, clip_transcript)
+            _emit(
+                progress_callback,
+                "rendering",
+                f"Speaker analysis for clip {index}: {_speaker_analysis_backend_label(audio_speaker_meta)} "
+                f"({audio_speaker_meta.get('audioSpeakerCount', 0)} speaker estimate).",
+            )
 
             _emit(progress_callback, "rendering", f"Analysing visual content for clip {index}...")
             clip_vertical, content_type, clip_analytics = build_vertical_master_clip(clip, audio_speaker_meta=audio_speaker_meta)
