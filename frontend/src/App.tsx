@@ -10,7 +10,7 @@ import { Label } from './components/ui/label'
 import { Progress } from './components/ui/progress'
 import { feedbackTags, progressByStatus, stageDescriptions, statusTitles } from './features/jobs/config'
 import type { AnalyticsInsights, BootstrapPayload, ClipFeedback, JobPayload, JobStatus } from './features/jobs/types'
-import { apiKeyStorageKey, formatEta, formatLogTime, getEtaWindow, loadSavedApiKey } from './features/jobs/utils'
+import { apiKeyStorageKey, formatEta, formatLogTime, getEtaWindow, loadSavedApiKey, readJsonResponse } from './features/jobs/utils'
 
 const fallbackRenderProfile = 'studio'
 const fallbackRenderProfiles = {
@@ -50,7 +50,7 @@ function App() {
           return
         }
 
-        const payload = (await response.json()) as BootstrapPayload
+        const payload = await readJsonResponse<BootstrapPayload>(response)
         if (!cancelled) {
           setHasConfiguredApiKey(payload.hasConfiguredApiKey)
           setRenderProfiles(payload.renderProfiles ?? fallbackRenderProfiles)
@@ -76,7 +76,7 @@ function App() {
     }
 
     const response = await fetch(`/api/jobs/${jobId}`)
-    const payload = (await response.json()) as JobPayload
+    const payload = await readJsonResponse<JobPayload>(response)
 
     if (!response.ok) {
       throw new Error(payload.error ?? 'Could not load job status.')
@@ -216,7 +216,7 @@ function App() {
     try {
       const res = await fetch('/api/analytics')
       if (res.ok) {
-        setAnalyticsData(await res.json() as AnalyticsInsights)
+        setAnalyticsData(await readJsonResponse<AnalyticsInsights>(res))
       }
     } catch {
       // silently fail
@@ -256,7 +256,7 @@ function App() {
         }),
       })
 
-      const payload = (await response.json()) as { jobId?: string; error?: string; status?: JobStatus; clipCount?: number; queuePosition?: number; renderProfile?: string }
+      const payload = await readJsonResponse<{ jobId?: string; error?: string; status?: JobStatus; clipCount?: number; queuePosition?: number; renderProfile?: string }>(response)
 
       if (!response.ok || !payload.jobId) {
         throw new Error(payload.error ?? 'Could not start the job.')

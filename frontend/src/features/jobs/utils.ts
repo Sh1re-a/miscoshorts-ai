@@ -10,6 +10,20 @@ export function loadSavedApiKey() {
   }
 }
 
+export async function readJsonResponse<T>(response: Response): Promise<T> {
+  const raw = await response.text()
+
+  try {
+    return JSON.parse(raw) as T
+  } catch {
+    const snippet = raw.trim().slice(0, 180)
+    if (snippet.startsWith('<!doctype html') || snippet.startsWith('<html')) {
+      throw new Error('The local app returned HTML instead of API JSON. Restart the app from launch_app.command and refresh the page.')
+    }
+    throw new Error(snippet || `The local app returned an unreadable response (${response.status}).`)
+  }
+}
+
 export function formatLogTime(timestamp: number) {
   return new Intl.DateTimeFormat('sv-SE', {
     hour: '2-digit',
