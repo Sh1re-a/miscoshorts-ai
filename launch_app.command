@@ -22,8 +22,8 @@ PYTHON_OPTIONAL_STAMP="$SETUP_DIR/python-optional.state"
 FRONTEND_DEPS_STAMP="$SETUP_DIR/frontend-deps.state"
 FRONTEND_BUILD_STAMP="$SETUP_DIR/frontend-build.state"
 MODEL_CACHE_DIR="$RUNTIME_DIR/model-cache"
-WHISPER_SMALL_DOWNLOAD_BYTES=$((486 * 1024 * 1024))
-WHISPER_BASE_DOWNLOAD_BYTES=$((148 * 1024 * 1024))
+WHISPER_DISTIL_LARGE_V3_DOWNLOAD_BYTES=$((1536 * 1024 * 1024))
+WHISPER_LARGE_V3_DOWNLOAD_BYTES=$((3100 * 1024 * 1024))
 
 STEP=0
 TOTAL_STEPS=4
@@ -260,8 +260,9 @@ info "Opening the local app in your browser. Keep this window open."
 if dir_has_files "$MODEL_CACHE_DIR/whisper"; then
 	reuse "existing local speech-model cache"
 else
-	action "First transcription will download the local speech model into the private cache."
-	info "Planned model order: small first ($(format_bytes "$WHISPER_SMALL_DOWNLOAD_BYTES")), then base fallback ($(format_bytes "$WHISPER_BASE_DOWNLOAD_BYTES")) only if needed."
+	action "First transcription will download the configured Whisper model into the private cache."
+	info "Planned model order: distil-large-v3 first ($(format_bytes "$WHISPER_DISTIL_LARGE_V3_DOWNLOAD_BYTES")), then large-v3 fallback ($(format_bytes "$WHISPER_LARGE_V3_DOWNLOAD_BYTES")) only if needed."
+	info "If the cache was deleted, the same configured model will be downloaded again automatically."
 fi
 HF_HOME="$MODEL_CACHE_DIR/huggingface" \
 XDG_CACHE_HOME="$MODEL_CACHE_DIR/xdg" \

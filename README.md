@@ -33,7 +33,7 @@ On macOS, `launch_app.command` now prefers the built app when `frontend/dist` is
 
 The launcher stores internal runtime files inside `.miscoshorts/` so the main project folder stays cleaner.
 
-Speech models are also kept inside `.miscoshorts/runtime/model-cache/` now, not in a giant shared global cache. If a tester deletes that folder by mistake, the app just downloads the smaller default speech model again on the next run.
+Speech models are also kept inside `.miscoshorts/runtime/model-cache/` now, not in a giant shared global cache. If a tester deletes that folder by mistake, the app downloads the same configured Whisper model again on the next run.
 
 If the folder already contains `frontend/dist`, the launcher uses that built app directly and skips Node.js completely.
 
@@ -94,7 +94,7 @@ Optional server-oriented environment variables:
 - `SPEAKER_DIARIZATION_MODE` to choose `auto`, `heuristic`, or `pyannote`
 - `PYANNOTE_AUTH_TOKEN` or `HF_TOKEN` to enable optional higher-accuracy pyannote diarization
 - `WHISPER_BACKEND` to choose `auto`, `faster-whisper`, or `openai-whisper`
-- `WHISPER_MODEL` to choose the local speech model order. The default is `small,base` for a better quality-to-size balance on customer machines.
+- `WHISPER_MODEL` to choose the local speech model order. The default is `distil-large-v3,large-v3` so quality stays high by default.
 
 ## Free Pro Stack
 
@@ -105,7 +105,7 @@ For the strongest free local setup:
 - keep `LOCAL_CACHE_ENABLED=1` so repeat runs are faster
 - install optional diarization support with `pip install -r requirements-optional.txt`
 - let transcription default to `faster-whisper`
-- keep the default `WHISPER_MODEL=small,base` unless you specifically want a larger model on a stronger machine
+- keep the default `WHISPER_MODEL=distil-large-v3,large-v3` if you want the stronger standard quality path
 - set `PYANNOTE_AUTH_TOKEN` and keep `SPEAKER_DIARIZATION_MODE=auto`
 
 That gives you:

@@ -44,8 +44,8 @@ $frontendDepsStamp = Join-Path $stateDir "frontend-deps.state"
 $frontendBuildStamp = Join-Path $stateDir "frontend-build.state"
 $script:SetupStep = 0
 $script:SetupStartedAt = Get-Date
-$whisperSmallDownloadBytes = 486MB
-$whisperBaseDownloadBytes = 148MB
+$whisperDistilLargeV3DownloadBytes = 1536MB
+$whisperLargeV3DownloadBytes = 3100MB
 
 function Show-FailureAndExit($message) {
     Write-Host ""
@@ -744,8 +744,9 @@ function Invoke-Setup {
         Write-SetupReuse "existing local speech-model cache"
     }
     else {
-        Write-SetupInfo "First transcription will download the local speech model into the private cache."
-        Write-SetupInfo ("Planned model order: small first ({0}), then base fallback ({1}) only if needed." -f (Format-ByteSize $whisperSmallDownloadBytes), (Format-ByteSize $whisperBaseDownloadBytes))
+        Write-SetupInfo "First transcription will download the configured Whisper model into the private cache."
+        Write-SetupInfo ("Planned model order: distil-large-v3 first ({0}), then large-v3 fallback ({1}) only if needed." -f (Format-ByteSize $whisperDistilLargeV3DownloadBytes), (Format-ByteSize $whisperLargeV3DownloadBytes))
+        Write-SetupInfo "If the cache was deleted, the same configured model will be downloaded again automatically."
     }
     Write-SetupSummary "Setup finished in $([math]::Max(1, [int][math]::Round($elapsed.TotalSeconds))) seconds."
 

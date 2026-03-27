@@ -174,7 +174,7 @@ DOWNLOAD_FORMAT_SORT = [
     for field in os.getenv("YTDLP_FORMAT_SORT", "res,fps,hdr:12,vcodec:h264,acodec:aac").split(",")
     if field.strip()
 ]
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small,base")
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "distil-large-v3,large-v3")
 WHISPER_BACKEND = os.getenv("WHISPER_BACKEND", "auto").strip().lower() or "auto"
 WHISPER_MODEL_CACHE_DIR = Path(os.getenv("WHISPER_MODEL_CACHE_DIR", str(MODEL_CACHE_DIR / "whisper")))
 RENDER_THREADS = max(4, min(12, os.cpu_count() or 4))
@@ -2324,17 +2324,20 @@ def ensure_dependencies() -> None:
 
 def _get_whisper_model_candidates() -> list[str]:
     configured = [candidate.strip() for candidate in WHISPER_MODEL.split(",") if candidate.strip()]
-    defaults = ["small", "base"]
     candidates: list[str] = []
-    for candidate in configured + defaults:
+    for candidate in configured:
         if candidate not in candidates:
             candidates.append(candidate)
-    return candidates or ["base"]
+    return candidates or ["distil-large-v3", "large-v3"]
 
 
 def _whisper_cache_contains_files() -> bool:
     if not WHISPER_MODEL_CACHE_DIR.exists():
         return False
+
+
+def _get_whisper_fallback_candidates(current_model: str) -> list[str]:
+    return [candidate for candidate in _get_whisper_model_candidates() if candidate != current_model]
     try:
         return any(path.is_file() for path in WHISPER_MODEL_CACHE_DIR.rglob("*"))
     except OSError:
@@ -2508,20 +2511,25 @@ def transcribe_media(media_path: Path, *, word_timestamps: bool) -> dict:
         fallback_options.pop("word_timestamps", None)
         return model.transcribe(str(media_path), **fallback_options)
     except Exception as error:
-        if model_name != "base" and whisper is not None:
+        if whisper is not None:
             with _whisper_model_lock:
                 _whisper_model_cache.pop(f"openai::{model_name}", None)
-                base_model = _whisper_model_cache.get("openai::base")
-                if base_model is None:
-                    WHISPER_MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-                    base_model = whisper.load_model("base", download_root=str(WHISPER_MODEL_CACHE_DIR))
-                    _whisper_model_cache["openai::base"] = base_model
-            fallback_options = dict(transcribe_options)
-            try:
-                return base_model.transcribe(str(media_path), **fallback_options)
-            except TypeError:
-                fallback_options.pop("word_timestamps", None)
-                return base_model.transcribe(str(media_path), **fallback_options)
+                WHISPER_MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                for fallback_name in _get_whisper_fallback_candidates(model_name):
+                    fallback_key = f"openai::{fallback_name}"
+                    fallback_model = _whisper_model_cache.get(fallback_key)
+                    if fallback_model is None:
+                        try:
+                            fallback_model = whisper.load_model(fallback_name, download_root=str(WHISPER_MODEL_CACHE_DIR))
+                            _whisper_model_cache[fallback_key] = fallback_model
+                        except Exception:
+                            continue
+                    fallback_options = dict(transcribe_options)
+                    try:
+                        return fallback_model.transcribe(str(media_path), **fallback_options)
+                    except TypeError:
+                        fallback_options.pop("word_timestamps", None)
+                        return fallback_model.transcribe(str(media_path), **fallback_options)
         raise RuntimeError("Whisper transcription failed.") from error
 
 
