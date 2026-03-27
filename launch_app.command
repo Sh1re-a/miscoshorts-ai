@@ -21,6 +21,7 @@ PYTHON_CORE_STAMP="$SETUP_DIR/python-core.state"
 PYTHON_OPTIONAL_STAMP="$SETUP_DIR/python-optional.state"
 FRONTEND_DEPS_STAMP="$SETUP_DIR/frontend-deps.state"
 FRONTEND_BUILD_STAMP="$SETUP_DIR/frontend-build.state"
+MODEL_CACHE_DIR="$RUNTIME_DIR/model-cache"
 
 STEP=0
 TOTAL_STEPS=4
@@ -88,6 +89,7 @@ stamp_matches() {
 
 # ─── Ensure directories ───
 mkdir -p "$RUNTIME_DIR" "$SETUP_DIR"
+mkdir -p "$MODEL_CACHE_DIR"
 
 echo ""
 echo "${CYAN}Miscoshorts AI${RESET}"
@@ -229,6 +231,9 @@ fi
 step "Starting app"
 
 info "Opening the local app in your browser. Keep this window open."
+HF_HOME="$MODEL_CACHE_DIR/huggingface" \
+XDG_CACHE_HOME="$MODEL_CACHE_DIR/xdg" \
+WHISPER_MODEL_CACHE_DIR="$MODEL_CACHE_DIR/whisper" \
 "$VENV_PYTHON" -m app.app_launcher && status=0 || status=$?
 
 if [[ $status -ne 0 ]]; then

@@ -186,9 +186,14 @@ def _derive_progress_fields(job: dict, stage: str, message: str) -> dict[str, fl
         overall = 10.0 + pct * 0.20
         eta_seconds = max(8.0, (100.0 - pct) * 1.2)
     elif stage == "transcribing":
-        stage_progress = 35.0 if "Whisper" in message else 100.0 if "complete" in message.lower() else 55.0
+        lowered_message = message.lower()
+        if "preparing the local speech model" in lowered_message:
+            stage_progress = 12.0
+            eta_seconds = max(90.0, clip_count * 150.0)
+        else:
+            stage_progress = 35.0 if "whisper" in lowered_message else 100.0 if "complete" in lowered_message else 55.0
+            eta_seconds = max(20.0, clip_count * (120.0 if stage_progress < 100.0 else 8.0))
         overall = 18.0 + stage_progress * 0.24
-        eta_seconds = max(20.0, clip_count * (120.0 if stage_progress < 100.0 else 8.0))
     elif stage == "analyzing":
         stage_progress = 45.0 if "Asking Gemini" in message else 100.0
         overall = 42.0 + stage_progress * 0.20

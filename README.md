@@ -1,6 +1,6 @@
 # Miscoshorts AI
 
-Create vertical YouTube Shorts from long-form videos using Whisper for transcription, Gemini for clip selection, and MoviePy for subtitle-ready rendering.
+Create vertical YouTube Shorts from long-form videos using local Whisper transcription, Gemini for clip selection, and MoviePy for subtitle-ready rendering.
 
 This fork adds a cleaner local workflow, a browser-first React dashboard, and a more shareable setup for demos and non-technical users.
 
@@ -31,7 +31,9 @@ On Windows, the launcher can also handle first-time setup for you. It installs m
 
 On macOS, `launch_app.command` now prefers the built app when `frontend/dist` is included, and falls back to the local developer flow only when the built frontend is missing.
 
-The launcher stores internal Windows runtime files inside `.miscoshorts/` so the main project folder stays cleaner.
+The launcher stores internal runtime files inside `.miscoshorts/` so the main project folder stays cleaner.
+
+Speech models are also kept inside `.miscoshorts/runtime/model-cache/` now, not in a giant shared global cache. If a tester deletes that folder by mistake, the app just downloads the smaller default speech model again on the next run.
 
 If the folder already contains `frontend/dist`, the launcher uses that built app directly and skips Node.js completely.
 
@@ -44,7 +46,7 @@ Big thanks to the original creator for the idea, codebase foundation, and tutori
 ## What It Does
 
 - Downloads a YouTube video with `yt-dlp`
-- Transcribes the audio with `openai-whisper`
+- Transcribes the audio with local Whisper models through `faster-whisper`
 - Uses Gemini to select the strongest short-form moments
 - Can generate up to 5 export-ready clips from one source video
 - Reframes the video into a cleaner 9:16 master with centered vertical composition
@@ -92,6 +94,7 @@ Optional server-oriented environment variables:
 - `SPEAKER_DIARIZATION_MODE` to choose `auto`, `heuristic`, or `pyannote`
 - `PYANNOTE_AUTH_TOKEN` or `HF_TOKEN` to enable optional higher-accuracy pyannote diarization
 - `WHISPER_BACKEND` to choose `auto`, `faster-whisper`, or `openai-whisper`
+- `WHISPER_MODEL` to choose the local speech model order. The default is `small,base` for a better quality-to-size balance on customer machines.
 
 ## Free Pro Stack
 
@@ -102,6 +105,7 @@ For the strongest free local setup:
 - keep `LOCAL_CACHE_ENABLED=1` so repeat runs are faster
 - install optional diarization support with `pip install -r requirements-optional.txt`
 - let transcription default to `faster-whisper`
+- keep the default `WHISPER_MODEL=small,base` unless you specifically want a larger model on a stronger machine
 - set `PYANNOTE_AUTH_TOKEN` and keep `SPEAKER_DIARIZATION_MODE=auto`
 
 That gives you:
@@ -318,6 +322,16 @@ Reinstall Python dependencies:
 ```bash
 pip install -r requirements.txt
 ```
+
+### Missing Or Deleted Whisper Cache
+
+If someone deletes the local speech-model cache, the app should now rebuild it automatically inside:
+
+```text
+.miscoshorts/runtime/model-cache/
+```
+
+The first transcription on that machine will be slower once while the smaller default model downloads again.
 
 ### Whisper Package Conflicts
 

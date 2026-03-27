@@ -151,7 +151,7 @@ _CLS_VOTE_TEXT_NEWS = 0.10          # per-frame text for news vote
 _CLS_SCENE_CHANGE_THRESHOLD = 0.06 # inter-frame diff above this = scene change
 
 from app import gemini_analyzer, subtitles
-from app.paths import OUTPUTS_DIR, OUTPUT_CACHE_DIR, OUTPUT_JOBS_DIR
+from app.paths import MODEL_CACHE_DIR, OUTPUTS_DIR, OUTPUT_CACHE_DIR, OUTPUT_JOBS_DIR
 
 
 ProgressCallback = Callable[[str, str], None]
@@ -174,8 +174,9 @@ DOWNLOAD_FORMAT_SORT = [
     for field in os.getenv("YTDLP_FORMAT_SORT", "res,fps,hdr:12,vcodec:h264,acodec:aac").split(",")
     if field.strip()
 ]
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "distil-large-v3,large-v3,turbo,base")
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small,base")
 WHISPER_BACKEND = os.getenv("WHISPER_BACKEND", "auto").strip().lower() or "auto"
+WHISPER_MODEL_CACHE_DIR = Path(os.getenv("WHISPER_MODEL_CACHE_DIR", str(MODEL_CACHE_DIR / "whisper")))
 RENDER_THREADS = max(4, min(12, os.cpu_count() or 4))
 DEFAULT_CLIP_COUNT = 3
 DEFAULT_RENDER_PROFILE = os.getenv("DEFAULT_RENDER_PROFILE", "studio").strip().lower() or "studio"
@@ -2322,7 +2323,41 @@ def ensure_dependencies() -> None:
 
 
 def _get_whisper_model_candidates() -> list[str]:
-    return [candidate.strip() for candidate in WHISPER_MODEL.split(",") if candidate.strip()] or ["base"]
+    configured = [candidate.strip() for candidate in WHISPER_MODEL.split(",") if candidate.strip()]
+    defaults = ["small", "base"]
+    candidates: list[str] = []
+    for candidate in configured + defaults:
+        if candidate not in candidates:
+            candidates.append(candidate)
+    return candidates or ["base"]
+
+
+def _whisper_cache_contains_files() -> bool:
+    if not WHISPER_MODEL_CACHE_DIR.exists():
+        return False
+    try:
+        return any(path.is_file() for path in WHISPER_MODEL_CACHE_DIR.rglob("*"))
+    except OSError:
+        return False
+
+
+def _format_transcription_backend_error(error: Exception) -> str:
+    details = str(error).strip() or error.__class__.__name__
+    lowered = details.lower()
+    if "no space left on device" in lowered or "disk full" in lowered:
+        return (
+            f"Speech model setup failed because the disk is full. Free up space and try again. "
+            f"The local model cache lives in {WHISPER_MODEL_CACHE_DIR}."
+        )
+    if "permission denied" in lowered:
+        return (
+            f"Speech model setup could not write to {WHISPER_MODEL_CACHE_DIR}. "
+            "Check folder permissions and try again."
+        )
+    return (
+        f"Speech model setup failed in the local cache at {WHISPER_MODEL_CACHE_DIR}. "
+        f"Details: {details}"
+    )
 
 
 def _normalize_faster_whisper_result(segments, info) -> dict:
@@ -2367,6 +2402,7 @@ def _load_faster_whisper_model() -> tuple[str, object]:
         raise RuntimeError("faster-whisper is not installed.")
 
     last_error = None
+    WHISPER_MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     with _whisper_model_lock:
         for model_name in _get_whisper_model_candidates():
             cache_key = f"faster::{model_name}"
@@ -2375,13 +2411,19 @@ def _load_faster_whisper_model() -> tuple[str, object]:
                 return model_name, cached_model
 
             try:
-                model = _FasterWhisperModel(model_name, device="auto", compute_type="auto")
+                model = _FasterWhisperModel(
+                    model_name,
+                    device="auto",
+                    compute_type="auto",
+                    download_root=str(WHISPER_MODEL_CACHE_DIR),
+                    local_files_only=False,
+                )
                 _whisper_model_cache[cache_key] = model
                 return model_name, model
             except Exception as error:
                 last_error = error
 
-    raise RuntimeError("Could not load any configured faster-whisper model.") from last_error
+    raise RuntimeError(_format_transcription_backend_error(last_error or RuntimeError("Unknown faster-whisper error."))) from last_error
 
 
 def _load_openai_whisper_model() -> tuple[str, object]:
@@ -2389,6 +2431,7 @@ def _load_openai_whisper_model() -> tuple[str, object]:
         raise RuntimeError("openai-whisper is not installed.")
 
     last_error = None
+    WHISPER_MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     with _whisper_model_lock:
         for model_name in _get_whisper_model_candidates():
             cache_key = f"openai::{model_name}"
@@ -2397,13 +2440,13 @@ def _load_openai_whisper_model() -> tuple[str, object]:
                 return model_name, cached_model
 
             try:
-                model = whisper.load_model(model_name)
+                model = whisper.load_model(model_name, download_root=str(WHISPER_MODEL_CACHE_DIR))
                 _whisper_model_cache[cache_key] = model
                 return model_name, model
             except Exception as error:
                 last_error = error
 
-    raise RuntimeError("Could not load any configured Whisper model.") from last_error
+    raise RuntimeError(_format_transcription_backend_error(last_error or RuntimeError("Unknown whisper error."))) from last_error
 
 
 def load_whisper_model() -> tuple[str, str, object]:
@@ -2424,7 +2467,7 @@ def load_whisper_model() -> tuple[str, str, object]:
         except Exception as error:
             last_error = error
 
-    raise RuntimeError("Could not load any configured transcription backend.") from last_error
+    raise RuntimeError(_format_transcription_backend_error(last_error or RuntimeError("Unknown transcription backend error."))) from last_error
 
 
 def transcribe_media(media_path: Path, *, word_timestamps: bool) -> dict:
@@ -2470,7 +2513,8 @@ def transcribe_media(media_path: Path, *, word_timestamps: bool) -> dict:
                 _whisper_model_cache.pop(f"openai::{model_name}", None)
                 base_model = _whisper_model_cache.get("openai::base")
                 if base_model is None:
-                    base_model = whisper.load_model("base")
+                    WHISPER_MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                    base_model = whisper.load_model("base", download_root=str(WHISPER_MODEL_CACHE_DIR))
                     _whisper_model_cache["openai::base"] = base_model
             fallback_options = dict(transcribe_options)
             try:
@@ -3107,7 +3151,15 @@ def create_short_from_url(
         if result is not None:
             _emit(progress_callback, "transcribing", "Reusing cached transcript from a previous local run...")
         else:
-            _emit(progress_callback, "transcribing", f"Transcribing full video once with Whisper ({_get_whisper_model_candidates()[0]}) for analysis and subtitles...")
+            whisper_model = _get_whisper_model_candidates()[0]
+            if _whisper_cache_contains_files():
+                _emit(progress_callback, "transcribing", f"Transcribing full video once with Whisper ({whisper_model}) for analysis and subtitles...")
+            else:
+                _emit(
+                    progress_callback,
+                    "transcribing",
+                    f"Preparing the local speech model ({whisper_model}) for first run. This one-time download can take a few minutes, then transcription starts automatically...",
+                )
             result = transcribe_video_fast(video_path)
             _store_cached_transcript(video_url, result)
             _emit(progress_callback, "transcribing", f"Transcription complete. Found {len(result.get('segments') or [])} segments.")

@@ -12,6 +12,7 @@ $frontendDistDir = Join-Path $frontendDir "dist"
 $frontendEntry = Join-Path $frontendDistDir "index.html"
 $internalDir = Join-Path $root ".miscoshorts"
 $runtimeDir = Join-Path $internalDir "runtime"
+$modelCacheDir = Join-Path $runtimeDir "model-cache"
 $setupDir = Join-Path $internalDir "setup"
 $venvDir = Join-Path $runtimeDir "venv"
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
@@ -470,7 +471,7 @@ function Ensure-Ffmpeg {
 }
 
 function Ensure-StateDir {
-    foreach ($directory in @($internalDir, $runtimeDir, $setupDir, $installerDir)) {
+    foreach ($directory in @($internalDir, $runtimeDir, $modelCacheDir, $setupDir, $installerDir)) {
         if (-not (Test-Path $directory)) {
             New-Item -ItemType Directory -Path $directory | Out-Null
         }
@@ -692,6 +693,9 @@ function Invoke-Setup {
 
     Start-SetupStep "Starting app"
     Write-SetupInfo "Opening the local app in your browser. Keep this window open while the app runs."
+    $env:HF_HOME = Join-Path $modelCacheDir "huggingface"
+    $env:XDG_CACHE_HOME = Join-Path $modelCacheDir "xdg"
+    $env:WHISPER_MODEL_CACHE_DIR = Join-Path $modelCacheDir "whisper"
     Invoke-CheckedCommand $venvPython @("-m", "app.app_launcher") "The local app failed to start."
 }
 
