@@ -44,6 +44,8 @@ $frontendDepsStamp = Join-Path $stateDir "frontend-deps.state"
 $frontendBuildStamp = Join-Path $stateDir "frontend-build.state"
 $script:SetupStep = 0
 $script:SetupStartedAt = Get-Date
+$whisperSmallDownloadBytes = 486MB
+$whisperBaseDownloadBytes = 148MB
 
 function Show-FailureAndExit($message) {
     Write-Host ""
@@ -71,6 +73,8 @@ function Write-SetupBanner {
     Write-Host "Local setup and launch" -ForegroundColor DarkCyan
     Write-Host ""
     Write-Host "This window keeps the local app alive while it is running." -ForegroundColor DarkGray
+    Write-Host "Private runtime files live in .miscoshorts and are ignored by Git/GitHub." -ForegroundColor DarkGray
+    Write-Host "Speech models are cached locally in .miscoshorts\runtime\model-cache." -ForegroundColor DarkGray
 }
 
 function Start-SetupStep($title) {
@@ -98,6 +102,48 @@ function Write-SetupDone($message) {
 function Write-SetupSummary($message) {
     Write-Host ""
     Write-Host $message -ForegroundColor Green
+}
+
+function Format-ByteSize($bytes) {
+    if ($bytes -ge 1GB) {
+        return ("{0:N1} GB" -f ($bytes / 1GB))
+    }
+    if ($bytes -ge 1MB) {
+        return ("{0:N0} MB" -f ($bytes / 1MB))
+    }
+    if ($bytes -ge 1KB) {
+        return ("{0:N0} KB" -f ($bytes / 1KB))
+    }
+    return "$bytes B"
+}
+
+function Get-DirectoryHasFiles($path) {
+    if (-not (Test-Path $path)) {
+        return $false
+    }
+
+    return $null -ne (Get-ChildItem -Path $path -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1)
+}
+
+function Get-RemoteFileSizeLabel($url) {
+    try {
+        $request = [System.Net.HttpWebRequest]::Create($url)
+        $request.Method = "HEAD"
+        $request.AllowAutoRedirect = $true
+        $response = $request.GetResponse()
+        try {
+            if ($response.ContentLength -gt 0) {
+                return Format-ByteSize $response.ContentLength
+            }
+        }
+        finally {
+            $response.Dispose()
+        }
+    }
+    catch {
+    }
+
+    return $null
 }
 
 function Hide-InternalDirectory($path) {
@@ -217,7 +263,13 @@ function Invoke-Python($pythonSpec, $arguments) {
 }
 
 function Invoke-Download($url, $destinationPath, $label) {
-    Write-SetupAction "Downloading $label ..."
+    $sizeLabel = Get-RemoteFileSizeLabel $url
+    if ($null -ne $sizeLabel) {
+        Write-SetupAction "Downloading $label ($sizeLabel) ..."
+    }
+    else {
+        Write-SetupAction "Downloading $label ..."
+    }
     Invoke-WebRequest -Uri $url -OutFile $destinationPath
 }
 
@@ -604,7 +656,9 @@ function Invoke-Setup {
     }
 
     if (-not (Test-StateMatch $pythonCoreStamp $pythonCoreSignature)) {
-        Write-SetupAction "Installing Python packages ..."
+        Write-SetupAction "Installing Python core packages ..."
+        Write-SetupInfo "This is the app runtime only. The speech model is downloaded on first transcription."
+        Write-SetupInfo "Expected first-time app dependency download: usually under a few hundred MB, depending on Windows wheel selection."
         Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "--prefer-binary", "--quiet", "-r", "requirements.txt") "Installing Python dependencies failed."
         Write-StateValue $pythonCoreStamp $pythonCoreSignature
         Write-SetupDone "Python core packages are up to date."
@@ -617,6 +671,7 @@ function Invoke-Setup {
     if ($shouldInstallOptional) {
         if (-not (Test-StateMatch $pythonOptionalStamp $pythonOptionalSignature)) {
             Write-SetupAction "Installing optional pro diarization add-ons ..."
+            Write-SetupInfo "This optional bundle is much heavier than the default setup and is only needed for advanced diarization."
             Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "--prefer-binary", "--quiet", "-r", "requirements-optional.txt") "Installing optional pro dependencies failed."
             Write-StateValue $pythonOptionalStamp $pythonOptionalSignature
             Write-SetupDone "Optional Python add-ons are up to date."
@@ -645,6 +700,7 @@ function Invoke-Setup {
 
         if (-not (Test-StateMatch $frontendDepsStamp $frontendDepsSignature)) {
             Write-SetupAction "Installing frontend packages ..."
+            Write-SetupInfo "This is only for the local dashboard build and is skipped when frontend/dist is already included."
             Push-Location $frontendDir
             try {
                 Invoke-CheckedCommand $nodeCommand @("ci") "Installing frontend packages failed."
@@ -684,6 +740,13 @@ function Invoke-Setup {
     $elapsed = New-TimeSpan -Start $script:SetupStartedAt -End (Get-Date)
     Write-SetupDone "Local setup is complete."
     Write-SetupInfo "Internal setup files are stored in .miscoshorts so the project folder stays clean."
+    if (Get-DirectoryHasFiles (Join-Path $modelCacheDir "whisper")) {
+        Write-SetupReuse "existing local speech-model cache"
+    }
+    else {
+        Write-SetupInfo "First transcription will download the local speech model into the private cache."
+        Write-SetupInfo ("Planned model order: small first ({0}), then base fallback ({1}) only if needed." -f (Format-ByteSize $whisperSmallDownloadBytes), (Format-ByteSize $whisperBaseDownloadBytes))
+    }
     Write-SetupSummary "Setup finished in $([math]::Max(1, [int][math]::Round($elapsed.TotalSeconds))) seconds."
 
     if ($SkipLaunch) {

@@ -113,6 +113,7 @@ def stop_process(process: subprocess.Popen[str] | None) -> None:
 
 def main() -> None:
     backend_process = None
+    whisper_cache_dir = os.getenv("WHISPER_MODEL_CACHE_DIR", ".miscoshorts/runtime/model-cache/whisper")
 
     if url_responds(HEALTH_URL):
         bootstrap_payload = load_bootstrap_payload(BOOTSTRAP_URL)
@@ -129,6 +130,7 @@ def main() -> None:
         backend_process = subprocess.Popen([sys.executable, "-m", "app.server"], cwd=PROJECT_ROOT)
         wait_for_url(HEALTH_URL, timeout=20, process=backend_process, name="local app")
 
+    print(f"Private speech-model cache: {whisper_cache_dir}")
     print("Opening browser...")
     webbrowser.open(APP_URL)
     print("Press Ctrl+C to stop the local app.")

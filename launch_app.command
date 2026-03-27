@@ -22,6 +22,8 @@ PYTHON_OPTIONAL_STAMP="$SETUP_DIR/python-optional.state"
 FRONTEND_DEPS_STAMP="$SETUP_DIR/frontend-deps.state"
 FRONTEND_BUILD_STAMP="$SETUP_DIR/frontend-build.state"
 MODEL_CACHE_DIR="$RUNTIME_DIR/model-cache"
+WHISPER_SMALL_DOWNLOAD_BYTES=$((486 * 1024 * 1024))
+WHISPER_BASE_DOWNLOAD_BYTES=$((148 * 1024 * 1024))
 
 STEP=0
 TOTAL_STEPS=4
@@ -36,6 +38,24 @@ info() { echo "  ${DIM}$1${RESET}"; }
 reuse() { echo "  ${GREEN}✓ Reusing: $1${RESET}"; }
 action() { echo "  ${YELLOW}→ $1${RESET}"; }
 done_msg() { echo "  ${GREEN}✓ $1${RESET}"; }
+
+format_bytes() {
+	local bytes="$1"
+	if (( bytes >= 1073741824 )); then
+		awk "BEGIN { printf \"%.1f GB\", $bytes / 1073741824 }"
+	elif (( bytes >= 1048576 )); then
+		awk "BEGIN { printf \"%.0f MB\", $bytes / 1048576 }"
+	elif (( bytes >= 1024 )); then
+		awk "BEGIN { printf \"%.0f KB\", $bytes / 1024 }"
+	else
+		echo "${bytes} B"
+	fi
+}
+
+dir_has_files() {
+	local target="$1"
+	[[ -d "$target" ]] && find "$target" -type f -print -quit 2>/dev/null | grep -q .
+}
 
 fail() {
 	echo ""
@@ -94,6 +114,8 @@ mkdir -p "$MODEL_CACHE_DIR"
 echo ""
 echo "${CYAN}Miscoshorts AI${RESET}"
 echo "${DIM}Local setup and launch${RESET}"
+info "Private runtime files live in $INTERNAL_DIR and are ignored by Git/GitHub."
+info "Speech model cache lives in $MODEL_CACHE_DIR."
 
 # ─── Step 1: Check & install tools ───
 step "Checking local tools"
@@ -160,7 +182,9 @@ CURRENT_OPTIONAL_SIGNATURE=$(optional_deps_signature)
 if stamp_matches "$PYTHON_CORE_STAMP" "$CURRENT_CORE_SIGNATURE"; then
 	reuse "Python core packages (unchanged)"
 else
-	action "Installing Python packages..."
+	action "Installing Python core packages..."
+	info "Includes the local app dependencies only. The speech model is downloaded later on first transcription."
+	info "Expected first-time app dependency download: usually under a few hundred MB, depending on your Mac."
 	"$VENV_PYTHON" -m pip install --disable-pip-version-check --prefer-binary --quiet -r requirements.txt >> "$LOG_PATH" 2>&1 || fail "pip install failed. Check $LOG_PATH for details."
 	echo "$CURRENT_CORE_SIGNATURE" > "$PYTHON_CORE_STAMP"
 	done_msg "Python core packages installed"
@@ -171,6 +195,7 @@ if [[ -f "requirements-optional.txt" && ( -n "${PYANNOTE_AUTH_TOKEN:-}" || -n "$
 		reuse "Optional Python add-ons (unchanged)"
 	else
 		action "Installing optional pro diarization add-ons..."
+		info "This optional bundle is much heavier than the default setup and is only used when diarization add-ons are enabled."
 		"$VENV_PYTHON" -m pip install --disable-pip-version-check --prefer-binary --quiet -r requirements-optional.txt >> "$LOG_PATH" 2>&1 || fail "Optional pro dependency install failed. Check $LOG_PATH for details."
 		echo "$CURRENT_OPTIONAL_SIGNATURE" > "$PYTHON_OPTIONAL_STAMP"
 		done_msg "Optional Python add-ons installed"
@@ -214,6 +239,7 @@ else
 		reuse "frontend packages (unchanged)"
 	else
 		action "Installing frontend packages..."
+		info "This is the browser dashboard toolchain. It is only needed when frontend/dist is missing or outdated."
 		(cd frontend && npm ci --silent >> "../$LOG_PATH" 2>&1) || fail "npm ci failed."
 		echo "$FRONTEND_DEPS_SIG" > "$FRONTEND_DEPS_STAMP"
 	fi
@@ -231,6 +257,12 @@ fi
 step "Starting app"
 
 info "Opening the local app in your browser. Keep this window open."
+if dir_has_files "$MODEL_CACHE_DIR/whisper"; then
+	reuse "existing local speech-model cache"
+else
+	action "First transcription will download the local speech model into the private cache."
+	info "Planned model order: small first ($(format_bytes "$WHISPER_SMALL_DOWNLOAD_BYTES")), then base fallback ($(format_bytes "$WHISPER_BASE_DOWNLOAD_BYTES")) only if needed."
+fi
 HF_HOME="$MODEL_CACHE_DIR/huggingface" \
 XDG_CACHE_HOME="$MODEL_CACHE_DIR/xdg" \
 WHISPER_MODEL_CACHE_DIR="$MODEL_CACHE_DIR/whisper" \
