@@ -61,10 +61,10 @@ function App() {
         const payload = (await response.json()) as BootstrapPayload
         if (!cancelled) {
           setHasConfiguredApiKey(payload.hasConfiguredApiKey)
-          setRenderProfiles(payload.renderProfiles)
+          setRenderProfiles(payload.renderProfiles ?? fallbackRenderProfiles)
           setSelectedRenderProfile(payload.defaultRenderProfile || fallbackRenderProfile)
-          setSpeakerMode(payload.speakerDiarizationMode)
-          setHasPyannoteToken(payload.hasPyannoteToken)
+          setSpeakerMode(payload.speakerDiarizationMode ?? 'auto')
+          setHasPyannoteToken(Boolean(payload.hasPyannoteToken))
         }
       } catch {
         // Keep the app usable even if the bootstrap request fails.

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import os
+import signal
 import subprocess
 import sys
 import time
@@ -12,6 +15,7 @@ from app.paths import PROJECT_ROOT
 
 APP_URL = "http://127.0.0.1:5001"
 HEALTH_URL = f"{APP_URL}/api/health"
+BOOTSTRAP_URL = f"{APP_URL}/api/bootstrap"
 
 
 def wait_for_url(url: str, timeout: float, process: subprocess.Popen[str] | None, name: str) -> None:
@@ -37,6 +41,65 @@ def url_responds(url: str) -> bool:
         return False
 
 
+def load_bootstrap_payload(url: str) -> dict | None:
+    try:
+        with urllib.request.urlopen(url, timeout=2) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
+def bootstrap_is_compatible(payload: dict | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+
+    return isinstance(payload.get("renderProfiles"), dict) and bool(payload.get("defaultRenderProfile"))
+
+
+def find_listener_pid(port: int) -> int | None:
+    if os.name == "nt":
+        command = [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            f"(Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess)",
+        ]
+    else:
+        command = ["lsof", "-ti", f"tcp:{port}"]
+
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=3)
+    except Exception:
+        return None
+
+    if completed.returncode != 0:
+        return None
+
+    raw_pid = completed.stdout.strip().splitlines()
+    if not raw_pid:
+        return None
+
+    try:
+        return int(raw_pid[0].strip())
+    except ValueError:
+        return None
+
+
+def stop_listener_on_port(port: int) -> bool:
+    pid = find_listener_pid(port)
+    if pid is None or pid == os.getpid():
+        return False
+
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False, capture_output=True)
+        else:
+            os.kill(pid, signal.SIGTERM)
+        return True
+    except Exception:
+        return False
+
+
 def stop_process(process: subprocess.Popen[str] | None) -> None:
     if process is None or process.poll() is not None:
         return
@@ -52,7 +115,15 @@ def main() -> None:
     backend_process = None
 
     if url_responds(HEALTH_URL):
-        print(f"A local app is already available on {APP_URL}. Reusing it.")
+        bootstrap_payload = load_bootstrap_payload(BOOTSTRAP_URL)
+        if bootstrap_is_compatible(bootstrap_payload):
+            print(f"A local app is already available on {APP_URL}. Reusing it.")
+        else:
+            print(f"An older local app is already running on {APP_URL}. Restarting it...")
+            stop_listener_on_port(5001)
+            time.sleep(1)
+            backend_process = subprocess.Popen([sys.executable, "-m", "app.server"], cwd=PROJECT_ROOT)
+            wait_for_url(HEALTH_URL, timeout=20, process=backend_process, name="local app")
     else:
         print(f"Starting local app on {APP_URL} ...")
         backend_process = subprocess.Popen([sys.executable, "-m", "app.server"], cwd=PROJECT_ROOT)
