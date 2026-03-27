@@ -167,16 +167,22 @@ OUTPUT_WIDTH = 1080
 OUTPUT_HEIGHT = 1920
 TARGET_ASPECT_RATIO = OUTPUT_WIDTH / OUTPUT_HEIGHT
 VIDEO_CRF = os.getenv("VIDEO_CRF", "13")
-VIDEO_PRESET = os.getenv("VIDEO_PRESET", "medium")
-VIDEO_BITRATE = os.getenv("VIDEO_BITRATE", "8M")
-VIDEO_MAXRATE = os.getenv("VIDEO_MAXRATE", "12M")
-VIDEO_BUFSIZE = os.getenv("VIDEO_BUFSIZE", "16M")
-VIDEO_AUDIO_BITRATE = os.getenv("VIDEO_AUDIO_BITRATE", "256k")
+VIDEO_PRESET = os.getenv("VIDEO_PRESET", "slow")
+VIDEO_BITRATE = os.getenv("VIDEO_BITRATE", "12M")
+VIDEO_MAXRATE = os.getenv("VIDEO_MAXRATE", "18M")
+VIDEO_BUFSIZE = os.getenv("VIDEO_BUFSIZE", "24M")
+VIDEO_AUDIO_BITRATE = os.getenv("VIDEO_AUDIO_BITRATE", "320k")
+YTDLP_MAX_HEIGHT = max(1080, int(os.getenv("YTDLP_MAX_HEIGHT", "4320")))
 DOWNLOAD_FORMAT = os.getenv(
     "YTDLP_FORMAT",
-    "bestvideo*[height<=2160]+bestaudio/best[height<=2160]/best",
+    f"bestvideo*[height<={YTDLP_MAX_HEIGHT}]+bestaudio/best[height<={YTDLP_MAX_HEIGHT}]/best",
 )
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "turbo,base")
+DOWNLOAD_FORMAT_SORT = [
+    field.strip()
+    for field in os.getenv("YTDLP_FORMAT_SORT", "res,fps,hdr:12,vcodec:h264,acodec:aac").split(",")
+    if field.strip()
+]
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "distil-large-v3,large-v3,turbo,base")
 WHISPER_BACKEND = os.getenv("WHISPER_BACKEND", "auto").strip().lower() or "auto"
 RENDER_THREADS = max(4, min(12, os.cpu_count() or 4))
 DEFAULT_CLIP_COUNT = 3
@@ -192,6 +198,7 @@ RENDER_PROFILES = {
         "video_maxrate": "8M",
         "video_bufsize": "12M",
         "audio_bitrate": "192k",
+        "x264_params": "aq-mode=2:aq-strength=0.8:deblock=0,0",
     },
     "balanced": {
         "label": "Balanced 1080x1920 MP4",
@@ -201,6 +208,7 @@ RENDER_PROFILES = {
         "video_maxrate": "10M",
         "video_bufsize": "14M",
         "audio_bitrate": "224k",
+        "x264_params": "aq-mode=3:aq-strength=0.95:deblock=-1,-1:rc-lookahead=24",
     },
     "studio": {
         "label": "Studio HQ 1080x1920 MP4",
@@ -210,6 +218,10 @@ RENDER_PROFILES = {
         "video_maxrate": VIDEO_MAXRATE,
         "video_bufsize": VIDEO_BUFSIZE,
         "audio_bitrate": VIDEO_AUDIO_BITRATE,
+        "x264_params": os.getenv(
+            "VIDEO_X264_PARAMS",
+            "aq-mode=3:aq-strength=1.05:deblock=-1,-1:rc-lookahead=40:ref=4:bframes=3:direct=auto:me=umh:subme=7:merange=24",
+        ),
     },
 }
 RENDER_PROFILE_LABEL = RENDER_PROFILES.get(DEFAULT_RENDER_PROFILE, RENDER_PROFILES["studio"])["label"]
@@ -1149,6 +1161,7 @@ def _refine_content_type_with_speaker_data(
         balance = adjusted.get("speakerBalance")
         audio_count = int(adjusted.get("audioSpeakerCount") or 0)
         audio_confidence = float(adjusted.get("audioSpeakerConfidence") or 0.0)
+        audio_dominant_share = float(adjusted.get("audioDominantShare") or 0.0)
 
         if audio_count <= 1 and audio_confidence >= 0.5:
             adjusted["speaker_layout_override"] = "audio_single"
@@ -1156,11 +1169,36 @@ def _refine_content_type_with_speaker_data(
             adjusted["confidence"] = round(max(0.25, float(adjusted.get("confidence") or 0.5) - 0.12), 2)
             return _CONTENT_SINGLE_SPEAKER, adjusted
 
+        if audio_count >= 2 and audio_confidence >= 0.75 and audio_dominant_share >= 0.84:
+            adjusted["speaker_layout_override"] = "audio_dominant_single"
+            adjusted["speaker_override_reason"] = "Two voices were detected, but one voice dominates the clip."
+            adjusted["confidence"] = round(max(0.25, float(adjusted.get("confidence") or 0.5) - 0.15), 2)
+            return _CONTENT_SINGLE_SPEAKER, adjusted
+
         if balance is not None and balance < 0.12 and switches <= 1:
             adjusted["speaker_layout_override"] = "dominant_single"
             adjusted["speaker_override_reason"] = "Duo candidate is visually dominated by one speaker."
             adjusted["confidence"] = round(max(0.25, float(adjusted.get("confidence") or 0.5) - 0.18), 2)
             return _CONTENT_SINGLE_SPEAKER, adjusted
+
+    if content_type in {_CONTENT_SINGLE_SPEAKER, _CONTENT_MIXED, _CONTENT_MEETING_GALLERY}:
+        audio_count = int(adjusted.get("audioSpeakerCount") or 0)
+        audio_confidence = float(adjusted.get("audioSpeakerConfidence") or 0.0)
+        audio_switches = int(adjusted.get("audioSpeakerSwitches") or 0)
+        audio_dominant_share = float(adjusted.get("audioDominantShare") or 0.0)
+        visual_speakers = int(adjusted.get("speakerCountEstimate") or 1)
+
+        if (
+            audio_count >= 2
+            and audio_confidence >= 0.78
+            and audio_switches >= 2
+            and audio_dominant_share <= 0.76
+            and visual_speakers >= 2
+        ):
+            adjusted["speaker_layout_override"] = "audio_promoted_duo"
+            adjusted["speaker_override_reason"] = "Audio turn-taking and visual speaker count indicate a two-person layout."
+            adjusted["confidence"] = round(min(0.95, max(0.55, float(adjusted.get("confidence") or 0.5) + 0.1)), 2)
+            return _CONTENT_PODCAST_DUO, adjusted
 
     return content_type, adjusted
 
@@ -2101,10 +2139,14 @@ def write_high_quality_video(
         "-pix_fmt", "yuv420p",
         "-profile:v", "high",
         "-level:v", "4.2",
+        "-colorspace", "bt709",
+        "-color_primaries", "bt709",
+        "-color_trc", "bt709",
         "-g", keyint,
         "-keyint_min", keyint_min,
         "-sc_threshold", "0",
-        "-x264-params", "aq-mode=3:aq-strength=0.9:deblock=-1,-1",
+        "-sws_flags", "lanczos+accurate_rnd+full_chroma_int",
+        "-x264-params", render_settings.get("x264_params", "aq-mode=3:aq-strength=0.9:deblock=-1,-1"),
     ]
 
     if audio_path is not None and Path(audio_path).exists():
@@ -2468,6 +2510,75 @@ def _cluster_audio_segments(feature_rows: "_np.ndarray") -> tuple[list[int], flo
     return labels.tolist(), round(confidence, 3)
 
 
+def _smooth_speaker_labels(labels: list[int]) -> list[int]:
+    if len(labels) < 3:
+        return labels
+
+    smoothed = list(labels)
+    for _ in range(2):
+        updated = list(smoothed)
+        for index in range(1, len(smoothed) - 1):
+            prev_label = smoothed[index - 1]
+            next_label = smoothed[index + 1]
+            if prev_label == next_label and smoothed[index] != prev_label:
+                updated[index] = prev_label
+        smoothed = updated
+    return smoothed
+
+
+def _merge_audio_assignments(assignments: list[dict]) -> list[dict]:
+    if not assignments:
+        return []
+
+    merged: list[dict] = []
+    for assignment in sorted(assignments, key=lambda item: (float(item.get("start") or 0.0), float(item.get("end") or 0.0))):
+        start = round(float(assignment.get("start") or 0.0), 3)
+        end = round(max(start, float(assignment.get("end") or start)), 3)
+        speaker = str(assignment.get("speaker") or "S1")
+        if merged and merged[-1]["speaker"] == speaker and start - float(merged[-1]["end"]) <= 0.35:
+            merged[-1]["end"] = end
+            continue
+        merged.append({"start": start, "end": end, "speaker": speaker})
+    return merged
+
+
+def _build_audio_speaker_summary(assignments: list[dict]) -> dict:
+    merged = _merge_audio_assignments(assignments)
+    if not merged:
+        return {
+            "audioSpeakerCount": 0,
+            "audioSpeakerSwitches": 0,
+            "audioDominantSpeaker": None,
+            "audioDominantShare": 0.0,
+            "audioTurnDensity": 0.0,
+            "audioSpeakerAssignments": [],
+        }
+
+    totals: dict[str, float] = {}
+    switches = 0
+    previous_speaker = None
+    for assignment in merged:
+        speaker = str(assignment["speaker"])
+        duration = max(0.0, float(assignment["end"]) - float(assignment["start"]))
+        totals[speaker] = totals.get(speaker, 0.0) + duration
+        if previous_speaker is not None and previous_speaker != speaker:
+            switches += 1
+        previous_speaker = speaker
+
+    total_duration = max(0.001, sum(totals.values()))
+    dominant_speaker, dominant_duration = max(totals.items(), key=lambda item: item[1])
+    turn_density = switches / max(0.25, total_duration / 60.0)
+
+    return {
+        "audioSpeakerCount": len(totals),
+        "audioSpeakerSwitches": switches,
+        "audioDominantSpeaker": dominant_speaker,
+        "audioDominantShare": round(dominant_duration / total_duration, 3),
+        "audioTurnDensity": round(turn_density, 3),
+        "audioSpeakerAssignments": merged,
+    }
+
+
 def _analyze_audio_speakers_pyannote(audio_path: Path) -> dict | None:
     pipeline = _load_pyannote_pipeline()
     if pipeline is None:
@@ -2479,9 +2590,6 @@ def _analyze_audio_speakers_pyannote(audio_path: Path) -> dict | None:
         return None
 
     assignments = []
-    speakers: list[str] = []
-    previous_speaker = None
-    switches = 0
     for turn, _, speaker in diarization.itertracks(yield_label=True):
         speaker_label = str(speaker)
         assignments.append(
@@ -2491,22 +2599,14 @@ def _analyze_audio_speakers_pyannote(audio_path: Path) -> dict | None:
                 "speaker": speaker_label,
             }
         )
-        if speaker_label not in speakers:
-            speakers.append(speaker_label)
-        if previous_speaker is not None and previous_speaker != speaker_label:
-            switches += 1
-        previous_speaker = speaker_label
 
     if not assignments:
         return None
 
-    return {
-        "audioSpeakerCount": len(speakers),
-        "audioSpeakerSwitches": switches,
-        "audioSpeakerConfidence": 0.92 if len(speakers) > 1 else 0.75,
-        "audioSpeakerAssignments": assignments,
-        "audioSpeakerProvider": "pyannote",
-    }
+    summary = _build_audio_speaker_summary(assignments)
+    summary["audioSpeakerConfidence"] = 0.92 if int(summary["audioSpeakerCount"]) > 1 else 0.75
+    summary["audioSpeakerProvider"] = "pyannote"
+    return summary
 
 
 def analyze_audio_speakers(audio_path: Path | None, transcript: dict) -> dict:
@@ -2556,6 +2656,7 @@ def analyze_audio_speakers(audio_path: Path | None, transcript: dict) -> dict:
     stds = feature_matrix.std(axis=0) + 1e-6
     normalized = (feature_matrix - means) / stds
     labels, confidence = _cluster_audio_segments(normalized)
+    labels = _smooth_speaker_labels(labels)
 
     switches = 0
     for prev, curr in zip(labels, labels[1:]):
@@ -2573,13 +2674,15 @@ def analyze_audio_speakers(audio_path: Path | None, transcript: dict) -> dict:
             }
         )
 
-    return {
-        "audioSpeakerCount": speaker_count,
-        "audioSpeakerSwitches": switches if speaker_count > 1 else 0,
-        "audioSpeakerConfidence": confidence if speaker_count > 1 else round(confidence * 0.4, 3),
-        "audioSpeakerAssignments": assignments,
-        "audioSpeakerProvider": "heuristic",
-    }
+    summary = _build_audio_speaker_summary(assignments)
+    summary["audioSpeakerCount"] = speaker_count
+    summary["audioSpeakerSwitches"] = int(summary["audioSpeakerSwitches"] or 0) if speaker_count > 1 else 0
+    summary["audioSpeakerConfidence"] = confidence if speaker_count > 1 else round(confidence * 0.4, 3)
+    summary["audioSpeakerProvider"] = "heuristic"
+    if speaker_count <= 1:
+        summary["audioDominantSpeaker"] = "S1"
+        summary["audioDominantShare"] = 1.0 if summary["audioSpeakerAssignments"] else 0.0
+    return summary
 
 
 def _slice_segment_words(words: list[dict], clip_start_time: float, clip_end_time: float) -> list[dict]:
@@ -2673,7 +2776,53 @@ def extract_clip_transcript_from_full(full_transcript: dict, clip_start_time: fl
     }, requires_precise_fallback
 
 
-def download_video(url: str, destination_base: Path, progress_callback: ProgressCallback | None = None) -> Path:
+def _summarize_download_info(info: dict | None) -> dict:
+    if not info:
+        return {}
+
+    requested = info.get("requested_formats") or []
+    video_format = next((fmt for fmt in requested if fmt.get("vcodec") not in {None, "none"}), info)
+    audio_format = next((fmt for fmt in requested if fmt.get("acodec") not in {None, "none"}), info)
+
+    width = video_format.get("width") or info.get("width")
+    height = video_format.get("height") or info.get("height")
+    fps = video_format.get("fps") or info.get("fps")
+    source_summary = {
+        "id": info.get("id"),
+        "title": info.get("title"),
+        "webpageUrl": info.get("webpage_url") or info.get("original_url"),
+        "extractor": info.get("extractor_key") or info.get("extractor"),
+        "container": info.get("ext"),
+        "width": width,
+        "height": height,
+        "fps": fps,
+        "videoCodec": video_format.get("vcodec") or info.get("vcodec"),
+        "audioCodec": audio_format.get("acodec") or info.get("acodec"),
+        "videoBitrate": video_format.get("tbr") or info.get("tbr"),
+        "audioBitrate": audio_format.get("abr") or info.get("abr"),
+    }
+    return {key: value for key, value in source_summary.items() if value not in {None, "", []}}
+
+
+def _format_download_quality_label(download_info: dict) -> str:
+    if not download_info:
+        return "Source download complete."
+
+    dimensions = "x".join(
+        str(int(value))
+        for value in (download_info.get("width"), download_info.get("height"))
+        if value is not None
+    )
+    fps = download_info.get("fps")
+    codec = download_info.get("videoCodec")
+    audio = download_info.get("audioCodec")
+    parts = [part for part in [dimensions, f"{fps}fps" if fps else None, codec, audio] if part]
+    if not parts:
+        return "Source download complete."
+    return f"Source download complete: {' / '.join(parts)}."
+
+
+def download_video(url: str, destination_base: Path, progress_callback: ProgressCallback | None = None) -> tuple[Path, dict]:
     last_reported: dict[str, int] = {"pct": -1}
 
     def _ydl_progress(d: dict) -> None:
@@ -2704,18 +2853,24 @@ def download_video(url: str, destination_base: Path, progress_callback: Progress
 
     ydl_opts = {
         "format": DOWNLOAD_FORMAT,
+        "format_sort": DOWNLOAD_FORMAT_SORT,
         "outtmpl": str(destination_base.with_suffix(".%(ext)s")),
         "merge_output_format": "mp4",
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        "check_formats": True,
         "concurrent_fragment_downloads": 4,
+        "retries": 10,
+        "fragment_retries": 10,
+        "file_access_retries": 3,
         "progress_hooks": [_ydl_progress],
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
-    _emit(progress_callback, "downloading", "Download complete.")
-    return _resolve_downloaded_video_path(destination_base)
+        info = ydl.extract_info(url, download=True)
+    download_info = _summarize_download_info(info)
+    _emit(progress_callback, "downloading", _format_download_quality_label(download_info))
+    return _resolve_downloaded_video_path(destination_base), download_info
 
 
 def _extract_gemini_clip_blocks(text: str) -> list[dict[str, str]]:
@@ -2853,6 +3008,7 @@ def create_short_from_url(
     clips_dir = output_dir / "clips"
     diagnostics_dir = output_dir / "diagnostics"
     transcript_path = meta_dir / "full_transcript.txt"
+    source_meta_path = meta_dir / "source_download.json"
     temp_base = source_dir / "source_video"
 
     video_path = None
@@ -2860,6 +3016,7 @@ def create_short_from_url(
     clip = None
     clip_vertical = None
     clip_final = None
+    download_info: dict = {}
 
     try:
         video_path = _restore_cached_video(video_url, temp_base)
@@ -2867,8 +3024,14 @@ def create_short_from_url(
             _emit(progress_callback, "downloading", "Reusing cached source video from a previous local run...")
         else:
             _emit(progress_callback, "downloading", "Downloading the highest-quality source video and audio from YouTube...")
-            video_path = download_video(video_url, temp_base, progress_callback)
+            video_path, download_info = download_video(video_url, temp_base, progress_callback)
             _store_cached_video(video_url, video_path)
+
+        if video_path is not None:
+            if not download_info:
+                download_info = {"webpageUrl": video_url}
+            download_info["localPath"] = str(video_path)
+            source_meta_path.write_text(json.dumps(download_info, ensure_ascii=True, indent=2), encoding="utf-8")
 
         result = _load_cached_transcript(video_url)
         if result is not None:
@@ -3030,6 +3193,8 @@ def create_short_from_url(
             "subtitleStyle": subtitle_style,
             "outputPath": first_clip["outputPath"],
             "transcriptPath": str(transcript_path),
+            "sourceMetaPath": str(source_meta_path),
+            "sourceDownload": download_info,
             "outputDir": str(output_dir),
             "renderProfile": render_settings["label"],
             "renderProfileKey": render_profile,
