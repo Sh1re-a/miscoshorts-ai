@@ -54,6 +54,11 @@ sha_file() {
 deps_signature() {
 	sha_file requirements.txt
 	sha_file requirements-optional.txt
+	if [[ -n "${PYANNOTE_AUTH_TOKEN:-}" || -n "${HF_TOKEN:-}" || "${AUTO_INSTALL_PRO_DEPS:-0}" == "1" ]]; then
+		echo "optional:on"
+	else
+		echo "optional:off"
+	fi
 }
 
 frontend_signature() {

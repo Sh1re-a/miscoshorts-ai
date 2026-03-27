@@ -518,6 +518,16 @@ function Get-StateSignature($paths) {
     return Get-StringHash ($parts -join "`n")
 }
 
+function Test-ShouldInstallOptionalPythonDeps {
+    return (
+        (Test-Path (Join-Path $root "requirements-optional.txt")) -and (
+            -not [string]::IsNullOrWhiteSpace($env:PYANNOTE_AUTH_TOKEN) -or
+            -not [string]::IsNullOrWhiteSpace($env:HF_TOKEN) -or
+            $env:AUTO_INSTALL_PRO_DEPS -eq "1"
+        )
+    )
+}
+
 function Read-StateValue($statePath) {
     if (-not (Test-Path $statePath)) {
         return $null
@@ -558,7 +568,7 @@ function Invoke-Setup {
     Write-SetupDone "Python is ready."
     $null = Ensure-Ffmpeg
     Write-SetupDone "FFmpeg is ready."
-    $pythonDepsSignature = Get-StateSignature @("requirements.txt", "requirements-optional.txt", "app")
+    $pythonDepsSignature = "{0}|optional={1}" -f (Get-StateSignature @("requirements.txt", "requirements-optional.txt", "app")), (if (Test-ShouldInstallOptionalPythonDeps) { "on" } else { "off" })
     $frontendDepsSignature = Get-StateSignature @("frontend/package.json", "frontend/package-lock.json")
     $frontendBuildSignature = Get-StateSignature @("frontend/src", "frontend/index.html", "frontend/package.json", "frontend/vite.config.ts")
 
@@ -580,13 +590,7 @@ function Invoke-Setup {
     if (-not (Test-StateMatch $pythonDepsStamp $pythonDepsSignature)) {
         Write-SetupAction "Installing Python packages ..."
         Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "--quiet", "-r", "requirements.txt") "Installing Python dependencies failed."
-        $shouldInstallOptional = (
-            (Test-Path (Join-Path $root "requirements-optional.txt")) -and (
-                -not [string]::IsNullOrWhiteSpace($env:PYANNOTE_AUTH_TOKEN) -or
-                -not [string]::IsNullOrWhiteSpace($env:HF_TOKEN) -or
-                $env:AUTO_INSTALL_PRO_DEPS -eq "1"
-            )
-        )
+        $shouldInstallOptional = Test-ShouldInstallOptionalPythonDeps
         if ($shouldInstallOptional) {
             Write-SetupAction "Installing optional pro diarization add-ons ..."
             Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "--quiet", "-r", "requirements-optional.txt") "Installing optional pro dependencies failed."
