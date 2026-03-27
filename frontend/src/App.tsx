@@ -8,197 +8,32 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './com
 import { Input } from './components/ui/input'
 import { Label } from './components/ui/label'
 import { Progress } from './components/ui/progress'
+import { feedbackTags, progressByStatus, stageDescriptions, statusTitles } from './features/jobs/config'
+import type { AnalyticsInsights, BootstrapPayload, ClipFeedback, JobPayload, JobStatus } from './features/jobs/types'
+import { apiKeyStorageKey, formatEta, formatLogTime, getEtaWindow, loadSavedApiKey } from './features/jobs/utils'
+import type { SubtitlePreviewPayload } from './features/preview/types'
 
-type JobStatus =
-  | 'idle'
-  | 'queued'
-  | 'validating'
-  | 'downloading'
-  | 'transcribing'
-  | 'analyzing'
-  | 'rendering'
-  | 'completed'
-  | 'failed'
-
-type JobLog = {
-  time: number
-  stage: string
-  message: string
+const fallbackRenderProfile = 'studio'
+const fallbackRenderProfiles = {
+  fast: 'Fast Draft 1080x1920 MP4',
+  balanced: 'Balanced 1080x1920 MP4',
+  studio: 'Studio HQ 1080x1920 MP4',
 }
-
-type JobResult = {
-  title?: string
-  reason?: string
-  start: number
-  end: number
-  outputFilename: string
-  outputDir: string
-  clipCount: number
-  renderProfile?: string
-  clips: JobClip[]
-}
-
-type JobClip = {
-  index: number
-  title?: string
-  reason?: string
-  start: number
-  end: number
-  outputFilename: string
-  contentType?: string
-  analytics?: Record<string, unknown>
-}
-
-type ClipFeedback = {
-  rating: 'good' | 'bad'
-  tags: string[]
-  saving?: boolean
-  saved?: boolean
-}
-
-type AnalyticsInsights = {
-  totalClips: number
-  totalRated: number
-  totalGood: number
-  totalBad: number
-  overallApprovalRate: number | null
-  perContentType: Record<string, {
-    clipCount: number
-    avgConfidence: number | null
-    rated: number
-    good: number
-    bad: number
-    approvalRate: number | null
-  }>
-}
-
-const feedbackTags = [
-  { id: 'great_content', label: 'Great content', positive: true },
-  { id: 'good_framing', label: 'Good framing', positive: true },
-  { id: 'good_subtitles', label: 'Good subtitles', positive: true },
-  { id: 'boring_content', label: 'Boring content', positive: false },
-  { id: 'bad_crop', label: 'Bad crop', positive: false },
-  { id: 'wrong_layout', label: 'Wrong layout', positive: false },
-  { id: 'bad_subtitles', label: 'Bad subtitles', positive: false },
-  { id: 'audio_issue', label: 'Audio issue', positive: false },
-] as const
-
-type JobPayload = {
-  status: JobStatus
-  message?: string
-  error?: string
-  logs?: JobLog[]
-  result?: JobResult
-  clipCount?: number
-  createdAt?: number
-  updatedAt?: number
-}
-
-type BootstrapPayload = {
-  hasConfiguredApiKey: boolean
-  frontendBuilt: boolean
-}
-
-
-
-const progressByStatus: Record<JobStatus, number> = {
-  idle: 0,
-  queued: 8,
-  validating: 14,
-  downloading: 20,
-  transcribing: 48,
-  analyzing: 68,
-  rendering: 88,
-  completed: 100,
-  failed: 100,
-}
-
-const statusTitles: Record<JobStatus, string> = {
-  idle: 'Ready to start',
-  queued: 'Queued in local backend',
-  validating: 'Validating subtitle compatibility',
-  downloading: 'Downloading source video',
-  transcribing: 'Transcribing audio',
-  analyzing: 'Gemini is selecting clips',
-  rendering: 'Rendering video',
-  completed: 'Render complete',
-  failed: 'Render failed',
-}
-
-const stageDescriptions: Record<JobStatus, string> = {
-  idle: 'Paste a YouTube link, add your Gemini key, and start the default Shorts render flow.',
-  queued: 'Your request reached the local app and is waiting to begin.',
-  validating: 'Checking subtitle rendering compatibility and local requirements before the heavy work starts.',
-  downloading: 'Downloading the source video and preparing local files.',
-  transcribing: 'Whisper is transcribing the video. This is usually the longest step.',
-  analyzing: 'Gemini is selecting the strongest clip moments from the transcript.',
-  rendering: 'Rendering the final vertical video with dynamic subtitles and overlays.',
-  completed: 'Everything is finished. Your files are ready below as high-quality 1080x1920 exports.',
-  failed: 'The job stopped before finishing. Read the message below for the exact reason.',
-}
-
-const renderProfileLabel = 'Studio HQ 1080x1920 MP4'
-
-const apiKeyStorageKey = 'miscoshorts.apiKey'
-
-function loadSavedApiKey() {
-  try {
-    return window.localStorage.getItem(apiKeyStorageKey) ?? ''
-  } catch {
-    return ''
-  }
-}
-
-function formatLogTime(timestamp: number) {
-  return new Intl.DateTimeFormat('sv-SE', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  }).format(new Date(timestamp * 1000))
-}
-
-function formatEta(seconds: number) {
-  if (seconds <= 45) {
-    return 'under 1 min'
-  }
-
-  const minutes = Math.ceil(seconds / 60)
-  if (minutes < 60) {
-    return `${minutes} min`
-  }
-
-  const hours = Math.floor(minutes / 60)
-  const remainingMinutes = minutes % 60
-  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`
-}
-
-function getEtaWindow(job: JobPayload, selectedClipCount: number, nowMs: number) {
-  const effectiveClipCount = job.result?.clipCount ?? job.clipCount ?? selectedClipCount
-  const stageStartedAt = (job.updatedAt ?? job.createdAt ?? nowMs / 1000) * 1000
-  const elapsedSeconds = Math.max(0, Math.round((nowMs - stageStartedAt) / 1000))
-
-  switch (job.status) {
-    case 'queued':
-      return [Math.max(0, 20 - elapsedSeconds), Math.max(0, 60 - elapsedSeconds)]
-    case 'validating':
-      return [Math.max(0, 5 - elapsedSeconds), Math.max(0, 20 - elapsedSeconds)]
-    case 'downloading':
-      return [Math.max(0, 40 - elapsedSeconds), Math.max(0, 150 - elapsedSeconds)]
-    case 'transcribing':
-      return [Math.max(0, 150 - elapsedSeconds), Math.max(0, 540 - elapsedSeconds)]
-    case 'analyzing':
-      return [Math.max(0, 20 - elapsedSeconds), Math.max(0, 120 - elapsedSeconds)]
-    case 'rendering':
-      return [Math.max(0, 90 * effectiveClipCount - elapsedSeconds), Math.max(0, 240 * effectiveClipCount - elapsedSeconds)]
-    default:
-      return null
-  }
-}
+const fontPresetOptions = ['soft', 'clean', 'bold'] as const
+const colorPresetOptions = ['editorial', 'ivory', 'mint', 'sun'] as const
 
 function App() {
   const [videoUrl, setVideoUrl] = useState('')
   const [apiKey, setApiKey] = useState(loadSavedApiKey)
   const [hasConfiguredApiKey, setHasConfiguredApiKey] = useState(false)
+  const [renderProfiles, setRenderProfiles] = useState<Record<string, string>>(fallbackRenderProfiles)
+  const [selectedRenderProfile, setSelectedRenderProfile] = useState(fallbackRenderProfile)
+  const [selectedFontPreset, setSelectedFontPreset] = useState<'soft' | 'clean' | 'bold'>('soft')
+  const [selectedColorPreset, setSelectedColorPreset] = useState<'editorial' | 'ivory' | 'mint' | 'sun'>('editorial')
+  const [previewTitle, setPreviewTitle] = useState('A calm, premium headline')
+  const [previewReason, setPreviewReason] = useState('Subtle captions, refined hierarchy, and a more editorial finish.')
+  const [previewData, setPreviewData] = useState<SubtitlePreviewPayload | null>(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
   const [outputFilename, setOutputFilename] = useState('short_con_subs.mp4')
   const [jobId, setJobId] = useState<string | null>(null)
   const [job, setJob] = useState<JobPayload>({ status: 'idle' })
@@ -224,6 +59,8 @@ function App() {
         const payload = (await response.json()) as BootstrapPayload
         if (!cancelled) {
           setHasConfiguredApiKey(payload.hasConfiguredApiKey)
+          setRenderProfiles(payload.renderProfiles)
+          setSelectedRenderProfile(payload.defaultRenderProfile || fallbackRenderProfile)
         }
       } catch {
         // Keep the app usable even if the bootstrap request fails.
@@ -300,9 +137,54 @@ function App() {
   const canSubmit = Boolean(videoUrl.trim()) && hasAvailableApiKey && !isSubmitting && !isWorking
   const startButtonLabel = isSubmitting || isWorking ? 'Job running' : 'Start studio render'
   const etaWindow = useMemo(() => getEtaWindow(job, selectedClipCount, nowMs), [job, selectedClipCount, nowMs])
-  const etaLabel = etaWindow ? `${formatEta(etaWindow[0])} to ${formatEta(etaWindow[1])}` : null
+  const etaLabel = job.etaSeconds != null
+    ? formatEta(job.etaSeconds)
+    : etaWindow
+      ? `${formatEta(etaWindow[0])} to ${formatEta(etaWindow[1])}`
+      : null
   const hasStarted = job.status !== 'idle' || isSubmitting || jobId !== null
   const effectiveClipCount = job.result?.clipCount ?? job.clipCount ?? selectedClipCount
+  const currentRenderProfileLabel = renderProfiles[selectedRenderProfile] ?? renderProfiles[fallbackRenderProfile] ?? 'Studio HQ 1080x1920 MP4'
+  const progressValue = job.overallProgress ?? progressByStatus[job.status]
+  const selectedSubtitleStyle = useMemo(() => ({ fontPreset: selectedFontPreset, colorPreset: selectedColorPreset }), [selectedColorPreset, selectedFontPreset])
+
+  useEffect(() => {
+    let cancelled = false
+    const timeoutId = window.setTimeout(async () => {
+      setPreviewLoading(true)
+      try {
+        const response = await fetch('/api/subtitle-preview', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            subtitleStyle: selectedSubtitleStyle,
+            title: previewTitle,
+            reason: previewReason,
+          }),
+        })
+        if (!response.ok) {
+          return
+        }
+        const payload = await response.json() as SubtitlePreviewPayload
+        if (!cancelled) {
+          setPreviewData(payload)
+        }
+      } catch {
+        // Keep the app usable if preview generation fails.
+      } finally {
+        if (!cancelled) {
+          setPreviewLoading(false)
+        }
+      }
+    }, 250)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(timeoutId)
+    }
+  }, [previewReason, previewTitle, selectedSubtitleStyle])
 
   function resetFlow() {
     setJobId(null)
@@ -412,10 +294,12 @@ function App() {
           apiKey,
           outputFilename,
           clipCount: selectedClipCount,
+          renderProfile: selectedRenderProfile,
+          subtitleStyle: selectedSubtitleStyle,
         }),
       })
 
-      const payload = (await response.json()) as { jobId?: string; error?: string; status?: JobStatus; clipCount?: number }
+      const payload = (await response.json()) as { jobId?: string; error?: string; status?: JobStatus; clipCount?: number; queuePosition?: number; renderProfile?: string }
 
       if (!response.ok || !payload.jobId) {
         throw new Error(payload.error ?? 'Could not start the job.')
@@ -424,7 +308,12 @@ function App() {
       setJobId(payload.jobId)
       setJob({
         status: payload.status ?? 'queued',
-        message: `The job is running locally and will render ${payload.clipCount ?? selectedClipCount} clip(s).`,
+        queuePosition: payload.queuePosition ?? 0,
+        renderProfile: payload.renderProfile ?? selectedRenderProfile,
+        message:
+          (payload.queuePosition ?? 0) > 0
+            ? `The job is in queue position ${payload.queuePosition} and will render ${payload.clipCount ?? selectedClipCount} clip(s).`
+            : `The job is running locally and will render ${payload.clipCount ?? selectedClipCount} clip(s).`,
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unexpected error'
@@ -504,8 +393,8 @@ function App() {
                 </div>
 
                 <div className="rounded-[24px] border border-sky-100 bg-sky-50/80 px-4 py-4 text-sm leading-6 text-slate-700">
-                  <p className="font-semibold text-slate-900">{renderProfileLabel}</p>
-                  <p className="mt-2">The app runs a focused Shorts workflow: centered reframing, stronger H.264 settings, AAC audio, and more dynamic voice-following subtitles.</p>
+                  <p className="font-semibold text-slate-900">{currentRenderProfileLabel}</p>
+                  <p className="mt-2">The app runs a focused Shorts workflow: centered reframing, strong H.264 export settings, AAC audio, and calmer editorial subtitles with a more premium header.</p>
                   <p className="mt-2">Keep the launcher window open while the job runs. Finished files appear here and in the local outputs folder.</p>
                 </div>
 
@@ -528,6 +417,124 @@ function App() {
                     ))}
                   </div>
                   <p className="text-xs text-slate-500">How many Shorts clips to generate from this video.</p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Render profile</Label>
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    {Object.entries(renderProfiles).map(([key, label]) => (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => setSelectedRenderProfile(key)}
+                        className={`rounded-2xl border px-3 py-3 text-left text-sm transition-colors ${
+                          selectedRenderProfile === key
+                            ? 'border-sky-500 bg-sky-500 text-white'
+                            : 'border-slate-200 bg-white text-slate-700 hover:border-sky-300 hover:bg-sky-50'
+                        }`}
+                      >
+                        <span className="block font-medium">{label}</span>
+                        <span className={`mt-1 block text-xs ${selectedRenderProfile === key ? 'text-sky-100' : 'text-slate-500'}`}>
+                          {key === 'fast' ? 'Fast previews and iteration' : key === 'balanced' ? 'Daily default for local runs' : 'Highest finish quality'}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-slate-500">Fast for iteration, balanced for normal use, studio for final delivery.</p>
+                </div>
+
+                <div className="space-y-3 rounded-[24px] border border-slate-200 bg-white p-4">
+                  <div>
+                    <p className="font-semibold text-slate-950">Subtitle Workbench</p>
+                    <p className="mt-1 text-xs text-slate-500">Tune the calm, premium style before running a full render.</p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label>Font preset</Label>
+                    <div className="flex flex-wrap gap-2">
+                      {fontPresetOptions.map((preset) => (
+                        <button
+                          key={preset}
+                          type="button"
+                          onClick={() => setSelectedFontPreset(preset)}
+                          className={`rounded-xl border px-3 py-2 text-sm transition-colors ${
+                            selectedFontPreset === preset
+                              ? 'border-sky-500 bg-sky-500 text-white'
+                              : 'border-slate-200 bg-slate-50 text-slate-700 hover:border-sky-300 hover:bg-sky-50'
+                          }`}
+                        >
+                          {preset}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label>Color preset</Label>
+                    <div className="flex flex-wrap gap-2">
+                      {colorPresetOptions.map((preset) => (
+                        <button
+                          key={preset}
+                          type="button"
+                          onClick={() => setSelectedColorPreset(preset)}
+                          className={`rounded-xl border px-3 py-2 text-sm transition-colors ${
+                            selectedColorPreset === preset
+                              ? 'border-sky-500 bg-sky-500 text-white'
+                              : 'border-slate-200 bg-slate-50 text-slate-700 hover:border-sky-300 hover:bg-sky-50'
+                          }`}
+                        >
+                          {preset}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="previewTitle">Preview header</Label>
+                    <Input
+                      id="previewTitle"
+                      value={previewTitle}
+                      onChange={(event) => setPreviewTitle(event.target.value)}
+                      autoComplete="off"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="previewReason">Preview subheader</Label>
+                    <Input
+                      id="previewReason"
+                      value={previewReason}
+                      onChange={(event) => setPreviewReason(event.target.value)}
+                      autoComplete="off"
+                    />
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                    <div className="mb-3 flex items-center justify-between">
+                      <p className="text-sm font-medium text-slate-900">Live preview</p>
+                      <span className="text-xs text-slate-500">{previewLoading ? 'Updating…' : 'Synced'}</span>
+                    </div>
+
+                    {previewData ? (
+                      <div className="space-y-3">
+                        {previewData.headerImages[0] ? (
+                          <img src={previewData.headerImages[0]} alt="Subtitle header preview" className="w-full rounded-2xl border border-slate-200" />
+                        ) : null}
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          {previewData.subtitleFrames.slice(0, 2).map((cue) => (
+                            <div key={cue.cue} className="space-y-2">
+                              {cue.frames.dark ? (
+                                <img src={cue.frames.dark} alt={`Subtitle preview ${cue.cue}`} className="w-full rounded-2xl border border-slate-200" />
+                              ) : null}
+                              <p className="text-xs text-slate-500">{cue.text}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-slate-500">Preparing subtitle preview…</p>
+                    )}
+                  </div>
                 </div>
 
                 <Button className="h-12 w-full rounded-2xl bg-sky-600 text-white hover:bg-sky-700" type="submit" disabled={!canSubmit}>
@@ -555,6 +562,9 @@ function App() {
                     <p className="app-kicker text-sm font-medium text-sky-700">Current step</p>
                     <p className="text-xl font-semibold text-slate-950">{statusTitles[job.status]}</p>
                     <p className="app-copy text-sm leading-6 text-slate-600">{job.message ?? stageDescriptions[job.status]}</p>
+                    {job.stageProgress != null ? (
+                      <p className="text-xs text-slate-500">Step progress: {job.stageProgress}%</p>
+                    ) : null}
                   </div>
                   <Badge variant={job.status === 'failed' ? 'destructive' : 'secondary'} className="shrink-0 border-sky-200 bg-white text-slate-700">
                     {job.status}
@@ -564,14 +574,20 @@ function App() {
                 <div className="space-y-3">
                   <div className="flex items-center justify-between text-sm text-slate-500">
                     <span>Progress</span>
-                    <span>{progressByStatus[job.status]}%</span>
+                    <span>{progressValue}%</span>
                   </div>
-                  <Progress value={progressByStatus[job.status]} />
+                  <Progress value={progressValue} />
                 </div>
 
                 {etaLabel ? (
                   <div className="rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-950">
                     Estimated time left: {etaLabel}
+                  </div>
+                ) : null}
+
+                {job.status === 'queued' && (job.queuePosition ?? 0) > 0 ? (
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+                    Queue position: {job.queuePosition}. The current render finishes before this job starts.
                   </div>
                 ) : null}
 
@@ -596,7 +612,7 @@ function App() {
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm leading-6 text-slate-700">
                   <p className="font-semibold text-slate-900">What happens now</p>
                   <p className="mt-2">{stageDescriptions[job.status]}</p>
-                  <p className="mt-3 text-slate-500">Requested clips: {effectiveClipCount}. Output profile: {job.result?.renderProfile ?? renderProfileLabel}. Finished files are saved locally in the outputs folder and will appear below when ready.</p>
+                  <p className="mt-3 text-slate-500">Requested clips: {effectiveClipCount}. Output profile: {job.result?.renderProfile ?? currentRenderProfileLabel}. Finished files are saved locally in the outputs folder and will appear below when ready.</p>
                 </div>
 
                 {job.error ? <p className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{job.error}</p> : null}
@@ -639,7 +655,7 @@ function App() {
                         <CheckCircle2 className="h-4 w-4" /> {job.result.clipCount} clip(s) ready
                       </div>
                       <p>{job.result.title ?? 'Your first clip is ready.'}</p>
-                      <p className="mt-2 text-emerald-900">Quality profile: {job.result.renderProfile ?? renderProfileLabel}</p>
+                      <p className="mt-2 text-emerald-900">Quality profile: {job.result.renderProfile ?? currentRenderProfileLabel}</p>
                       <p className="mt-2 text-emerald-800/80">Saved locally in {job.result.outputDir}</p>
                     </div>
 
@@ -659,6 +675,33 @@ function App() {
                                 ) : null}
                                 {clip.analytics?.confidence != null ? (
                                   <span className="text-slate-400">conf {String(clip.analytics.confidence)}</span>
+                                ) : null}
+                                {clip.analytics?.speakerTrackingMode != null ? (
+                                  <span className="text-slate-400">focus {String(clip.analytics.speakerTrackingMode)}</span>
+                                ) : null}
+                                {clip.analytics?.speakerCountEstimate != null ? (
+                                  <span className="text-slate-400">{String(clip.analytics.speakerCountEstimate)} speaker(s)</span>
+                                ) : null}
+                                {clip.analytics?.speakerSwitches != null ? (
+                                  <span className="text-slate-400">{String(clip.analytics.speakerSwitches)} switches</span>
+                                ) : null}
+                                {clip.analytics?.speakerBalance != null ? (
+                                  <span className="text-slate-400">balance {String(clip.analytics.speakerBalance)}</span>
+                                ) : null}
+                                {clip.analytics?.speakerTrackingStability != null ? (
+                                  <span className="text-slate-400">tracking {String(clip.analytics.speakerTrackingStability)}</span>
+                                ) : null}
+                                {clip.analytics?.audioSpeakerCount != null ? (
+                                  <span className="text-slate-400">audio {String(clip.analytics.audioSpeakerCount)} speaker(s)</span>
+                                ) : null}
+                                {clip.analytics?.audioSpeakerSwitches != null ? (
+                                  <span className="text-slate-400">audio switches {String(clip.analytics.audioSpeakerSwitches)}</span>
+                                ) : null}
+                                {clip.analytics?.audioSpeakerConfidence != null ? (
+                                  <span className="text-slate-400">audio conf {String(clip.analytics.audioSpeakerConfidence)}</span>
+                                ) : null}
+                                {clip.analytics?.audioSpeakerProvider != null ? (
+                                  <span className="text-slate-400">audio engine {String(clip.analytics.audioSpeakerProvider)}</span>
                                 ) : null}
                               </div>
                             </div>

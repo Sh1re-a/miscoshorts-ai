@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 from pathlib import Path
 
 from moviepy import ColorClip, VideoFileClip
@@ -58,6 +59,7 @@ DEFAULT_HEADER = {
     "title": "Michael Jackson, Macklemore, and the Debate",
     "reason": "Premium subtitle diagnostic with calm motion, soft panel, and subtle gradients.",
 }
+PREVIEW_ROOT = OUTPUTS_DIR / "_preview"
 
 
 def _build_preview_segments(cues):
@@ -86,6 +88,88 @@ def _build_preview_segments(cues):
 
 def _save_frame(frame_array, output_path):
     Image.fromarray(frame_array).save(output_path)
+
+
+def generate_preview_bundle(
+    *,
+    subtitle_style: dict | None = None,
+    title: str | None = None,
+    reason: str | None = None,
+    cues: list[dict] | None = None,
+    video_size: tuple[int, int] = DEFAULT_VIDEO_SIZE,
+) -> dict:
+    preview_id = secrets.token_hex(8)
+    output_dir = PREVIEW_ROOT / preview_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    resolved_cues = cues or DEFAULT_CUES
+    resolved_header = {
+        "title": (title or DEFAULT_HEADER["title"]).strip(),
+        "reason": (reason or DEFAULT_HEADER["reason"]).strip(),
+    }
+
+    previews = subtitles.create_subtitle_preview_frames(
+        video_size,
+        resolved_cues,
+        subtitle_style=subtitle_style,
+    )
+
+    preview_frames: list[dict] = []
+    for cue_index, preview in enumerate(previews, start=1):
+        frame_paths = {}
+        for frame in preview["frames"]:
+            background = frame["background"]
+            filename = f"cue_{cue_index:02d}_{background}.png"
+            image_path = output_dir / filename
+            frame["image"].save(image_path)
+            frame_paths[background] = filename
+
+        preview_frames.append(
+            {
+                "cue": cue_index,
+                "text": preview["text"],
+                "start": preview["start"],
+                "end": preview["end"],
+                "width": preview["width"],
+                "height": preview["height"],
+                "position": preview["position"],
+                "frames": frame_paths,
+            }
+        )
+
+    header_clip = ColorClip(size=video_size, color=(18, 22, 29)).with_duration(3.0)
+    header_layers = subtitles.create_top_description_overlay(
+        header_clip,
+        resolved_header["title"],
+        resolved_header["reason"],
+        subtitle_style,
+    )
+    header_images: list[str] = []
+    try:
+        for index, layer in enumerate(header_layers, start=1):
+            frame = layer.get_frame(0.2)
+            filename = f"header_{index:02d}.png"
+            _save_frame(frame, output_dir / filename)
+            header_images.append(filename)
+    finally:
+        for layer in header_layers:
+            try:
+                layer.close()
+            except Exception:
+                pass
+        header_clip.close()
+
+    manifest = {
+        "previewId": preview_id,
+        "title": resolved_header["title"],
+        "reason": resolved_header["reason"],
+        "subtitleStyle": subtitles.normalize_subtitle_style(subtitle_style),
+        "videoSize": {"width": video_size[0], "height": video_size[1]},
+        "headerImages": header_images,
+        "subtitleFrames": preview_frames,
+    }
+    (output_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=True, indent=2), encoding="utf-8")
+    return manifest
 
 
 def main() -> None:
