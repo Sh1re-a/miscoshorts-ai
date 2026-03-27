@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import uuid
 import wave
@@ -18,25 +19,16 @@ import yt_dlp
 from moviepy import CompositeVideoClip, ImageClip, VideoFileClip
 
 try:
-    from faster_whisper import WhisperModel as _FasterWhisperModel
-    _FASTER_WHISPER_AVAILABLE = True
-except Exception:
-    _FasterWhisperModel = None
-    _FASTER_WHISPER_AVAILABLE = False
-
-try:
-    import whisper
-    _OPENAI_WHISPER_AVAILABLE = True
-except Exception:
-    whisper = None
-    _OPENAI_WHISPER_AVAILABLE = False
-
-try:
-    import cv2 as _cv2
     import numpy as _np
-    _CV2_AVAILABLE = True
 except ImportError:
-    _CV2_AVAILABLE = False
+    _np = None
+
+_FasterWhisperModel = None
+_FASTER_WHISPER_AVAILABLE: bool | None = None
+whisper = None
+_OPENAI_WHISPER_AVAILABLE: bool | None = None
+_cv2 = None
+_CV2_AVAILABLE: bool | None = None
 
 # Haar cascade singletons — loaded once per process, reused across all clips
 _FRONTAL_CASCADE: "_cv2.CascadeClassifier | None" = None
@@ -264,6 +256,58 @@ _whisper_model_cache: dict[str, object] = {}
 _whisper_model_lock = threading.Lock()
 _pyannote_pipeline_cache: object | None = None
 _pyannote_pipeline_lock = threading.Lock()
+
+
+def _ensure_faster_whisper_available() -> bool:
+    global _FasterWhisperModel, _FASTER_WHISPER_AVAILABLE
+    if _FASTER_WHISPER_AVAILABLE is not None:
+        return _FASTER_WHISPER_AVAILABLE
+
+    try:
+        from faster_whisper import WhisperModel as faster_whisper_model
+    except Exception:
+        _FasterWhisperModel = None
+        _FASTER_WHISPER_AVAILABLE = False
+    else:
+        _FasterWhisperModel = faster_whisper_model
+        _FASTER_WHISPER_AVAILABLE = True
+    return _FASTER_WHISPER_AVAILABLE
+
+
+def _ensure_openai_whisper_available() -> bool:
+    global whisper, _OPENAI_WHISPER_AVAILABLE
+    if _OPENAI_WHISPER_AVAILABLE is not None:
+        return _OPENAI_WHISPER_AVAILABLE
+
+    try:
+        import whisper as whisper_module
+    except Exception:
+        whisper = None
+        _OPENAI_WHISPER_AVAILABLE = False
+    else:
+        whisper = whisper_module
+        _OPENAI_WHISPER_AVAILABLE = True
+    return _OPENAI_WHISPER_AVAILABLE
+
+
+def _ensure_cv2() -> bool:
+    global _cv2, _CV2_AVAILABLE
+    if _CV2_AVAILABLE is not None:
+        return _CV2_AVAILABLE
+
+    if _np is None:
+        _CV2_AVAILABLE = False
+        return False
+
+    try:
+        import cv2 as cv2_module
+    except Exception:
+        _cv2 = None
+        _CV2_AVAILABLE = False
+    else:
+        _cv2 = cv2_module
+        _CV2_AVAILABLE = True
+    return _CV2_AVAILABLE
 
 
 def _emit(callback: ProgressCallback | None, stage: str, message: str) -> None:
@@ -494,6 +538,8 @@ def get_render_fps(clip: VideoFileClip) -> int:
 def _load_cascades() -> "tuple[_cv2.CascadeClassifier, _cv2.CascadeClassifier]":
     """Lazy-load Haar cascades into module-level singletons (once per process)."""
     global _FRONTAL_CASCADE, _PROFILE_CASCADE
+    if not _ensure_cv2():
+        raise RuntimeError("OpenCV is not available.")
     if _FRONTAL_CASCADE is None:
         _FRONTAL_CASCADE = _cv2.CascadeClassifier(
             _cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
@@ -516,7 +562,7 @@ def _detect_face_center_x(clip: VideoFileClip, sample_interval_s: float = 0.5) -
 
     Returns None when opencv is unavailable or zero faces found in any frame.
     """
-    if not _CV2_AVAILABLE:
+    if not _ensure_cv2():
         return None
 
     frontal_cascade, profile_cascade = _load_cascades()
@@ -786,7 +832,7 @@ def _classify_content_type(clip: VideoFileClip) -> tuple[str, dict]:
     Returns ``(content_type, metadata_dict)`` where metadata includes a
     ``confidence`` score (0-1).
     """
-    if not _CV2_AVAILABLE:
+    if not _ensure_cv2():
         return _CONTENT_SINGLE_SPEAKER, {"confidence": 0.0}
 
     try:
@@ -1219,6 +1265,8 @@ _CONTENT_LABELS = {
 
 def _blur_darken_frame(frame: "_np.ndarray") -> "_np.ndarray":
     """Blur heavily and darken a frame for use as a background layer."""
+    if not _ensure_cv2():
+        return (frame.astype(_np.float32) * 0.3).astype(_np.uint8)
     blurred = _cv2.GaussianBlur(frame, (51, 51), 0)
     return (blurred.astype(_np.float32) * 0.3).astype(_np.uint8)
 
@@ -1361,7 +1409,7 @@ def _build_screenshare_with_cam_clip(clip: VideoFileClip) -> VideoFileClip:
 
 def _detect_face_center_y(clip: VideoFileClip, sample_interval_s: float = 1.0) -> int | None:
     """Like _detect_face_center_x but returns the dominant face's vertical centre."""
-    if not _CV2_AVAILABLE:
+    if not _ensure_cv2():
         return None
 
     frontal_cascade, profile_cascade = _load_cascades()
@@ -1489,7 +1537,7 @@ def _detect_duo_face_positions(clip: VideoFileClip) -> tuple[int, int] | None:
     if cache is not None and cache.populated and cache.duo_positions is not None:
         return cache.duo_positions
 
-    if not _CV2_AVAILABLE:
+    if not _ensure_cv2():
         return None
 
     frontal_cascade, profile_cascade = _load_cascades()
@@ -1622,7 +1670,7 @@ def _detect_face_bbox(clip: VideoFileClip) -> tuple[int, int, int, int] | None:
     if cache is not None and cache.populated and cache.face_bbox is not None:
         return cache.face_bbox
 
-    if not _CV2_AVAILABLE:
+    if not _ensure_cv2():
         return None
 
     frontal_cascade, profile_cascade = _load_cascades()
@@ -2297,7 +2345,7 @@ def _normalize_faster_whisper_result(segments, info) -> dict:
 
 
 def _load_faster_whisper_model() -> tuple[str, object]:
-    if not _FASTER_WHISPER_AVAILABLE:
+    if not _ensure_faster_whisper_available():
         raise RuntimeError("faster-whisper is not installed.")
 
     last_error = None
@@ -2319,7 +2367,7 @@ def _load_faster_whisper_model() -> tuple[str, object]:
 
 
 def _load_openai_whisper_model() -> tuple[str, object]:
-    if not _OPENAI_WHISPER_AVAILABLE or whisper is None:
+    if not _ensure_openai_whisper_available() or whisper is None:
         raise RuntimeError("openai-whisper is not installed.")
 
     last_error = None
@@ -2378,7 +2426,7 @@ def transcribe_media(media_path: Path, *, word_timestamps: bool) -> dict:
             if WHISPER_BACKEND == "faster-whisper":
                 raise RuntimeError("faster-whisper transcription failed.") from error
             # fallback to openai-whisper
-            if _OPENAI_WHISPER_AVAILABLE:
+            if _ensure_openai_whisper_available():
                 backend, model_name, model = "openai-whisper", *_load_openai_whisper_model()
             else:
                 raise RuntimeError("faster-whisper transcription failed.") from error
