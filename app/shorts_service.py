@@ -13,7 +13,7 @@ import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import yt_dlp
 from moviepy import CompositeVideoClip, ImageClip, VideoFileClip
@@ -484,10 +484,28 @@ def validate_video_url(url: str) -> str:
     if hostname not in ALLOWED_VIDEO_HOSTS and not hostname.endswith(".youtube.com"):
         raise ValueError("Only YouTube video URLs are supported.")
 
-    if not parsed.path or parsed.path == "/":
+    video_id = ""
+    path_parts = [part for part in parsed.path.split("/") if part]
+    query = parse_qs(parsed.query)
+
+    if hostname in {"youtu.be", "www.youtu.be"}:
+        if path_parts:
+            video_id = path_parts[0]
+    elif len(path_parts) >= 2 and path_parts[0] in {"shorts", "live", "embed", "v"}:
+        video_id = path_parts[1]
+    else:
+        video_id = (query.get("v") or [""])[0]
+
+    video_id = re.sub(r"[^A-Za-z0-9_-]", "", video_id or "")
+    if not video_id:
         raise ValueError("The YouTube URL appears to be incomplete.")
 
-    return normalized_url
+    canonical_query: dict[str, str] = {"v": video_id}
+    start_value = (query.get("t") or query.get("start") or [""])[0].strip()
+    if start_value:
+        canonical_query["t"] = start_value
+
+    return f"https://www.youtube.com/watch?{urlencode(canonical_query)}"
 
 
 def sanitize_output_filename(output_filename: str) -> str:
