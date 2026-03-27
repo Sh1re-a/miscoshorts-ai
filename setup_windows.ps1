@@ -568,7 +568,11 @@ function Invoke-Setup {
     Write-SetupDone "Python is ready."
     $null = Ensure-Ffmpeg
     Write-SetupDone "FFmpeg is ready."
-    $pythonDepsSignature = "{0}|optional={1}" -f (Get-StateSignature @("requirements.txt", "requirements-optional.txt", "app")), (if (Test-ShouldInstallOptionalPythonDeps) { "on" } else { "off" })
+    $optionalDepsMode = "off"
+    if (Test-ShouldInstallOptionalPythonDeps) {
+        $optionalDepsMode = "on"
+    }
+    $pythonDepsSignature = "{0}|optional={1}" -f (Get-StateSignature @("requirements.txt", "requirements-optional.txt", "app")), $optionalDepsMode
     $frontendDepsSignature = Get-StateSignature @("frontend/package.json", "frontend/package-lock.json")
     $frontendBuildSignature = Get-StateSignature @("frontend/src", "frontend/index.html", "frontend/package.json", "frontend/vite.config.ts")
 
