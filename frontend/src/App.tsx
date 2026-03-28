@@ -9,7 +9,7 @@ import { Input } from './components/ui/input'
 import { Label } from './components/ui/label'
 import { Progress } from './components/ui/progress'
 import { feedbackTags, progressByStatus, stageDescriptions, statusTitles } from './features/jobs/config'
-import type { AnalyticsInsights, BootstrapPayload, ClipFeedback, DoctorReport, JobPayload, JobStatus } from './features/jobs/types'
+import type { AnalyticsInsights, BootstrapPayload, ClipFeedback, DoctorReport, JobPayload, JobStatus, ProcessErrorPayload } from './features/jobs/types'
 import { apiKeyStorageKey, formatEta, formatLogTime, getEtaWindow, loadSavedApiKey, readJsonResponse } from './features/jobs/utils'
 
 const fallbackRenderProfile = 'studio'
@@ -147,7 +147,8 @@ function App() {
   const isWorking = !['idle', 'completed', 'failed'].includes(job.status)
   const recentLogs = useMemo(() => (job.logs ?? []).slice(-8).reverse(), [job.logs])
   const hasAvailableApiKey = Boolean(apiKey.trim()) || hasConfiguredApiKey
-  const canSubmit = Boolean(videoUrl.trim()) && hasAvailableApiKey && !isSubmitting && !isWorking
+  const hasBlockingDoctorFailure = doctorReport?.status === 'FAIL'
+  const canSubmit = Boolean(videoUrl.trim()) && hasAvailableApiKey && !hasBlockingDoctorFailure && !isSubmitting && !isWorking
   const startButtonLabel = isSubmitting || isWorking ? 'Job running' : 'Start studio render'
   const etaWindow = useMemo(() => getEtaWindow(job, selectedClipCount, nowMs), [job, selectedClipCount, nowMs])
   const etaLabel = job.etaSeconds != null
@@ -277,10 +278,11 @@ function App() {
         }),
       })
 
-      const payload = await readJsonResponse<{ jobId?: string; error?: string; status?: JobStatus; clipCount?: number; queuePosition?: number; renderProfile?: string }>(response)
+      const payload = await readJsonResponse<ProcessErrorPayload>(response)
 
       if (!response.ok || !payload.jobId) {
-        throw new Error(payload.error ?? 'Could not start the job.')
+        const details = payload.details ? ` ${payload.details}` : ''
+        throw new Error((payload.error ?? 'Could not start the job.') + details)
       }
 
       setJobId(payload.jobId)
@@ -404,6 +406,11 @@ function App() {
                     ) : (
                       <p className="mt-2 text-xs">The machine looks ready for local renders.</p>
                     )}
+                    {doctorReport.status === 'FAIL' ? (
+                      <p className="mt-3 text-xs font-medium">
+                        Rendering is blocked until these setup issues are fixed. The most common fix on Windows is to move the project to a normal local folder and rerun `launch_app.bat`.
+                      </p>
+                    ) : null}
                   </div>
                 ) : null}
 
@@ -469,6 +476,9 @@ function App() {
                 ) : null}
 
                 {requestError ? <p className="text-sm text-rose-600">{requestError}</p> : null}
+                {hasBlockingDoctorFailure ? (
+                  <p className="text-sm text-rose-700">Rendering is currently blocked by failed system checks shown above.</p>
+                ) : null}
               </form>
             ) : (
               <div className="space-y-6">

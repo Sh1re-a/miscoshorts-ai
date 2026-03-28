@@ -68,6 +68,16 @@ def _check_writable(path: Path) -> bool:
         return False
 
 
+def _writable_fix_message(path: Path) -> str:
+    base_message = "Move the project to a normal writable folder."
+    if os.name == "nt":
+        return (
+            f"{base_message} Avoid network drives, shared drives, and protected folders. "
+            f"A good default is C:\\Users\\<your-name>\\Desktop\\miscoshorts-ai."
+        )
+    return base_message
+
+
 def _write_report_snapshot(report: dict) -> None:
     ensure_runtime_dirs()
     DOCTOR_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -109,7 +119,7 @@ def run_doctor(*, prepare_whisper: bool = False) -> dict:
         if _check_writable(path):
             _add_check(checks, "PASS", label, f"{path} is writable.")
         else:
-            _add_check(checks, "FAIL", label, f"{path} is not writable.", "Move the project to a normal writable folder.")
+            _add_check(checks, "FAIL", label, f"{path} is not writable.", _writable_fix_message(path))
 
     if FRONTEND_DIST_DIR.exists():
         _add_check(checks, "PASS", "Frontend", f"Bundled dashboard found in {FRONTEND_DIST_DIR}.")

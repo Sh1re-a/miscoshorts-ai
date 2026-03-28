@@ -352,6 +352,26 @@ def doctor_report():
 @app.post("/api/process")
 def process_video():
     _cleanup_expired_jobs()
+    doctor_report = run_doctor(prepare_whisper=False)
+    blocking_checks = [check for check in doctor_report.get("checks", []) if check.get("status") == "FAIL"]
+    if blocking_checks:
+        blocking_summary = "; ".join(
+            f"{check.get('name')}: {check.get('message')}" for check in blocking_checks[:3]
+        )
+        return (
+            jsonify(
+                {
+                    "error": "This machine is not ready for rendering yet. Fix the blocking setup checks first.",
+                    "errorHelp": "Move the project to a normal local writable folder, rerun launch_app.bat, then try again.",
+                    "doctorStatus": doctor_report.get("status"),
+                    "doctorReportPath": doctor_report.get("reportPath"),
+                    "blockingChecks": blocking_checks,
+                    "details": blocking_summary,
+                }
+            ),
+            503,
+        )
+
     payload = request.get_json(silent=True) or {}
     video_url = (payload.get("videoUrl") or "").strip()
     api_key = (payload.get("apiKey") or "").strip()

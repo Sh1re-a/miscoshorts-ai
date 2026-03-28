@@ -94,6 +94,20 @@ export type BootstrapPayload = {
   doctorReportPath?: string
 }
 
+export type ProcessErrorPayload = {
+  error?: string
+  errorHelp?: string
+  doctorStatus?: string
+  doctorReportPath?: string
+  blockingChecks?: DoctorCheck[]
+  details?: string
+  jobId?: string
+  status?: JobStatus
+  clipCount?: number
+  queuePosition?: number
+  renderProfile?: string
+}
+
 export type DoctorCheck = {
   status: 'PASS' | 'WARN' | 'FAIL'
   name: string
