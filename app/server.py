@@ -4,7 +4,6 @@ import json
 import os
 import re
 import secrets
-import shutil
 import threading
 import time
 import traceback
@@ -15,8 +14,9 @@ from flask import Flask, jsonify, request, send_file, send_from_directory
 from app import analytics, subtitle_preview
 from app.doctor import run_doctor
 from app.errors import explain_exception
-from app.paths import FRONTEND_DIST_DIR, OUTPUTS_DIR, OUTPUT_JOBS_DIR
+from app.paths import FRONTEND_DIST_DIR, OUTPUTS_DIR
 from app.runtime import configure_logging, is_debug_enabled, load_local_env, runtime_summary
+from app.storage import prune_runtime_storage
 from app.shorts_service import (
     create_short_from_url,
     normalize_requested_render_profile,
@@ -132,10 +132,10 @@ def _cleanup_expired_jobs() -> int:
 
     for job_id in removed_job_ids:
         _job_state_path(job_id).unlink(missing_ok=True)
-        shutil.rmtree(OUTPUT_JOBS_DIR / job_id, ignore_errors=True)
 
     if removed_job_ids:
         _refresh_queue_positions()
+        prune_runtime_storage(dry_run=False)
 
     return len(removed_job_ids)
 
@@ -150,7 +150,7 @@ def _resolve_job_artifact_path(job_id: str, artifact_path: str | None) -> Path |
     except ValueError:
         return None
 
-    if job_id not in resolved_path.parts or not resolved_path.exists():
+    if not resolved_path.exists():
         return None
 
     return resolved_path

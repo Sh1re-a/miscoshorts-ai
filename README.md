@@ -49,7 +49,8 @@ The first run is intentionally heavier than later runs.
 - The reusable doctor/support report lives in `.miscoshorts/setup/doctor-report.json`
 - The Whisper model cache lives in `.miscoshorts/runtime/model-cache/`
 - Reusable source/transcript cache lives in `outputs/cache/`
-- Job outputs live in `outputs/jobs/<job-id>/`
+- Temporary scratch files live in `outputs/temp/`
+- Final job outputs live in `outputs/jobs/<job-fingerprint>/`
 
 Nothing inside `.miscoshorts/` is meant for GitHub. It is private local runtime state.
 
@@ -73,6 +74,45 @@ If a tester hits a failure, the two most important files are:
 - `.miscoshorts/setup/doctor-report.json`
 
 If the folder already contains `frontend/dist`, the launcher can skip Node.js entirely for normal users.
+
+### Reuse, Cleanup, And Retention
+
+The app is now more deliberate about disk usage:
+
+- repeated renders with the same source URL, clip count, render profile, output filename, and subtitle style reuse the same deterministic job fingerprint
+- if a completed render already exists for that fingerprint, the app reuses it instead of generating duplicate outputs again
+- source downloads are reused from `outputs/cache/` instead of being copied into every new job folder
+- cached full transcripts are reused when the source URL matches
+- cached Gemini clip selection is reused per source URL + requested clip count
+- subtitle diagnostics are not saved by default anymore; set `KEEP_RENDER_DIAGNOSTICS=1` only when you are debugging subtitle issues
+- partial failed output folders are removed automatically at the end of failed renders
+- stale runtime storage can be pruned with the commands below
+
+Default retention policy:
+
+- `outputs/temp/` is pruned after 12 hours
+- `outputs/cache/` is pruned after 30 days
+- `outputs/jobs/` is pruned after 30 days based on the result manifest `lastUsedAt`
+
+You can override those with:
+
+- `TEMP_RETENTION_HOURS`
+- `CACHE_RETENTION_DAYS`
+- `JOB_OUTPUT_RETENTION_DAYS`
+
+Storage inspection / cleanup commands:
+
+```bash
+python3 -m app.storage --json
+python3 -m app.storage --prune --dry-run
+python3 -m app.storage --prune
+```
+
+```powershell
+py -m app.storage --json
+py -m app.storage --prune --dry-run
+py -m app.storage --prune
+```
 
 If you are sending this to another person, send the full project folder, not only the launcher file.
 
@@ -137,6 +177,14 @@ This reports friendly `PASS`, `WARN`, and `FAIL` checks for:
 - Whisper cache state
 
 Every doctor run also refreshes `.miscoshorts/setup/doctor-report.json` so a tester can send a stable support snapshot instead of pasting random terminal output.
+
+The doctor report now also includes storage usage for:
+
+- final job outputs
+- reusable cache
+- temporary workspace
+- logs
+- speech-model cache
 
 To force preparation of the configured Whisper model during diagnostics:
 

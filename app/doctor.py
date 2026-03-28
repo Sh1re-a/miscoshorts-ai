@@ -9,9 +9,10 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from app.paths import DOCTOR_REPORT_PATH, FRONTEND_DIST_DIR, FRONTEND_DIR, LOGS_DIR, MODEL_CACHE_DIR, OUTPUT_CACHE_DIR, OUTPUTS_DIR, RUNTIME_DIR
+from app.paths import DOCTOR_REPORT_PATH, FRONTEND_DIST_DIR, FRONTEND_DIR, LOGS_DIR, MODEL_CACHE_DIR, OUTPUT_CACHE_DIR, OUTPUTS_DIR, OUTPUT_TEMP_DIR, RUNTIME_DIR
 from app.runtime import configure_logging, ensure_runtime_dirs, is_debug_enabled, load_local_env, runtime_summary
 from app.shorts_service import ensure_dependencies
+from app.storage import storage_summary
 from app.transcription import (
     WHISPER_BACKEND,
     WHISPER_MODEL,
@@ -114,6 +115,7 @@ def run_doctor(*, prepare_whisper: bool = False) -> dict:
         ("Logs", LOGS_DIR),
         ("Outputs", OUTPUTS_DIR),
         ("Reusable cache", OUTPUT_CACHE_DIR),
+        ("Temporary workspace", OUTPUT_TEMP_DIR),
         ("Speech-model cache", MODEL_CACHE_DIR),
     ):
         if _check_writable(path):
@@ -225,6 +227,7 @@ def run_doctor(*, prepare_whisper: bool = False) -> dict:
         "status": overall_status,
         "checks": [asdict(check) for check in checks],
         "paths": runtime_summary(),
+        "storage": storage_summary(),
         "logPath": str(log_path),
         "reportPath": str(DOCTOR_REPORT_PATH),
         "whisper": {
@@ -254,6 +257,10 @@ def _print_report(report: dict) -> None:
     print("Paths")
     for key, value in report["paths"].items():
         print(f"  {key}: {value}")
+    print("")
+    print("Storage")
+    for key, value in report.get("storage", {}).items():
+        print(f"  {key}: {value['path']} ({value['bytes']} bytes)")
     print(f"  logPath: {report['logPath']}")
     print(f"  reportPath: {report['reportPath']}")
 

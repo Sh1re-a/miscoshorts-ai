@@ -7,6 +7,7 @@ from app.doctor import run_doctor
 from app.errors import explain_exception
 from app.runtime import configure_logging, load_local_env
 from app.shorts_service import create_short_from_url
+from app.storage import prune_runtime_storage, storage_summary
 
 load_local_env()
 logger, LOG_PATH = configure_logging("cli")
@@ -34,6 +35,9 @@ def _resolve_api_key(explicit_value: str | None) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the local MicroShorts AI pipeline without the browser UI.")
     parser.add_argument("--doctor", action="store_true", help="Run environment checks and exit.")
+    parser.add_argument("--storage", action="store_true", help="Show current cache/output/model storage usage and exit.")
+    parser.add_argument("--prune-storage", action="store_true", help="Delete stale temp/cache/output folders and exit.")
+    parser.add_argument("--dry-run", action="store_true", help="With --prune-storage, show what would be removed without deleting it.")
     parser.add_argument("--video-url", help="YouTube URL to process.")
     parser.add_argument("--api-key", help="Gemini API key.")
     parser.add_argument("--output", default="short_con_subs.mp4", help="Output filename.")
@@ -49,6 +53,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Log file: {report['logPath']}")
         print(f"Doctor report: {report['reportPath']}")
         return 0 if report["status"] != "FAIL" else 1
+
+    if args.storage:
+        print("MicroShorts AI Storage")
+        print("======================")
+        for key, payload in storage_summary().items():
+            print(f"{key}: {payload['path']} ({payload['bytes']} bytes)")
+        return 0
+
+    if args.prune_storage:
+        report = prune_runtime_storage(dry_run=args.dry_run)
+        print("MicroShorts AI Storage Cleanup")
+        print("==============================")
+        for key, payload in report["summary"].items():
+            print(f"{key}: {payload['path']} ({payload['bytes']} bytes)")
+        print("")
+        for bucket in ("temp", "cache", "jobs"):
+            stats = report[bucket]
+            action = "would remove" if args.dry_run else "removed"
+            print(f"{bucket}: {action} {stats['removedItems']} item(s), reclaimed {stats['removedBytes']} bytes")
+        return 0
 
     video_url = args.video_url or _prompt("YouTube video URL")
     api_key = _resolve_api_key(args.api_key)

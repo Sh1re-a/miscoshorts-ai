@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 
 from app.paths import OUTPUT_CACHE_DIR
+from app.storage import atomic_write_json
 
 CACHE_ENABLED = os.getenv("LOCAL_CACHE_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
 
@@ -17,13 +18,6 @@ def video_cache_key(video_url: str) -> str:
 
 def cache_dir_for_url(video_url: str) -> Path:
     return OUTPUT_CACHE_DIR / video_cache_key(video_url)
-
-
-def atomic_write_json(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(f"{path.suffix}.tmp")
-    temp_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
-    temp_path.replace(path)
 
 
 def is_valid_transcript_payload(payload: dict | None) -> bool:
@@ -88,3 +82,44 @@ def store_cached_transcript(video_url: str, transcript: dict) -> None:
         return
 
     atomic_write_json(cache_dir_for_url(video_url) / "transcript.json", transcript)
+
+
+def _clip_analysis_cache_path(video_url: str, clip_count: int) -> Path:
+    return cache_dir_for_url(video_url) / f"clip_analysis_v1_{clip_count}.json"
+
+
+def _is_valid_clip_candidates(payload: object) -> bool:
+    if not isinstance(payload, list):
+        return False
+    for item in payload:
+        if not isinstance(item, dict):
+            return False
+        if not isinstance(item.get("start"), (int, float)) or not isinstance(item.get("end"), (int, float)):
+            return False
+    return True
+
+
+def load_cached_clip_candidates(video_url: str, clip_count: int) -> list[dict] | None:
+    if not CACHE_ENABLED:
+        return None
+    cache_path = _clip_analysis_cache_path(video_url, clip_count)
+    if not cache_path.exists():
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    candidates = payload.get("candidates")
+    return candidates if _is_valid_clip_candidates(candidates) else None
+
+
+def store_cached_clip_candidates(video_url: str, clip_count: int, candidates: list[dict]) -> None:
+    if not CACHE_ENABLED or not _is_valid_clip_candidates(candidates):
+        return
+    atomic_write_json(
+        _clip_analysis_cache_path(video_url, clip_count),
+        {
+            "clipCount": clip_count,
+            "candidates": candidates,
+        },
+    )

@@ -47,6 +47,19 @@ export function formatEta(seconds: number) {
   return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`
 }
 
+export function formatBytes(numBytes: number) {
+  if (numBytes >= 1024 * 1024 * 1024) {
+    return `${(numBytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
+  }
+  if (numBytes >= 1024 * 1024) {
+    return `${Math.round(numBytes / (1024 * 1024))} MB`
+  }
+  if (numBytes >= 1024) {
+    return `${Math.round(numBytes / 1024)} KB`
+  }
+  return `${numBytes} B`
+}
+
 export function getEtaWindow(job: JobPayload, selectedClipCount: number, nowMs: number) {
   const effectiveClipCount = job.result?.clipCount ?? job.clipCount ?? selectedClipCount
   const stageStartedAt = (job.updatedAt ?? job.createdAt ?? nowMs / 1000) * 1000

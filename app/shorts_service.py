@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
 import shutil
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -145,13 +147,16 @@ _CLS_SCENE_CHANGE_THRESHOLD = 0.06 # inter-frame diff above this = scene change
 
 from app import gemini_analyzer, subtitles
 from app.media_cache import (
+    find_cached_video,
+    load_cached_clip_candidates,
     load_cached_transcript,
-    restore_cached_video,
+    store_cached_clip_candidates,
     store_cached_transcript,
     store_cached_video,
 )
-from app.paths import OUTPUTS_DIR, OUTPUT_JOBS_DIR
+from app.paths import OUTPUT_JOBS_DIR
 from app.runtime import configure_logging, load_local_env
+from app.storage import atomic_write_json, prune_runtime_storage
 from app.transcription import (
     analyze_audio_speakers,
     get_whisper_model_candidates,
@@ -188,6 +193,10 @@ DOWNLOAD_FORMAT_SORT = [
 RENDER_THREADS = DEFAULT_RENDER_THREADS
 DEFAULT_CLIP_COUNT = 3
 DEFAULT_RENDER_PROFILE = os.getenv("DEFAULT_RENDER_PROFILE", "studio").strip().lower() or "studio"
+KEEP_RENDER_DIAGNOSTICS = os.getenv("KEEP_RENDER_DIAGNOSTICS", "0").strip().lower() in {"1", "true", "yes", "on"}
+REUSE_COMPLETED_RENDERS = os.getenv("REUSE_COMPLETED_RENDERS", "1").strip().lower() not in {"0", "false", "no"}
+_PIPELINE_FINGERPRINT_VERSION = "v2"
+_LAST_STORAGE_PRUNE_AT = 0.0
 RENDER_PROFILES = {
     "fast": {
         "label": "Fast Draft 1080x1920 MP4",
@@ -2318,6 +2327,73 @@ def parse_gemini_responses(text: str) -> list[dict]:
     return []
 
 
+def _run_storage_maintenance_if_due() -> None:
+    global _LAST_STORAGE_PRUNE_AT
+    now = time.time()
+    if now - _LAST_STORAGE_PRUNE_AT < 900:
+        return
+    try:
+        prune_runtime_storage(dry_run=False)
+        _LAST_STORAGE_PRUNE_AT = now
+    except Exception:
+        logger.warning("Background storage maintenance failed.", exc_info=True)
+
+
+def _job_fingerprint(
+    *,
+    video_url: str,
+    output_filename: str,
+    clip_count: int,
+    render_profile: str,
+    subtitle_style: dict,
+) -> str:
+    payload = {
+        "version": _PIPELINE_FINGERPRINT_VERSION,
+        "videoUrl": video_url,
+        "outputFilename": output_filename,
+        "clipCount": clip_count,
+        "renderProfile": render_profile,
+        "subtitleStyle": subtitle_style,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return hashlib.sha1(encoded).hexdigest()[:16]
+
+
+def _result_manifest_path(output_dir: Path) -> Path:
+    return output_dir / "meta" / "result.json"
+
+
+def _result_paths_exist(result: dict) -> bool:
+    transcript_path = result.get("transcriptPath")
+    if transcript_path and not Path(transcript_path).exists():
+        return False
+    for clip in result.get("clips") or []:
+        output_path = clip.get("outputPath")
+        if not output_path or not Path(output_path).exists():
+            return False
+    output_path = result.get("outputPath")
+    if output_path and not Path(output_path).exists():
+        return False
+    return True
+
+
+def _load_existing_result(output_dir: Path, fingerprint: str) -> dict | None:
+    manifest_path = _result_manifest_path(output_dir)
+    if not manifest_path.exists():
+        return None
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if payload.get("jobFingerprint") != fingerprint:
+        return None
+    if not _result_paths_exist(payload):
+        return None
+    payload["lastUsedAt"] = time.time()
+    atomic_write_json(manifest_path, payload)
+    return payload
+
+
 def create_output_dir(base_dir: str | Path = OUTPUT_JOBS_DIR, job_id: str | None = None) -> tuple[str, Path]:
     job_id = job_id or uuid.uuid4().hex[:10]
     output_dir = Path(base_dir) / job_id
@@ -2345,12 +2421,37 @@ def create_short_from_url(
     subtitle_style = normalize_requested_subtitle_style(subtitle_style)
     render_profile = normalize_requested_render_profile(render_profile)
     render_settings = _get_render_profile_settings(render_profile)
+    clip_count = max(1, min(5, int(clip_count)))
+    job_id = job_id or uuid.uuid4().hex[:10]
+    job_fingerprint = _job_fingerprint(
+        video_url=video_url,
+        output_filename=output_filename,
+        clip_count=clip_count,
+        render_profile=render_profile,
+        subtitle_style=subtitle_style,
+    )
+    _run_storage_maintenance_if_due()
+
+    output_dir = Path(base_dir) / job_fingerprint
+    if REUSE_COMPLETED_RENDERS:
+        existing_result = _load_existing_result(output_dir, job_fingerprint)
+        if existing_result is not None:
+            _emit(progress_callback, "completed", "Existing clips already match this request. Reusing previous render output.")
+            existing_result["jobId"] = job_id
+            existing_result["reusedExisting"] = True
+            existing_result["jobFingerprint"] = job_fingerprint
+            existing_result["outputDir"] = str(output_dir)
+            return existing_result
 
     ensure_dependencies()
     _emit(progress_callback, "validating", "Checking subtitle rendering compatibility...")
     subtitles.assert_subtitle_rendering_ready(subtitle_style)
 
-    job_id, output_dir = create_output_dir(base_dir=base_dir, job_id=job_id)
+    if output_dir.exists():
+        _warn_note(f"Cleaning stale output directory before rerender: {output_dir}")
+        shutil.rmtree(output_dir, ignore_errors=True)
+
+    _created_dir_name, output_dir = create_output_dir(base_dir=base_dir, job_id=job_fingerprint)
     source_dir = output_dir / "source"
     audio_dir = output_dir / "audio"
     meta_dir = output_dir / "meta"
@@ -2366,15 +2467,18 @@ def create_short_from_url(
     clip_vertical = None
     clip_final = None
     download_info: dict = {}
+    remove_source_video_at_end = False
+    render_completed = False
 
     try:
-        video_path = restore_cached_video(video_url, temp_base)
+        video_path = find_cached_video(video_url)
         if video_path is not None:
             _emit(progress_callback, "downloading", "Reusing cached source video from a previous local run...")
         else:
             _emit(progress_callback, "downloading", "Downloading the highest-quality source video and audio from YouTube...")
             video_path, download_info = download_video(video_url, temp_base, progress_callback)
             store_cached_video(video_url, video_path)
+            remove_source_video_at_end = True
 
         if video_path is not None:
             if not download_info:
@@ -2403,14 +2507,18 @@ def create_short_from_url(
             f"URL: {video_url}\n{result['text']}", encoding="utf-8"
         )
 
-        clip_count = max(1, min(5, int(clip_count)))
-        _emit(progress_callback, "analyzing", f"Asking Gemini for the best {clip_count} clips...")
-        analysis = gemini_analyzer.find_viral_clips(result["segments"], api_key, clip_count=clip_count)
-        clip_candidates = parse_gemini_responses(analysis)
-        if not clip_candidates:
-            clip_candidates = [parse_gemini_response(analysis)]
-
-        clip_candidates = clip_candidates[:clip_count]
+        cached_clip_candidates = load_cached_clip_candidates(video_url, clip_count)
+        if cached_clip_candidates is not None:
+            _emit(progress_callback, "analyzing", f"Reusing cached clip selection for {clip_count} clips...")
+            clip_candidates = cached_clip_candidates
+        else:
+            _emit(progress_callback, "analyzing", f"Asking Gemini for the best {clip_count} clips...")
+            analysis = gemini_analyzer.find_viral_clips(result["segments"], api_key, clip_count=clip_count)
+            clip_candidates = parse_gemini_responses(analysis)
+            if not clip_candidates:
+                clip_candidates = [parse_gemini_response(analysis)]
+            clip_candidates = clip_candidates[:clip_count]
+            store_cached_clip_candidates(video_url, clip_count, clip_candidates)
 
         # Validate clip timestamps against actual video duration
         clips_output = []
@@ -2479,21 +2587,24 @@ def create_short_from_url(
                 0,
                 clip_vertical.duration,
             )
-            subtitle_plan_path = diagnostics_dir / f"clip_{index:02d}_subtitles.json"
-            subtitle_plan_path.write_text(
-                json.dumps(subtitles.export_subtitle_plan(subtitle_plan), ensure_ascii=True, indent=2),
-                encoding="utf-8",
-            )
             subtitle_preflight = subtitles.validate_subtitle_plan_renderability(
                 clip_vertical.size,
                 subtitle_plan,
                 subtitle_style,
             )
-            subtitle_preflight_path = diagnostics_dir / f"clip_{index:02d}_subtitle_preflight.json"
-            subtitle_preflight_path.write_text(
-                json.dumps(subtitle_preflight, ensure_ascii=True, indent=2),
-                encoding="utf-8",
-            )
+            subtitle_plan_path = None
+            subtitle_preflight_path = None
+            if KEEP_RENDER_DIAGNOSTICS:
+                subtitle_plan_path = diagnostics_dir / f"clip_{index:02d}_subtitles.json"
+                subtitle_plan_path.write_text(
+                    json.dumps(subtitles.export_subtitle_plan(subtitle_plan), ensure_ascii=True, indent=2),
+                    encoding="utf-8",
+                )
+                subtitle_preflight_path = diagnostics_dir / f"clip_{index:02d}_subtitle_preflight.json"
+                subtitle_preflight_path.write_text(
+                    json.dumps(subtitle_preflight, ensure_ascii=True, indent=2),
+                    encoding="utf-8",
+                )
             _emit(progress_callback, "rendering", f"Subtitle preflight passed for clip {index}.")
 
             clip_final = subtitles.create_subtitles(
@@ -2523,10 +2634,10 @@ def create_short_from_url(
                     "analytics": clip_analytics,
                     "outputFilename": current_filename,
                     "outputPath": str(output_path),
-                    "subtitlePlanPath": str(subtitle_plan_path),
-                    "subtitlePlan": subtitles.export_subtitle_plan(subtitle_plan),
-                    "subtitlePreflightPath": str(subtitle_preflight_path),
-                    "subtitlePreflight": subtitle_preflight,
+                    "subtitlePlanPath": str(subtitle_plan_path) if subtitle_plan_path else None,
+                    "subtitlePreflightPath": str(subtitle_preflight_path) if subtitle_preflight_path else None,
+                    "subtitleCueCount": len(subtitle_plan),
+                    "subtitlePreflightWarnings": len(subtitle_preflight.get("warnings") or []),
                 }
             )
 
@@ -2542,8 +2653,10 @@ def create_short_from_url(
 
         _emit(progress_callback, "completed", f"{len(clips_output)} high-quality clips are ready to download.")
         first_clip = clips_output[0]
-        return {
+        now = time.time()
+        result_payload = {
             "jobId": job_id,
+            "jobFingerprint": job_fingerprint,
             "videoUrl": video_url,
             "title": first_clip.get("title"),
             "reason": first_clip.get("reason"),
@@ -2560,7 +2673,13 @@ def create_short_from_url(
             "renderProfileKey": render_profile,
             "clips": clips_output,
             "clipCount": len(clips_output),
+            "generatedAt": now,
+            "lastUsedAt": now,
+            "reusedExisting": False,
         }
+        atomic_write_json(_result_manifest_path(output_dir), result_payload)
+        render_completed = True
+        return result_payload
     finally:
         if clip_final is not None:
             clip_final.close()
@@ -2570,8 +2689,10 @@ def create_short_from_url(
             clip_vertical.close()
         if clip is not None:
             clip.close()
-        if video_path and os.path.exists(video_path):
+        if remove_source_video_at_end and video_path and os.path.exists(video_path):
             os.remove(video_path)
+        if not render_completed and output_dir.exists():
+            shutil.rmtree(output_dir, ignore_errors=True)
 
 
 def build_clip_filename(output_filename: str, clip_index: int, total_clips: int) -> str:

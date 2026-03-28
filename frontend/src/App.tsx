@@ -10,7 +10,7 @@ import { Label } from './components/ui/label'
 import { Progress } from './components/ui/progress'
 import { feedbackTags, progressByStatus, stageDescriptions, statusTitles } from './features/jobs/config'
 import type { AnalyticsInsights, BootstrapPayload, ClipFeedback, DoctorReport, JobPayload, JobStatus, ProcessErrorPayload } from './features/jobs/types'
-import { apiKeyStorageKey, formatEta, formatLogTime, getEtaWindow, loadSavedApiKey, readJsonResponse } from './features/jobs/utils'
+import { apiKeyStorageKey, formatBytes, formatEta, formatLogTime, getEtaWindow, loadSavedApiKey, readJsonResponse } from './features/jobs/utils'
 
 const fallbackRenderProfile = 'studio'
 const fallbackRenderProfiles = {
@@ -162,6 +162,10 @@ function App() {
   const progressValue = job.overallProgress ?? progressByStatus[job.status]
   const highlightedDoctorChecks = useMemo(
     () => (doctorReport?.checks ?? []).filter((check) => check.status !== 'PASS').slice(0, 4),
+    [doctorReport],
+  )
+  const highlightedStorage = useMemo(
+    () => doctorReport?.storage ? Object.entries(doctorReport.storage).slice(0, 4) : [],
     [doctorReport],
   )
 
@@ -395,6 +399,15 @@ function App() {
                     <p className="mt-1">Log file: {doctorReport.logPath}</p>
                     <p className="mt-1">Doctor report: {doctorReport.reportPath}</p>
                     <p className="mt-1">Speech model cache: {doctorReport.paths.modelCacheDir}</p>
+                    {highlightedStorage.length > 0 ? (
+                      <div className="mt-2 grid gap-2 text-xs text-current sm:grid-cols-2">
+                        {highlightedStorage.map(([key, value]) => (
+                          <p key={key}>
+                            {key}: {formatBytes(value.bytes)}
+                          </p>
+                        ))}
+                      </div>
+                    ) : null}
                     {highlightedDoctorChecks.length > 0 ? (
                       <div className="mt-2 space-y-1 text-xs">
                         {highlightedDoctorChecks.map((check) => (
@@ -538,6 +551,7 @@ function App() {
                   <p className="font-semibold text-slate-900">What happens now</p>
                   <p className="mt-2">{stageDescriptions[job.status]}</p>
                   <p className="mt-3 text-slate-500">Requested clips: {effectiveClipCount}. Output profile: {job.result?.renderProfile ?? currentRenderProfileLabel}. Finished files are saved locally in the outputs folder and will appear below when ready.</p>
+                  {job.result?.reusedExisting ? <p className="mt-2 text-emerald-700">This run reused an existing finished render instead of generating duplicate files again.</p> : null}
                   {doctorReport ? <p className="mt-2 text-slate-500">Support log: {doctorReport.logPath}</p> : null}
                 </div>
 
@@ -589,6 +603,7 @@ function App() {
                       </div>
                       <p>{job.result.title ?? 'Your first clip is ready.'}</p>
                       <p className="mt-2 text-emerald-900">Quality profile: {job.result.renderProfile ?? currentRenderProfileLabel}</p>
+                      {job.result.reusedExisting ? <p className="mt-2 text-emerald-900">Reuse mode: existing finished clips were reused for this exact request.</p> : null}
                       <p className="mt-2 text-emerald-800/80">Saved locally in {job.result.outputDir}</p>
                     </div>
 

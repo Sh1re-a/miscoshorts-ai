@@ -24,18 +24,33 @@ export type JobClip = {
   outputFilename: string
   contentType?: string
   analytics?: Record<string, unknown>
+  subtitlePlanPath?: string | null
+  subtitlePreflightPath?: string | null
+  subtitleCueCount?: number
+  subtitlePreflightWarnings?: number
 }
 
 export type JobResult = {
+  jobId?: string
+  jobFingerprint?: string
+  videoUrl?: string
   title?: string
   reason?: string
   start: number
   end: number
   outputFilename: string
+  outputPath?: string
+  transcriptPath?: string
+  sourceMetaPath?: string
+  sourceDownload?: Record<string, unknown>
+  subtitleStyle?: string
   outputDir: string
   clipCount: number
   renderProfile?: string
   renderProfileKey?: string
+  generatedAt?: number
+  lastUsedAt?: number
+  reusedExisting?: boolean
   clips: JobClip[]
 }
 
@@ -119,6 +134,7 @@ export type DoctorReport = {
   status: 'PASS' | 'WARN' | 'FAIL'
   checks: DoctorCheck[]
   paths: Record<string, string>
+  storage?: Record<string, { path: string; bytes: number }>
   logPath: string
   reportPath: string
   whisper: {
