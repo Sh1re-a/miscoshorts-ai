@@ -120,7 +120,7 @@ def download_video(url: str, destination_base: Path, progress_callback: Progress
                 speed = d.get("speed") or 0
                 speed_mb = speed / 1_048_576 if speed else 0
                 eta = d.get("eta") or 0
-                msg = f"Downloading... {pct}%"
+                msg = f"SOURCE | Downloading... {pct}%"
                 if speed_mb >= 0.1:
                     msg += f"  ({speed_mb:.1f} MB/s"
                     if eta:
@@ -129,7 +129,7 @@ def download_video(url: str, destination_base: Path, progress_callback: Progress
                 _emit(progress_callback, "downloading", msg)
         elif d.get("info_dict") and last_reported["pct"] < 0:
             last_reported["pct"] = 0
-            _emit(progress_callback, "downloading", "Downloading video... (size unknown)")
+            _emit(progress_callback, "downloading", "SOURCE | Downloading video... (size unknown)")
 
     ydl_opts = {
         "format": DOWNLOAD_FORMAT,
@@ -149,42 +149,42 @@ def download_video(url: str, destination_base: Path, progress_callback: Progress
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
     download_info = _summarize_download_info(info)
-    _emit(progress_callback, "downloading", _format_download_quality_label(download_info))
+    _emit(progress_callback, "downloading", f"SOURCE | {_format_download_quality_label(download_info)}")
     return _resolve_downloaded_video_path(destination_base), download_info
 
 
-def resolve_source_video(video_url: str, destination_base: Path, progress_callback: ProgressCallback | None = None) -> tuple[Path, dict, bool]:
+def resolve_source_video(video_url: str, destination_base: Path, progress_callback: ProgressCallback | None = None) -> tuple[Path, dict, bool, bool]:
     cached_video = find_cached_video(video_url)
     if cached_video is not None:
-        _emit(progress_callback, "downloading", "Reusing cached source video from a previous local run...")
-        return cached_video, {"webpageUrl": video_url, "localPath": str(cached_video)}, False
+        _emit(progress_callback, "downloading", "CACHE | Reusing cached source video from a previous local run...")
+        return cached_video, {"webpageUrl": video_url, "localPath": str(cached_video)}, False, True
 
-    _emit(progress_callback, "downloading", "Downloading the highest-quality source video and audio from YouTube...")
+    _emit(progress_callback, "downloading", "SOURCE | Downloading the highest-quality source video and audio from YouTube...")
     video_path, download_info = download_video(video_url, destination_base, progress_callback)
     store_cached_video(video_url, video_path)
     download_info["localPath"] = str(video_path)
-    return video_path, download_info, True
+    return video_path, download_info, True, False
 
 
-def resolve_transcript(video_url: str, video_path: Path, progress_callback: ProgressCallback | None = None) -> dict:
+def resolve_transcript(video_url: str, video_path: Path, progress_callback: ProgressCallback | None = None) -> tuple[dict, bool]:
     cached = load_cached_transcript(video_url)
     if cached is not None:
-        _emit(progress_callback, "transcribing", "Reusing cached transcript from a previous local run...")
-        return cached
+        _emit(progress_callback, "transcribing", "CACHE | Reusing cached transcript from a previous local run...")
+        return cached, True
 
     whisper_model = get_whisper_model_candidates()[0]
     if whisper_cache_contains_files():
-        _emit(progress_callback, "transcribing", f"Transcribing full video once with Whisper ({whisper_model}) for analysis and subtitles...")
+        _emit(progress_callback, "transcribing", f"TRANSCRIPT | Transcribing full video once with Whisper ({whisper_model}) for analysis and subtitles...")
     else:
         _emit(
             progress_callback,
             "transcribing",
-            f"Preparing the local speech model ({whisper_model}) for first run. This one-time download can take a few minutes, then transcription starts automatically...",
+            f"TRANSCRIPT | Preparing the local speech model ({whisper_model}) for first run. This one-time download can take a few minutes, then transcription starts automatically...",
         )
     transcript = transcribe_video_fast(video_path)
     store_cached_transcript(video_url, transcript)
-    _emit(progress_callback, "transcribing", f"Transcription complete. Found {len(transcript.get('segments') or [])} segments.")
-    return transcript
+    _emit(progress_callback, "transcribing", f"TRANSCRIPT | Transcription complete. Found {len(transcript.get('segments') or [])} segments.")
+    return transcript, False
 
 
 def _extract_gemini_clip_blocks(text: str) -> list[dict[str, str]]:
@@ -273,20 +273,20 @@ def select_clip_candidates(
     api_key: str,
     clip_count: int,
     progress_callback: ProgressCallback | None = None,
-) -> list[dict]:
+) -> tuple[list[dict], bool]:
     cached = load_cached_clip_candidates(video_url, clip_count)
     if cached is not None:
-        _emit(progress_callback, "analyzing", f"Reusing cached clip selection for {clip_count} clips...")
-        return cached
+        _emit(progress_callback, "analyzing", f"CACHE | Reusing cached clip selection for {clip_count} clips...")
+        return cached, True
 
-    _emit(progress_callback, "analyzing", f"Asking Gemini for the best {clip_count} clips...")
+    _emit(progress_callback, "analyzing", f"CLIP_SELECTION | Asking Gemini for the best {clip_count} clips...")
     analysis = gemini_analyzer.find_viral_clips(transcript_segments, api_key, clip_count=clip_count)
     clip_candidates = parse_gemini_responses(analysis)
     if not clip_candidates:
         clip_candidates = [parse_gemini_response(analysis)]
     clip_candidates = clip_candidates[:clip_count]
     store_cached_clip_candidates(video_url, clip_count, clip_candidates)
-    return clip_candidates
+    return clip_candidates, False
 
 
 def probe_video_duration(video_path: Path) -> float:
@@ -342,5 +342,5 @@ def emit_workload_warning(video_duration: float, clip_count: int, progress_callb
         _emit(
             progress_callback,
             "rendering",
-            "Heavy workload detected. This source is long or requests many clips, so rendering will use more RAM and disk than a normal run.",
+            "SUMMARY | Heavy workload detected. This source is long or requests many clips, so rendering will use more RAM and disk than a normal run.",
         )

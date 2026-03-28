@@ -28,6 +28,30 @@ export type JobClip = {
   subtitlePreflightPath?: string | null
   subtitleCueCount?: number
   subtitlePreflightWarnings?: number
+  renderMetrics?: Record<string, unknown>
+}
+
+export type RunSummary = {
+  status?: string
+  totalJobSeconds?: number
+  clipCount?: number
+  generatedClipCount?: number
+  reusedClipCount?: number
+  reusedExisting?: boolean
+  cache?: Record<string, string>
+  cacheHits?: string[]
+  cacheMisses?: string[]
+  slowestClip?: number | null
+  slowestClipSeconds?: number | null
+  slowestPhases?: Array<[string, number]>
+  peakRssBytes?: number | null
+  peakProcessRssBytes?: number | null
+  peakWorkspaceBytes?: number | null
+  finalOutputBytes?: number | null
+  largestClipIndex?: number | null
+  largestClipOutputBytes?: number | null
+  cleanupSucceeded?: boolean | null
+  promotionSucceeded?: boolean | null
 }
 
 export type JobResult = {
@@ -51,6 +75,10 @@ export type JobResult = {
   generatedAt?: number
   lastUsedAt?: number
   reusedExisting?: boolean
+  metrics?: Record<string, unknown>
+  runReportPath?: string
+  runSummary?: RunSummary
+  logPath?: string
   clips: JobClip[]
 }
 

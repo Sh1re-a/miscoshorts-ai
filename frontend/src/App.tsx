@@ -552,6 +552,7 @@ function App() {
                   <p className="mt-2">{stageDescriptions[job.status]}</p>
                   <p className="mt-3 text-slate-500">Requested clips: {effectiveClipCount}. Output profile: {job.result?.renderProfile ?? currentRenderProfileLabel}. Finished files are saved locally in the outputs folder and will appear below when ready.</p>
                   {job.result?.reusedExisting ? <p className="mt-2 text-emerald-700">This run reused an existing finished render instead of generating duplicate files again.</p> : null}
+                  {job.result?.runReportPath ? <p className="mt-2 text-slate-500">Run report: {job.result.runReportPath}</p> : null}
                   {doctorReport ? <p className="mt-2 text-slate-500">Support log: {doctorReport.logPath}</p> : null}
                 </div>
 
@@ -605,7 +606,48 @@ function App() {
                       <p className="mt-2 text-emerald-900">Quality profile: {job.result.renderProfile ?? currentRenderProfileLabel}</p>
                       {job.result.reusedExisting ? <p className="mt-2 text-emerald-900">Reuse mode: existing finished clips were reused for this exact request.</p> : null}
                       <p className="mt-2 text-emerald-800/80">Saved locally in {job.result.outputDir}</p>
+                      {job.result.runReportPath ? <p className="mt-2 text-emerald-800/80">Run report saved in {job.result.runReportPath}</p> : null}
                     </div>
+
+                    {job.result.runSummary ? (
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+                        <p className="font-semibold text-slate-950">Run profile</p>
+                        <p className="mt-2">
+                          Total time: {job.result.runSummary.totalJobSeconds ?? 'unknown'}s.
+                          {' '}Generated: {job.result.runSummary.generatedClipCount ?? 0}.
+                          {' '}Reused: {job.result.runSummary.reusedClipCount ?? 0}.
+                        </p>
+                        {job.result.runSummary.slowestClip != null ? (
+                          <p className="mt-2 text-slate-500">
+                            Slowest clip: #{job.result.runSummary.slowestClip} ({job.result.runSummary.slowestClipSeconds ?? 0}s)
+                          </p>
+                        ) : null}
+                        {job.result.runSummary.peakRssBytes || job.result.runSummary.peakProcessRssBytes ? (
+                          <p className="mt-2 text-slate-500">
+                            Peak memory hint: {formatBytes(Number(job.result.runSummary.peakRssBytes ?? job.result.runSummary.peakProcessRssBytes ?? 0))}
+                          </p>
+                        ) : null}
+                        {job.result.runSummary.peakWorkspaceBytes ? (
+                          <p className="mt-2 text-slate-500">
+                            Peak workspace: {formatBytes(Number(job.result.runSummary.peakWorkspaceBytes))}
+                          </p>
+                        ) : null}
+                        {job.result.runSummary.finalOutputBytes ? (
+                          <p className="mt-2 text-slate-500">
+                            Final output size: {formatBytes(Number(job.result.runSummary.finalOutputBytes))}
+                          </p>
+                        ) : null}
+                        {(job.result.runSummary.slowestPhases?.length ?? 0) > 0 ? (
+                          <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
+                            {job.result.runSummary.slowestPhases?.slice(0, 4).map(([phase, seconds]) => (
+                              <span key={phase} className="rounded-full border border-slate-200 bg-white px-3 py-1">
+                                {phase}: {seconds}s
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
 
                     <div className="space-y-3">
                       {job.result.clips.map((clip) => {

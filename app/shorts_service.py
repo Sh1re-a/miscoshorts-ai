@@ -154,6 +154,7 @@ from app.render_session import (
     load_existing_result,
     write_result_manifest,
 )
+from app.run_report import RunObserver
 from app.runtime import configure_logging, load_local_env
 from app.source_pipeline import (
     emit_workload_warning,
@@ -285,6 +286,20 @@ def _emit(callback: ProgressCallback | None, stage: str, message: str) -> None:
     if callback is not None:
         callback(stage, message)
     logger.info("[%s] %s", stage, message)
+
+
+def _emit_labeled(
+    callback: ProgressCallback | None,
+    stage: str,
+    phase: str,
+    message: str,
+    *,
+    observer: RunObserver | None = None,
+    **data,
+) -> None:
+    if observer is not None:
+        observer.log(phase, message, **data)
+    _emit(callback, stage, f"{phase} | {message}")
 
 
 def _debug_note(message: str) -> None:
@@ -2039,6 +2054,7 @@ def _render_selected_clips(
     subtitle_style: dict,
     render_settings: dict[str, str],
     progress_callback: ProgressCallback | None = None,
+    observer: RunObserver | None = None,
 ) -> list[dict]:
     clips_output: list[dict] = []
 
@@ -2061,21 +2077,53 @@ def _render_selected_clips(
         subtitle_preflight_path = None
 
         try:
-            _emit(progress_callback, "rendering", f"Rendering clip {index} of {len(clip_candidates)} with a fresh source handle to reduce memory pressure...")
+            observer.snapshot(f"clip_{index}_start", workspace_dir=workspace.workspace_dir) if observer is not None else None
+            _emit_labeled(
+                progress_callback,
+                "rendering",
+                "CLIP_RENDER",
+                f"Rendering clip {index} of {len(clip_candidates)} with a fresh source handle to reduce memory pressure...",
+                observer=observer,
+                clipIndex=index,
+                clipStart=start,
+                clipEnd=end,
+            )
             clip_started_at = time.time()
             clip_source = VideoFileClip(str(video_path))
             clip = clip_source.subclipped(start, end)
 
             if clip.audio is not None:
                 audio_started_at = time.time()
+                _emit_labeled(
+                    progress_callback,
+                    "rendering",
+                    "AUDIO",
+                    f"Extracting audio segment for clip {index}...",
+                    observer=observer,
+                    clipIndex=index,
+                )
                 audio_temp_path = extract_audio_segment(video_path, start, end, workspace.audio_dir)
                 clip_metrics["audioExtractSeconds"] = round(time.time() - audio_started_at, 2)
 
-            _emit(progress_callback, "rendering", f"Preparing subtitle timing for clip {index}...")
+            _emit_labeled(
+                progress_callback,
+                "rendering",
+                "SUBTITLES",
+                f"Preparing subtitle timing for clip {index}...",
+                observer=observer,
+                clipIndex=index,
+            )
             transcript_started_at = time.time()
             clip_transcript, requires_precise_fallback = extract_clip_transcript_from_segments(transcript_segments, start, end)
             if requires_precise_fallback:
-                _emit(progress_callback, "rendering", f"Refining subtitle timing for clip {index} from the pre-extracted audio track...")
+                _emit_labeled(
+                    progress_callback,
+                    "rendering",
+                    "TRANSCRIPT",
+                    f"Refining subtitle timing for clip {index} from the pre-extracted audio track...",
+                    observer=observer,
+                    clipIndex=index,
+                )
                 fallback_started_at = time.time()
                 clip_transcript = transcribe_audio_path_for_subtitles(audio_temp_path)
                 clip_metrics["subtitleFallbackSeconds"] = round(time.time() - fallback_started_at, 2)
@@ -2084,20 +2132,38 @@ def _render_selected_clips(
             speaker_started_at = time.time()
             audio_speaker_meta = analyze_audio_speakers(audio_temp_path, clip_transcript)
             clip_metrics["speakerAnalysisSeconds"] = round(time.time() - speaker_started_at, 2)
-            _emit(
+            _emit_labeled(
                 progress_callback,
                 "rendering",
+                "AUDIO",
                 f"Speaker analysis for clip {index}: {speaker_analysis_backend_label(audio_speaker_meta)} "
                 f"({audio_speaker_meta.get('audioSpeakerCount', 0)} speaker estimate).",
+                observer=observer,
+                clipIndex=index,
             )
 
-            _emit(progress_callback, "rendering", f"Analysing visual content for clip {index}...")
+            _emit_labeled(
+                progress_callback,
+                "rendering",
+                "CLIP_RENDER",
+                f"Analysing visual content for clip {index}...",
+                observer=observer,
+                clipIndex=index,
+            )
             layout_started_at = time.time()
             clip_vertical, content_type, clip_analytics = build_vertical_master_clip(clip, audio_speaker_meta=audio_speaker_meta)
             clip_metrics["layoutBuildSeconds"] = round(time.time() - layout_started_at, 2)
             clip_analytics.update(audio_speaker_meta)
             ct_label = _CONTENT_LABELS.get(content_type, content_type)
-            _emit(progress_callback, "rendering", f"Clip {index} detected as {ct_label} — composing vertical frame...")
+            _emit_labeled(
+                progress_callback,
+                "rendering",
+                "CLIP_RENDER",
+                f"Clip {index} detected as {ct_label} — composing vertical frame...",
+                observer=observer,
+                clipIndex=index,
+                contentType=content_type,
+            )
 
             subtitle_runtime_started_at = time.time()
             subtitle_runtime = subtitles.prepare_subtitle_runtime(
@@ -2122,7 +2188,15 @@ def _render_selected_clips(
                     json.dumps(subtitle_preflight, ensure_ascii=True, indent=2),
                     encoding="utf-8",
                 )
-            _emit(progress_callback, "rendering", f"Subtitle preflight passed for clip {index}.")
+            _emit_labeled(
+                progress_callback,
+                "rendering",
+                "SUBTITLES",
+                f"Subtitle preflight passed for clip {index}.",
+                observer=observer,
+                clipIndex=index,
+                subtitleCues=len(subtitle_plan),
+            )
 
             subtitle_compose_started_at = time.time()
             clip_final = subtitles.create_subtitles(
@@ -2145,33 +2219,39 @@ def _render_selected_clips(
             clip_metrics.update(encode_metrics)
             clip_metrics["totalClipSeconds"] = round(time.time() - clip_started_at, 2)
             output_bytes = int(clip_metrics.get("outputBytes") or 0)
-            _emit(
+            clip_payload = {
+                "index": index,
+                "title": clip_data.get("title"),
+                "reason": clip_data.get("reason"),
+                "start": start,
+                "end": end,
+                "contentType": content_type,
+                "analytics": clip_analytics,
+                "outputFilename": current_filename,
+                "subtitlePlanFilename": subtitle_plan_path.name if subtitle_plan_path else None,
+                "subtitlePreflightFilename": subtitle_preflight_path.name if subtitle_preflight_path else None,
+                "subtitleCueCount": len(subtitle_plan),
+                "subtitlePreflightWarnings": len(subtitle_preflight.get("warnings") or []),
+                "renderMetrics": clip_metrics,
+            }
+            if observer is not None:
+                observer.record_clip(clip_payload)
+                observer.snapshot(f"clip_{index}_complete", workspace_dir=workspace.workspace_dir)
+            _emit_labeled(
                 progress_callback,
                 "rendering",
+                "SUMMARY",
                 f"Clip {index} profile: layout {clip_metrics.get('layoutBuildSeconds', 0)}s, "
                 f"subtitles {clip_metrics.get('subtitleComposeSeconds', 0)}s, "
                 f"encode {clip_metrics.get('videoEncodeSeconds', 0)}s, "
                 f"mux {clip_metrics.get('audioMuxSeconds', 0)}s, "
                 f"output {round(output_bytes / (1024 * 1024), 1)} MB.",
+                observer=observer,
+                clipIndex=index,
+                totalClipSeconds=clip_metrics.get("totalClipSeconds"),
+                outputBytes=output_bytes,
             )
-
-            clips_output.append(
-                {
-                    "index": index,
-                    "title": clip_data.get("title"),
-                    "reason": clip_data.get("reason"),
-                    "start": start,
-                    "end": end,
-                    "contentType": content_type,
-                    "analytics": clip_analytics,
-                    "outputFilename": current_filename,
-                    "subtitlePlanFilename": subtitle_plan_path.name if subtitle_plan_path else None,
-                    "subtitlePreflightFilename": subtitle_preflight_path.name if subtitle_preflight_path else None,
-                    "subtitleCueCount": len(subtitle_plan),
-                    "subtitlePreflightWarnings": len(subtitle_preflight.get("warnings") or []),
-                    "renderMetrics": clip_metrics,
-                }
-            )
+            clips_output.append(clip_payload)
         finally:
             if clip_final is not None:
                 clip_final.close()
@@ -2225,13 +2305,43 @@ def create_short_from_url(
         render_profile=render_profile,
         subtitle_style=subtitle_style,
     )
+    observer = RunObserver(
+        job_id=job_id,
+        fingerprint=pipeline_fingerprint,
+        video_url=video_url,
+        output_filename=output_filename,
+        render_profile=render_profile,
+    )
+    observer.log(
+        "SUMMARY",
+        "Run started.",
+        clipCount=clip_count,
+        renderProfile=render_profile,
+        outputFilename=output_filename,
+    )
+    observer.snapshot("run_started")
+
+    def observed_progress(stage: str, message: str) -> None:
+        phase, detail = (message.split(" | ", 1) + [""])[:2] if " | " in message else (stage.upper(), message)
+        observer.log(phase, detail)
+        _emit(progress_callback, stage, message)
+
     _run_storage_maintenance_if_due()
 
     output_dir = Path(base_dir) / pipeline_fingerprint
     if REUSE_COMPLETED_RENDERS:
         existing_result = load_existing_result(output_dir, pipeline_fingerprint)
         if existing_result is not None:
-            _emit(progress_callback, "completed", "Existing clips already match this request. Reusing previous render output.")
+            observer.mark_cache("finalResult", True)
+            observer.log("CACHE", "Existing clips already match this request. Reusing previous render output.", outputDir=str(output_dir))
+            _emit_labeled(
+                progress_callback,
+                "completed",
+                "CACHE",
+                "Existing clips already match this request. Reusing previous render output.",
+                observer=observer,
+                outputDir=str(output_dir),
+            )
             existing_result["jobId"] = job_id
             existing_result["reusedExisting"] = True
             existing_result["jobFingerprint"] = pipeline_fingerprint
@@ -2242,7 +2352,16 @@ def create_short_from_url(
         if REUSE_COMPLETED_RENDERS:
             existing_result = load_existing_result(output_dir, pipeline_fingerprint)
             if existing_result is not None:
-                _emit(progress_callback, "completed", "Another identical render already finished. Reusing its completed output.")
+                observer.mark_cache("finalResult", True)
+                observer.log("CACHE", "Another identical render already finished. Reusing its completed output.", outputDir=str(output_dir))
+                _emit_labeled(
+                    progress_callback,
+                    "completed",
+                    "CACHE",
+                    "Another identical render already finished. Reusing its completed output.",
+                    observer=observer,
+                    outputDir=str(output_dir),
+                )
                 existing_result["jobId"] = job_id
                 existing_result["reusedExisting"] = True
                 existing_result["jobFingerprint"] = pipeline_fingerprint
@@ -2250,11 +2369,25 @@ def create_short_from_url(
                 return existing_result
 
         ensure_dependencies()
-        _emit(progress_callback, "validating", "Checking subtitle rendering compatibility...")
+        _emit_labeled(
+            progress_callback,
+            "validating",
+            "SUBTITLES",
+            "Checking subtitle rendering compatibility...",
+            observer=observer,
+        )
         subtitles.assert_subtitle_rendering_ready(subtitle_style)
 
         workspace = RenderWorkspace.create(fingerprint=pipeline_fingerprint, job_id=job_id, base_dir=base_dir)
-        _emit(progress_callback, "validating", f"Using isolated temporary workspace: {workspace.workspace_dir}")
+        _emit_labeled(
+            progress_callback,
+            "validating",
+            "CACHE",
+            f"Using isolated temporary workspace: {workspace.workspace_dir}",
+            observer=observer,
+            workspaceDir=str(workspace.workspace_dir),
+        )
+        observer.snapshot("workspace_created", workspace_dir=workspace.workspace_dir)
         transcript_path = workspace.meta_dir / "full_transcript.txt"
         source_meta_path = workspace.meta_dir / "source_download.json"
         temp_base = workspace.source_dir / "source_video"
@@ -2268,34 +2401,45 @@ def create_short_from_url(
         download_info: dict = {}
         remove_source_video_at_end = False
         render_completed = False
+        workspace_cleanup_attempted = False
 
         try:
             started_at = time.time()
-            video_path, download_info, remove_source_video_at_end = resolve_source_video(video_url, temp_base, progress_callback)
+            video_path, download_info, remove_source_video_at_end, source_cache_hit = resolve_source_video(video_url, temp_base, observed_progress)
             phase_metrics["downloadSeconds"] = round(time.time() - started_at, 2)
+            observer.mark_cache("sourceVideo", source_cache_hit)
+            observer.record_phase("source", phase_metrics["downloadSeconds"], cache=observer.cache["sourceVideo"])
             source_meta_path.write_text(json.dumps(download_info, ensure_ascii=True, indent=2), encoding="utf-8")
+            observer.snapshot("after_source", workspace_dir=workspace.workspace_dir)
 
             started_at = time.time()
-            transcript_result = resolve_transcript(video_url, video_path, progress_callback)
+            transcript_result, transcript_cache_hit = resolve_transcript(video_url, video_path, observed_progress)
             phase_metrics["transcriptionSeconds"] = round(time.time() - started_at, 2)
+            observer.mark_cache("transcript", transcript_cache_hit)
+            observer.record_phase("transcript", phase_metrics["transcriptionSeconds"], cache=observer.cache["transcript"])
             transcript_segments = transcript_result.get("segments") or []
             transcript_path.write_text(f"URL: {video_url}\n{transcript_result.get('text') or ''}", encoding="utf-8")
+            observer.snapshot("after_transcript", workspace_dir=workspace.workspace_dir)
             del transcript_result
             gc.collect()
 
             started_at = time.time()
-            clip_candidates = select_clip_candidates(
+            clip_candidates, clip_selection_cache_hit = select_clip_candidates(
                 video_url=video_url,
                 transcript_segments=transcript_segments,
                 api_key=api_key,
                 clip_count=clip_count,
-                progress_callback=progress_callback,
+                progress_callback=observed_progress,
             )
             phase_metrics["analysisSeconds"] = round(time.time() - started_at, 2)
+            observer.mark_cache("clipSelection", clip_selection_cache_hit)
+            observer.record_phase("clipSelection", phase_metrics["analysisSeconds"], cache=observer.cache["clipSelection"])
+            observer.snapshot("after_clip_selection", workspace_dir=workspace.workspace_dir)
 
             video_duration = probe_video_duration(video_path)
             phase_metrics["sourceDurationSeconds"] = round(video_duration, 2)
-            emit_workload_warning(video_duration, clip_count, progress_callback)
+            observer.log("SOURCE", "Source duration probed.", durationSeconds=phase_metrics["sourceDurationSeconds"])
+            emit_workload_warning(video_duration, clip_count, observed_progress)
             free_bytes = ensure_disk_headroom(
                 workspace.root_dir,
                 video_path=video_path,
@@ -2303,10 +2447,12 @@ def create_short_from_url(
                 video_duration=video_duration,
             )
             phase_metrics["freeDiskBytesBeforeRender"] = free_bytes
+            observer.log("CACHE", "Disk headroom validated before render.", freeDiskBytes=free_bytes)
 
             clip_candidates = validate_clip_candidates(clip_candidates, video_duration, warn_callback=_warn_note)
             if not clip_candidates:
                 raise ValueError("No valid clips remain after timestamp validation against video duration.")
+            observer.log("CLIP_SELECTION", "Clip candidates validated against source duration.", clipCount=len(clip_candidates))
 
             started_at = time.time()
             temp_clips_output = _render_selected_clips(
@@ -2318,31 +2464,53 @@ def create_short_from_url(
                 subtitle_style=subtitle_style,
                 render_settings=render_settings,
                 progress_callback=progress_callback,
+                observer=observer,
             )
             phase_metrics["renderSeconds"] = round(time.time() - started_at, 2)
+            observer.record_phase("render", phase_metrics["renderSeconds"], clipCount=len(temp_clips_output))
             phase_metrics["renderedClipCount"] = len(temp_clips_output)
             phase_metrics["workspaceBytesBeforePromotion"] = path_size(workspace.workspace_dir)
+            observer.snapshot("before_promotion", workspace_dir=workspace.workspace_dir)
             del transcript_segments
             gc.collect()
 
-            _emit(progress_callback, "rendering", "Promoting finished artifacts into the final output folder...")
+            _emit_labeled(
+                progress_callback,
+                "rendering",
+                "PROMOTION",
+                "Promoting finished artifacts into the final output folder...",
+                observer=observer,
+                workspaceBytes=phase_metrics["workspaceBytesBeforePromotion"],
+            )
             workspace.promote()
+            observer.snapshot("after_promotion", final_output_dir=workspace.final_output_dir)
             clips_output = _materialize_final_clips(workspace, temp_clips_output)
 
-            _emit(progress_callback, "completed", f"{len(clips_output)} high-quality clips are ready to download.")
+            _emit_labeled(
+                progress_callback,
+                "completed",
+                "SUMMARY",
+                f"{len(clips_output)} high-quality clips are ready to download.",
+                observer=observer,
+                clipCount=len(clips_output),
+            )
             first_clip = clips_output[0]
             now = time.time()
             phase_metrics["totalSeconds"] = round(now - total_started_at, 2)
             phase_metrics["promotedFromTemp"] = True
             phase_metrics["finalOutputBytes"] = path_size(workspace.final_output_dir)
-            _emit(
+            observer.record_phase("promotion", 0.0, outputDir=str(workspace.final_output_dir))
+            _emit_labeled(
                 progress_callback,
                 "completed",
+                "SUMMARY",
                 f"Profile summary: download {phase_metrics.get('downloadSeconds', 0)}s, "
                 f"transcription {phase_metrics.get('transcriptionSeconds', 0)}s, "
                 f"analysis {phase_metrics.get('analysisSeconds', 0)}s, "
                 f"render {phase_metrics.get('renderSeconds', 0)}s, "
                 f"final size {round(int(phase_metrics.get('finalOutputBytes', 0)) / (1024 * 1024), 1)} MB.",
+                observer=observer,
+                metrics=phase_metrics,
             )
             result_payload = {
                 "jobId": job_id,
@@ -2368,13 +2536,52 @@ def create_short_from_url(
                 "reusedExisting": False,
                 "metrics": phase_metrics,
             }
+            observer.build_summary(status="completed", result_payload=result_payload, cleanup_ok=True, promotion_ok=True)
+            _emit_labeled(
+                progress_callback,
+                "completed",
+                "SUMMARY",
+                f"Run summary: {observer.summary.get('totalJobSeconds')}s total, "
+                f"{observer.summary.get('generatedClipCount')} generated, "
+                f"{observer.summary.get('reusedClipCount')} reused, "
+                f"peak workspace {round(int(observer.summary.get('peakWorkspaceBytes') or 0) / (1024 * 1024), 1)} MB.",
+                observer=observer,
+                summary=observer.summary,
+            )
+            run_report_path = observer.write_success_report(workspace.final_output_dir, result_payload)
+            result_payload["runReportPath"] = str(run_report_path)
+            result_payload["runSummary"] = observer.summary
+            result_payload["logPath"] = str(_LOG_PATH)
             write_result_manifest(workspace.final_output_dir, result_payload)
             render_completed = True
             return result_payload
+        except Exception as error:
+            observer.log("SUMMARY", "Run failed.", error=str(error))
+            observer.snapshot("failed", workspace_dir=workspace.workspace_dir if workspace.workspace_dir.exists() else None)
+            cleanup_ok = None
+            if not render_completed:
+                try:
+                    workspace.cleanup()
+                    cleanup_ok = True
+                except Exception as cleanup_error:
+                    cleanup_ok = False
+                    logger.warning("Workspace cleanup failed after job error.", exc_info=True)
+                    observer.log("CLEANUP", "Temporary workspace cleanup failed after render error.", error=str(cleanup_error))
+                workspace_cleanup_attempted = True
+            failure_report_path = observer.write_failure_report(str(error), cleanup_ok=cleanup_ok)
+            _emit_labeled(
+                progress_callback,
+                "failed",
+                "SUMMARY",
+                f"Failure report written to {failure_report_path}",
+                observer=observer,
+                failureReportPath=str(failure_report_path),
+            )
+            raise
         finally:
             if remove_source_video_at_end and video_path and os.path.exists(video_path):
                 os.remove(video_path)
-            if not render_completed:
+            if not render_completed and not workspace_cleanup_attempted:
                 workspace.cleanup()
 
 
