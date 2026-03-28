@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-from app.paths import DOCTOR_REPORT_PATH, ENV_FILE, INTERNAL_DIR, LOGS_DIR, MODEL_CACHE_DIR, OUTPUT_CACHE_DIR, OUTPUT_LOCKS_DIR, OUTPUTS_DIR, OUTPUT_TEMP_DIR, RUNTIME_DIR, SETUP_DIR
+from app.paths import DOCTOR_REPORT_PATH, ENV_FILE, INTERNAL_DIR, LOGS_DIR, MODEL_CACHE_DIR, OUTPUT_CACHE_DIR, OUTPUT_LOCKS_DIR, OUTPUTS_DIR, OUTPUT_TEMP_DIR, PROJECT_ROOT, RUNTIME_DIR, SETUP_DIR
 
 _ENV_LOADED = False
 _CONFIGURED_LOGGERS: set[str] = set()
+_BACKEND_SIGNATURE_FILES = (
+    "app/server.py",
+    "app/shorts_service.py",
+    "app/run_report.py",
+    "app/subtitles.py",
+    "app/source_pipeline.py",
+    "app/render_session.py",
+    "app/video_render.py",
+    "app/transcription.py",
+)
 
 
 def load_local_env() -> None:
@@ -70,3 +81,17 @@ def runtime_summary() -> dict[str, str]:
         "doctorReportPath": str(DOCTOR_REPORT_PATH),
         "envFile": str(ENV_FILE),
     }
+
+
+def backend_code_signature() -> str:
+    digest = hashlib.sha1()
+    for relative_path in _BACKEND_SIGNATURE_FILES:
+        file_path = PROJECT_ROOT / relative_path
+        digest.update(relative_path.encode("utf-8"))
+        digest.update(b"\0")
+        try:
+            digest.update(file_path.read_bytes())
+        except OSError:
+            digest.update(b"missing")
+        digest.update(b"\0")
+    return digest.hexdigest()[:16]

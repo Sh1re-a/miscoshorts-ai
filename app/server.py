@@ -15,7 +15,7 @@ from app import analytics, subtitle_preview
 from app.doctor import run_doctor
 from app.errors import explain_exception
 from app.paths import FRONTEND_DIST_DIR, OUTPUTS_DIR
-from app.runtime import configure_logging, is_debug_enabled, load_local_env, runtime_summary
+from app.runtime import backend_code_signature, configure_logging, is_debug_enabled, load_local_env, runtime_summary
 from app.storage import prune_runtime_storage
 from app.shorts_service import (
     create_short_from_url,
@@ -330,6 +330,8 @@ def bootstrap():
             "frontendBuilt": FRONTEND_DIST_DIR.exists(),
             "defaultRenderProfile": normalize_requested_render_profile(None),
             "renderProfiles": {key: profile["label"] for key, profile in RENDER_PROFILES.items()},
+            "backendSignature": backend_code_signature(),
+            "serverPid": os.getpid(),
             "speakerDiarizationMode": os.getenv("SPEAKER_DIARIZATION_MODE", "auto").strip().lower() or "auto",
             "hasPyannoteToken": bool(
                 (os.getenv("PYANNOTE_AUTH_TOKEN") or os.getenv("HUGGINGFACE_ACCESS_TOKEN") or os.getenv("HF_TOKEN") or "").strip()

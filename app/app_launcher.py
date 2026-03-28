@@ -12,7 +12,7 @@ import urllib.request
 import webbrowser
 
 from app.paths import DOCTOR_REPORT_PATH, PROJECT_ROOT
-from app.runtime import configure_logging, load_local_env, runtime_summary
+from app.runtime import backend_code_signature, configure_logging, load_local_env, runtime_summary
 
 load_local_env()
 logger, LOG_PATH = configure_logging("launcher")
@@ -58,7 +58,10 @@ def bootstrap_is_compatible(payload: dict | None) -> bool:
     if not isinstance(payload, dict):
         return False
 
-    return isinstance(payload.get("renderProfiles"), dict) and bool(payload.get("defaultRenderProfile"))
+    if not (isinstance(payload.get("renderProfiles"), dict) and bool(payload.get("defaultRenderProfile"))):
+        return False
+
+    return payload.get("backendSignature") == backend_code_signature()
 
 
 def find_listener_pid(port: int) -> int | None:
@@ -147,8 +150,15 @@ def main() -> None:
             print(f"A local app is already available on {APP_URL}. Reusing it.")
             logger.info("Reusing local app at %s", APP_URL)
         else:
+            running_signature = bootstrap_payload.get("backendSignature") if isinstance(bootstrap_payload, dict) else None
+            expected_signature = backend_code_signature()
             print(f"An older local app is already running on {APP_URL}. Restarting it...")
-            logger.info("Restarting incompatible local app at %s", APP_URL)
+            logger.info(
+                "Restarting incompatible local app at %s (running signature=%s, expected=%s)",
+                APP_URL,
+                running_signature,
+                expected_signature,
+            )
             stop_listener_on_port(5001)
             time.sleep(1)
             backend_process = subprocess.Popen([sys.executable, "-m", "app.server"], cwd=PROJECT_ROOT, env=launch_env)
