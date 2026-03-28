@@ -12,7 +12,7 @@ from pathlib import Path
 from app.paths import DOCTOR_REPORT_PATH, FRONTEND_DIST_DIR, FRONTEND_DIR, LOGS_DIR, MODEL_CACHE_DIR, OUTPUT_CACHE_DIR, OUTPUTS_DIR, OUTPUT_TEMP_DIR, RUNTIME_DIR
 from app.runtime import configure_logging, ensure_runtime_dirs, is_debug_enabled, load_local_env, runtime_summary
 from app.shorts_service import ensure_dependencies
-from app.storage import storage_summary
+from app.storage import atomic_write_json, storage_summary
 from app.transcription import (
     WHISPER_BACKEND,
     WHISPER_MODEL,
@@ -82,9 +82,7 @@ def _writable_fix_message(path: Path) -> str:
 def _write_report_snapshot(report: dict) -> None:
     ensure_runtime_dirs()
     DOCTOR_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = DOCTOR_REPORT_PATH.with_suffix(".json.tmp")
-    temp_path.write_text(json.dumps(report, ensure_ascii=True, indent=2), encoding="utf-8")
-    temp_path.replace(DOCTOR_REPORT_PATH)
+    atomic_write_json(DOCTOR_REPORT_PATH, report)
 
 
 def run_doctor(*, prepare_whisper: bool = False) -> dict:
