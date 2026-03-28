@@ -292,12 +292,13 @@ fi
 HF_HOME="$MODEL_CACHE_DIR/huggingface" \
 XDG_CACHE_HOME="$MODEL_CACHE_DIR/xdg" \
 WHISPER_MODEL_CACHE_DIR="$MODEL_CACHE_DIR/whisper" \
-"$VENV_PYTHON" -m app.app_launcher && status=0 || status=$?
+"$VENV_PYTHON" -m app.app_launcher
+launcher_exit_code=$?
 
-if [[ $status -ne 0 ]]; then
+if [[ $launcher_exit_code -ne 0 ]]; then
 	echo ""
-	echo "${RED}App exited with code $status.${RESET}"
+	echo "${RED}App exited with code $launcher_exit_code.${RESET}"
 	read "?Press Enter to close this window"
 fi
 
-exit $status
+exit $launcher_exit_code
