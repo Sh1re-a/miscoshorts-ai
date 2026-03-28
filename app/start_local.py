@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import socket
 import subprocess
@@ -9,7 +10,7 @@ import urllib.error
 import urllib.request
 import webbrowser
 
-from app.paths import FRONTEND_DIR, PROJECT_ROOT
+from app.paths import DOCTOR_REPORT_PATH, FRONTEND_DIR, PROJECT_ROOT
 from app.runtime import configure_logging, load_local_env
 
 load_local_env()
@@ -83,6 +84,9 @@ def main() -> None:
     frontend_url = f"http://127.0.0.1:{frontend_port}"
 
     backend_process = None
+    launch_env = dict(os.environ)
+    launch_env.setdefault("PYTHONUTF8", "1")
+    launch_env.setdefault("PYTHONIOENCODING", "utf-8")
     if url_responds(BACKEND_HEALTH_URL):
         print("A local backend is already running on http://127.0.0.1:5001 and will be reused.")
         logger.info("Reusing local backend on http://127.0.0.1:5001")
@@ -92,12 +96,14 @@ def main() -> None:
         backend_process = subprocess.Popen(
             [sys.executable, "-m", "app.server"],
             cwd=PROJECT_ROOT,
+            env=launch_env,
         )
 
     frontend_process = None
     try:
         print(f"Starting React frontend on {frontend_url} ...")
         print(f"Support log: {LOG_PATH}")
+        print(f"Doctor report: {DOCTOR_REPORT_PATH}")
         logger.info("Starting frontend dev server on %s", frontend_url)
         frontend_process = subprocess.Popen(
             [npm_command(), "run", "dev", "--", "--port", str(frontend_port), "--strictPort"],

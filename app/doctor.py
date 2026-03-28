@@ -9,14 +9,14 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from app.paths import FRONTEND_DIST_DIR, FRONTEND_DIR, LOGS_DIR, MODEL_CACHE_DIR, OUTPUT_CACHE_DIR, OUTPUTS_DIR, RUNTIME_DIR
+from app.paths import DOCTOR_REPORT_PATH, FRONTEND_DIST_DIR, FRONTEND_DIR, LOGS_DIR, MODEL_CACHE_DIR, OUTPUT_CACHE_DIR, OUTPUTS_DIR, RUNTIME_DIR
 from app.runtime import configure_logging, ensure_runtime_dirs, is_debug_enabled, load_local_env, runtime_summary
-from app.shorts_service import (
+from app.shorts_service import ensure_dependencies
+from app.transcription import (
     WHISPER_BACKEND,
     WHISPER_MODEL,
-    _get_speaker_diarization_token,
-    _get_whisper_model_candidates,
-    ensure_dependencies,
+    get_speaker_diarization_token,
+    get_whisper_model_candidates,
     load_whisper_model,
 )
 
@@ -66,6 +66,14 @@ def _check_writable(path: Path) -> bool:
         return True
     except OSError:
         return False
+
+
+def _write_report_snapshot(report: dict) -> None:
+    ensure_runtime_dirs()
+    DOCTOR_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = DOCTOR_REPORT_PATH.with_suffix(".json.tmp")
+    temp_path.write_text(json.dumps(report, ensure_ascii=True, indent=2), encoding="utf-8")
+    temp_path.replace(DOCTOR_REPORT_PATH)
 
 
 def run_doctor(*, prepare_whisper: bool = False) -> dict:
@@ -149,7 +157,7 @@ def run_doctor(*, prepare_whisper: bool = False) -> dict:
 
     pyannote_requested = os.getenv("SPEAKER_DIARIZATION_MODE", "auto").strip().lower() == "pyannote"
     pyannote_installed = _module_exists("pyannote.audio")
-    pyannote_token = bool(_get_speaker_diarization_token())
+    pyannote_token = bool(get_speaker_diarization_token())
     if pyannote_requested and not pyannote_installed:
         _add_check(checks, "FAIL", "Pyannote diarization", "Pyannote mode is enabled but pyannote.audio is not installed.", "Install requirements-optional.txt or switch diarization mode back to auto.")
     elif pyannote_requested and not pyannote_token:
@@ -172,7 +180,7 @@ def run_doctor(*, prepare_whisper: bool = False) -> dict:
             checks,
             "WARN",
             "Whisper cache",
-            f"No local speech-model cache was found yet. Requested model order: {', '.join(_get_whisper_model_candidates())}.",
+            f"No local speech-model cache was found yet. Requested model order: {', '.join(get_whisper_model_candidates())}.",
             "The launcher can prepare this automatically before the first render.",
         )
 
@@ -208,14 +216,16 @@ def run_doctor(*, prepare_whisper: bool = False) -> dict:
         "checks": [asdict(check) for check in checks],
         "paths": runtime_summary(),
         "logPath": str(log_path),
+        "reportPath": str(DOCTOR_REPORT_PATH),
         "whisper": {
             "backendMode": WHISPER_BACKEND,
-            "requestedModels": _get_whisper_model_candidates(),
+            "requestedModels": get_whisper_model_candidates(),
             "configuredValue": WHISPER_MODEL,
             "cacheSizeBytes": _directory_size(MODEL_CACHE_DIR),
         },
         "debugEnabled": is_debug_enabled(),
     }
+    _write_report_snapshot(report)
     logger.info("Doctor report generated with status %s", overall_status)
     return report
 
@@ -235,6 +245,7 @@ def _print_report(report: dict) -> None:
     for key, value in report["paths"].items():
         print(f"  {key}: {value}")
     print(f"  logPath: {report['logPath']}")
+    print(f"  reportPath: {report['reportPath']}")
 
 
 def main(argv: list[str] | None = None) -> int:

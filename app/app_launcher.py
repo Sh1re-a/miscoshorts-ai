@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -10,8 +11,8 @@ import urllib.error
 import urllib.request
 import webbrowser
 
-from app.paths import PROJECT_ROOT
-from app.runtime import configure_logging, load_local_env
+from app.paths import DOCTOR_REPORT_PATH, PROJECT_ROOT
+from app.runtime import configure_logging, load_local_env, runtime_summary
 
 load_local_env()
 logger, LOG_PATH = configure_logging("launcher")
@@ -19,6 +20,7 @@ logger, LOG_PATH = configure_logging("launcher")
 APP_URL = "http://127.0.0.1:5001"
 HEALTH_URL = f"{APP_URL}/api/health"
 BOOTSTRAP_URL = f"{APP_URL}/api/bootstrap"
+_WINDOWS_NETSTAT_PATTERN = re.compile(r"^\s*TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$", re.IGNORECASE)
 
 
 def wait_for_url(url: str, timeout: float, process: subprocess.Popen[str] | None, name: str) -> None:
@@ -61,17 +63,34 @@ def bootstrap_is_compatible(payload: dict | None) -> bool:
 
 def find_listener_pid(port: int) -> int | None:
     if os.name == "nt":
-        command = [
-            "powershell",
-            "-NoProfile",
-            "-Command",
-            f"(Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess)",
-        ]
-    else:
-        command = ["lsof", "-ti", f"tcp:{port}"]
+        try:
+            completed = subprocess.run(
+                ["netstat", "-ano", "-p", "tcp"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+            )
+        except Exception:
+            return None
+        if completed.returncode != 0:
+            return None
+        for line in completed.stdout.splitlines():
+            match = _WINDOWS_NETSTAT_PATTERN.match(line)
+            if not match:
+                continue
+            try:
+                local_port = int(match.group(1))
+                pid = int(match.group(2))
+            except ValueError:
+                continue
+            if local_port == port:
+                return pid
+        return None
 
     try:
-        completed = subprocess.run(command, capture_output=True, text=True, timeout=3)
+        completed = subprocess.run(["lsof", "-ti", f"tcp:{port}"], capture_output=True, text=True, timeout=3)
     except Exception:
         return None
 
@@ -117,6 +136,10 @@ def stop_process(process: subprocess.Popen[str] | None) -> None:
 def main() -> None:
     backend_process = None
     whisper_cache_dir = os.getenv("WHISPER_MODEL_CACHE_DIR", ".miscoshorts/runtime/model-cache/whisper")
+    runtime_paths = runtime_summary()
+    launch_env = dict(os.environ)
+    launch_env.setdefault("PYTHONUTF8", "1")
+    launch_env.setdefault("PYTHONIOENCODING", "utf-8")
 
     if url_responds(HEALTH_URL):
         bootstrap_payload = load_bootstrap_payload(BOOTSTRAP_URL)
@@ -128,16 +151,19 @@ def main() -> None:
             logger.info("Restarting incompatible local app at %s", APP_URL)
             stop_listener_on_port(5001)
             time.sleep(1)
-            backend_process = subprocess.Popen([sys.executable, "-m", "app.server"], cwd=PROJECT_ROOT)
+            backend_process = subprocess.Popen([sys.executable, "-m", "app.server"], cwd=PROJECT_ROOT, env=launch_env)
             wait_for_url(HEALTH_URL, timeout=20, process=backend_process, name="local app")
     else:
         print(f"Starting local app on {APP_URL} ...")
         logger.info("Starting local app at %s", APP_URL)
-        backend_process = subprocess.Popen([sys.executable, "-m", "app.server"], cwd=PROJECT_ROOT)
+        backend_process = subprocess.Popen([sys.executable, "-m", "app.server"], cwd=PROJECT_ROOT, env=launch_env)
         wait_for_url(HEALTH_URL, timeout=20, process=backend_process, name="local app")
 
     print(f"Private speech-model cache: {whisper_cache_dir}")
     print(f"Support log: {LOG_PATH}")
+    print(f"Doctor report: {DOCTOR_REPORT_PATH}")
+    print(f"Outputs: {runtime_paths['outputsDir']}")
+    print(f"Run diagnostics later with: {sys.executable} -m app.doctor")
     print("Opening browser...")
     webbrowser.open(APP_URL)
     print("Press Ctrl+C to stop the local app.")
@@ -160,4 +186,5 @@ if __name__ == "__main__":
         logger.exception("Launcher failed")
         print(f"\nLaunch error: {error}")
         print(f"See log for details: {LOG_PATH}")
+        print(f"Doctor report path: {DOCTOR_REPORT_PATH}")
         raise SystemExit(1) from error

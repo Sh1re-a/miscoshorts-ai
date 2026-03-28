@@ -47,6 +47,7 @@ def main(argv: list[str] | None = None) -> int:
         for check in report["checks"]:
             print(f"[{check['status']}] {check['name']}: {check['message']}")
         print(f"Log file: {report['logPath']}")
+        print(f"Doctor report: {report['reportPath']}")
         return 0 if report["status"] != "FAIL" else 1
 
     video_url = args.video_url or _prompt("YouTube video URL")

@@ -391,6 +391,7 @@ function App() {
                   }`}>
                     <p className="font-semibold">System check: {doctorReport.status}</p>
                     <p className="mt-1">Log file: {doctorReport.logPath}</p>
+                    <p className="mt-1">Doctor report: {doctorReport.reportPath}</p>
                     <p className="mt-1">Speech model cache: {doctorReport.paths.modelCacheDir}</p>
                     {highlightedDoctorChecks.length > 0 ? (
                       <div className="mt-2 space-y-1 text-xs">
@@ -534,6 +535,8 @@ function App() {
                   <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
                     <p>{job.error}</p>
                     {job.errorHelp ? <p className="mt-2 text-rose-800">{job.errorHelp}</p> : null}
+                    {job.errorId ? <p className="mt-2 text-rose-800">Support ID: {job.errorId}</p> : null}
+                    {doctorReport ? <p className="mt-2 text-rose-800">Send this log bundle: {doctorReport.reportPath}</p> : null}
                   </div>
                 ) : null}
 

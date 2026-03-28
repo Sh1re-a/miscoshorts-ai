@@ -6,7 +6,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from app.paths import ENV_FILE, INTERNAL_DIR, LOGS_DIR, MODEL_CACHE_DIR, OUTPUT_CACHE_DIR, OUTPUTS_DIR, RUNTIME_DIR
+from app.paths import DOCTOR_REPORT_PATH, ENV_FILE, INTERNAL_DIR, LOGS_DIR, MODEL_CACHE_DIR, OUTPUT_CACHE_DIR, OUTPUTS_DIR, RUNTIME_DIR, SETUP_DIR
 
 _ENV_LOADED = False
 _CONFIGURED_LOGGERS: set[str] = set()
@@ -26,7 +26,7 @@ def is_debug_enabled() -> bool:
 
 
 def ensure_runtime_dirs() -> None:
-    for directory in (INTERNAL_DIR, RUNTIME_DIR, LOGS_DIR, OUTPUTS_DIR, OUTPUT_CACHE_DIR, MODEL_CACHE_DIR):
+    for directory in (INTERNAL_DIR, RUNTIME_DIR, LOGS_DIR, SETUP_DIR, OUTPUTS_DIR, OUTPUT_CACHE_DIR, MODEL_CACHE_DIR):
         directory.mkdir(parents=True, exist_ok=True)
 
 
@@ -65,5 +65,6 @@ def runtime_summary() -> dict[str, str]:
         "outputsDir": str(OUTPUTS_DIR),
         "cacheDir": str(OUTPUT_CACHE_DIR),
         "modelCacheDir": str(MODEL_CACHE_DIR),
+        "doctorReportPath": str(DOCTOR_REPORT_PATH),
         "envFile": str(ENV_FILE),
     }

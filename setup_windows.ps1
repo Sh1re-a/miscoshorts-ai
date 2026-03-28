@@ -4,6 +4,13 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$PSDefaultParameterValues["Out-File:Encoding"] = "utf8"
+$PSDefaultParameterValues["Set-Content:Encoding"] = "utf8"
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $appDir = Join-Path $root "app"
@@ -19,6 +26,7 @@ $venvPython = Join-Path $venvDir "Scripts\python.exe"
 $stateDir = $setupDir
 $installerDir = Join-Path $stateDir "installers"
 $logPath = Join-Path $stateDir "windows-setup.log"
+$doctorReportPath = Join-Path $stateDir "doctor-report.json"
 $pythonInstallRoot = Join-Path $runtimeDir "python"
 $pythonCurrentDir = Join-Path $pythonInstallRoot "current"
 $pythonManagedExe = Join-Path $pythonCurrentDir "python.exe"
@@ -54,6 +62,9 @@ function Show-FailureAndExit($message) {
     Write-Host $message -ForegroundColor Red
     Write-Host ""
     Write-Host "Log file: $logPath"
+    if (Test-Path $doctorReportPath) {
+        Write-Host "Doctor report: $doctorReportPath"
+    }
     if (-not $NonInteractive) {
         [void](Read-Host "Press Enter to close this window")
     }
@@ -76,6 +87,7 @@ function Write-SetupBanner {
     Write-Host "This window keeps the local app alive while it is running." -ForegroundColor DarkGray
     Write-Host "Private runtime files live in .miscoshorts and are ignored by Git/GitHub." -ForegroundColor DarkGray
     Write-Host "Speech models are cached locally in .miscoshorts\runtime\model-cache." -ForegroundColor DarkGray
+    Write-Host "If something fails, send the setup log and doctor report from .miscoshorts\setup." -ForegroundColor DarkGray
 }
 
 function Start-SetupStep($title) {
@@ -609,6 +621,22 @@ function Write-StateValue($statePath, $value) {
     Set-Content -Path $statePath -Value $value -NoNewline
 }
 
+function Write-DoctorSnapshot {
+    if (-not (Test-Path $venvPython)) {
+        return
+    }
+
+    try {
+        $reportText = & $venvPython -m app.doctor --json 2>&1
+        $reportBody = if ($reportText -is [System.Array]) { $reportText -join [Environment]::NewLine } else { [string]$reportText }
+        Set-Content -Path $doctorReportPath -Value $reportBody
+        Write-SetupInfo "Doctor report: $doctorReportPath"
+    }
+    catch {
+        Write-SetupInfo "Could not refresh doctor report automatically. You can run it later with: $venvPython -m app.doctor"
+    }
+}
+
 function Test-StateMatch($statePath, $expectedValue) {
     $currentValue = Read-StateValue $statePath
     return $null -ne $currentValue -and $currentValue -eq $expectedValue
@@ -759,6 +787,8 @@ function Invoke-Setup {
     }
 
     Start-SetupStep "Final checks"
+    Write-SetupAction "Refreshing support diagnostics snapshot ..."
+    Write-DoctorSnapshot
     $elapsed = New-TimeSpan -Start $script:SetupStartedAt -End (Get-Date)
     Write-SetupDone "Local setup is complete."
     Write-SetupInfo "Internal setup files are stored in .miscoshorts so the project folder stays clean."
@@ -780,6 +810,7 @@ function Invoke-Setup {
     Start-SetupStep "Starting app"
     Write-SetupInfo "Opening the local app in your browser. Keep this window open while the app runs."
     Write-SetupInfo "Need support later? Run: $venvPython -m app.doctor"
+    Write-SetupInfo "Doctor report: $doctorReportPath"
     $env:HF_HOME = Join-Path $modelCacheDir "huggingface"
     $env:XDG_CACHE_HOME = Join-Path $modelCacheDir "xdg"
     $env:WHISPER_MODEL_CACHE_DIR = Join-Path $modelCacheDir "whisper"

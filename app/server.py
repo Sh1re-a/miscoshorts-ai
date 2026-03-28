@@ -275,16 +275,18 @@ def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, cl
         _set_job(job_id, status="completed", result=result, updatedAt=time.time(), overallProgress=100.0, stageProgress=100.0, etaSeconds=0.0)
     except Exception as error:
         friendly = explain_exception(error)
+        error_id = f"{friendly.category}-{job_id[:8]}"
         logger.exception("Job %s failed", job_id)
         if DEBUG_MODE:
             print(traceback.format_exc(), flush=True)
-        _append_job_log(job_id, "failed", friendly.summary)
+        _append_job_log(job_id, "failed", f"{friendly.summary} [{error_id}]")
         _set_job(
             job_id,
             status="failed",
             error=friendly.summary,
             errorHelp=friendly.hint,
             errorCategory=friendly.category,
+            errorId=error_id,
             traceback=traceback.format_exc() if DEBUG_MODE else None,
             technicalError=str(error) if DEBUG_MODE else None,
             logPath=str(SERVER_LOG_PATH),
@@ -335,6 +337,7 @@ def bootstrap():
             "doctorStatus": doctor_report["status"],
             "runtime": runtime_summary(),
             "logPath": str(SERVER_LOG_PATH),
+            "doctorReportPath": doctor_report.get("reportPath"),
         }
     )
 

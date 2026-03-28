@@ -32,6 +32,7 @@ That is the supported first-run path.
 - installs Python dependencies only when needed
 - prepares the configured Whisper model before the first render
 - builds the frontend only when `frontend/dist` is missing or outdated
+- writes a reusable doctor report to `.miscoshorts/setup/doctor-report.json`
 - opens the local browser app
 
 ### First-Run Behavior
@@ -41,6 +42,7 @@ The first run is intentionally heavier than later runs.
 - The local runtime lives in `.miscoshorts/`
 - Logs live in `.miscoshorts/logs/`
 - Setup state lives in `.miscoshorts/setup/`
+- The reusable doctor/support report lives in `.miscoshorts/setup/doctor-report.json`
 - The Whisper model cache lives in `.miscoshorts/runtime/model-cache/`
 - Reusable source/transcript cache lives in `outputs/cache/`
 - Job outputs live in `outputs/jobs/<job-id>/`
@@ -48,6 +50,15 @@ The first run is intentionally heavier than later runs.
 Nothing inside `.miscoshorts/` is meant for GitHub. It is private local runtime state.
 
 If the Whisper cache is deleted, the launcher preflight prepares it again before the next real render.
+
+If the Python environment is already healthy, the launcher skips reinstalling it.
+
+If the frontend is already built, the launcher skips Node.js entirely.
+
+If a tester hits a failure, the two most important files are:
+
+- `.miscoshorts/setup/windows-setup.log` on Windows or `.miscoshorts/setup/macos-setup.log` on macOS
+- `.miscoshorts/setup/doctor-report.json`
 
 If the folder already contains `frontend/dist`, the launcher can skip Node.js entirely for normal users.
 
@@ -113,6 +124,8 @@ This reports friendly `PASS`, `WARN`, and `FAIL` checks for:
 - diarization state
 - Whisper cache state
 
+Every doctor run also refreshes `.miscoshorts/setup/doctor-report.json` so a tester can send a stable support snapshot instead of pasting random terminal output.
+
 To force preparation of the configured Whisper model during diagnostics:
 
 ```bash
@@ -129,6 +142,14 @@ py -m app.doctor --prepare-whisper
 - Node.js 20+
 - FFmpeg installed and available in `PATH`
 - A Gemini API key
+
+Important:
+
+- Missing Gemini key is a warning until you actually try to render
+- Missing FFmpeg is blocking
+- Missing core Python packages is blocking
+- Missing Whisper cache is not blocking if the launcher can prepare it
+- Missing optional pyannote diarization is not blocking unless you explicitly force pyannote mode
 
 Optional server-oriented environment variables:
 
@@ -246,6 +267,62 @@ On Windows, `launch_app.bat` now does more than just start the app:
 On the first run it sets everything up. On later runs it reuses the existing setup and skips reinstalling or rebuilding unless something changed.
 
 That makes it the best file to send to a non-technical Windows user together with the full project folder.
+
+## Windows First-Run Checklist
+
+For a confused Windows tester, the safest path is:
+
+1. Download the full GitHub ZIP.
+2. Extract it fully to a normal writable folder such as Desktop or Documents.
+3. Double-click `launch_app.bat`.
+4. Leave the launcher window open.
+5. Wait for setup to finish and the browser to open.
+
+What may be downloaded on the first Windows run:
+
+- Python only if Windows does not already have a usable Python 3.12 install
+- FFmpeg only if it is missing
+- Node.js only if `frontend/dist` is missing and the dashboard must be built locally
+- Python packages only if the local `.miscoshorts/runtime/venv` is missing or outdated
+- The configured Whisper model only if its private cache is missing
+
+What should not happen on every run:
+
+- the Python environment should not reinstall every time
+- the frontend should not rebuild every time unless its sources changed
+- the Whisper model should not redownload unless the private cache was deleted or the configured model changed
+
+## What To Send For Support
+
+If a tester gets stuck, ask for these exact files:
+
+- `.miscoshorts/setup/doctor-report.json`
+- `.miscoshorts/setup/windows-setup.log` or `.miscoshorts/setup/macos-setup.log`
+- the exact job error message from the browser, including the support ID if one is shown
+
+That is the fastest way to diagnose Windows issues remotely.
+
+## Common Windows Issues
+
+`PowerShell could not be found`
+
+- This blocks startup. Restore Windows PowerShell and rerun `launch_app.bat`.
+
+`FFmpeg is missing`
+
+- This blocks rendering. Rerun the launcher and let it install FFmpeg, or install FFmpeg manually and rerun.
+
+`The local speech engine is missing`
+
+- This usually means the Python environment is incomplete. Rerun `launch_app.bat` so the launcher can repair the local runtime.
+
+`No local speech-model cache was found yet`
+
+- This is only a warning. The launcher should prepare the cache before the first render.
+
+`Optional pyannote diarization is not active`
+
+- This is only a warning unless you explicitly want pyannote.
 
 If you prefer to start everything manually:
 

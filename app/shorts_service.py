@@ -1,16 +1,12 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
 import re
 import shutil
-import subprocess
-import sys
 import threading
 import uuid
-import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -24,10 +20,6 @@ try:
 except ImportError:
     _np = None
 
-_FasterWhisperModel = None
-_FASTER_WHISPER_AVAILABLE: bool | None = None
-whisper = None
-_OPENAI_WHISPER_AVAILABLE: bool | None = None
 _cv2 = None
 _CV2_AVAILABLE: bool | None = None
 
@@ -152,8 +144,23 @@ _CLS_VOTE_TEXT_NEWS = 0.10          # per-frame text for news vote
 _CLS_SCENE_CHANGE_THRESHOLD = 0.06 # inter-frame diff above this = scene change
 
 from app import gemini_analyzer, subtitles
-from app.paths import MODEL_CACHE_DIR, OUTPUTS_DIR, OUTPUT_CACHE_DIR, OUTPUT_JOBS_DIR
+from app.media_cache import (
+    load_cached_transcript,
+    restore_cached_video,
+    store_cached_transcript,
+    store_cached_video,
+)
+from app.paths import OUTPUTS_DIR, OUTPUT_JOBS_DIR
 from app.runtime import configure_logging, load_local_env
+from app.transcription import (
+    analyze_audio_speakers,
+    get_whisper_model_candidates,
+    speaker_analysis_backend_label,
+    transcribe_clip_for_subtitles,
+    transcribe_video_fast,
+    whisper_cache_contains_files,
+)
+from app.video_render import DEFAULT_RENDER_THREADS, extract_audio_segment, write_high_quality_video
 
 load_local_env()
 logger, _LOG_PATH = configure_logging("shorts-service")
@@ -178,14 +185,9 @@ DOWNLOAD_FORMAT_SORT = [
     for field in os.getenv("YTDLP_FORMAT_SORT", "res,fps,hdr:12,vcodec:h264,acodec:aac").split(",")
     if field.strip()
 ]
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "distil-large-v3,large-v3")
-WHISPER_BACKEND = os.getenv("WHISPER_BACKEND", "auto").strip().lower() or "auto"
-WHISPER_MODEL_CACHE_DIR = Path(os.getenv("WHISPER_MODEL_CACHE_DIR", str(MODEL_CACHE_DIR / "whisper")))
-RENDER_THREADS = max(4, min(12, os.cpu_count() or 4))
+RENDER_THREADS = DEFAULT_RENDER_THREADS
 DEFAULT_CLIP_COUNT = 3
 DEFAULT_RENDER_PROFILE = os.getenv("DEFAULT_RENDER_PROFILE", "studio").strip().lower() or "studio"
-CACHE_ENABLED = os.getenv("LOCAL_CACHE_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
-SPEAKER_DIARIZATION_MODE = os.getenv("SPEAKER_DIARIZATION_MODE", "auto").strip().lower() or "auto"
 RENDER_PROFILES = {
     "fast": {
         "label": "Fast Draft 1080x1920 MP4",
@@ -257,43 +259,6 @@ WINDOWS_RESERVED_FILENAMES = {
 GEMINI_FIELD_PATTERN = re.compile(r"^(TITLE|START|END|REASON)\s*:\s*(.+?)\s*$", re.IGNORECASE)
 GEMINI_CLIP_PATTERN = re.compile(r"^CLIP\s+\d+\s*:?\s*$", re.IGNORECASE)
 
-_whisper_model_cache: dict[str, object] = {}
-_whisper_model_lock = threading.Lock()
-_pyannote_pipeline_cache: object | None = None
-_pyannote_pipeline_lock = threading.Lock()
-
-
-def _ensure_faster_whisper_available() -> bool:
-    global _FasterWhisperModel, _FASTER_WHISPER_AVAILABLE
-    if _FASTER_WHISPER_AVAILABLE is not None:
-        return _FASTER_WHISPER_AVAILABLE
-
-    try:
-        from faster_whisper import WhisperModel as faster_whisper_model
-    except Exception:
-        _FasterWhisperModel = None
-        _FASTER_WHISPER_AVAILABLE = False
-    else:
-        _FasterWhisperModel = faster_whisper_model
-        _FASTER_WHISPER_AVAILABLE = True
-    return _FASTER_WHISPER_AVAILABLE
-
-
-def _ensure_openai_whisper_available() -> bool:
-    global whisper, _OPENAI_WHISPER_AVAILABLE
-    if _OPENAI_WHISPER_AVAILABLE is not None:
-        return _OPENAI_WHISPER_AVAILABLE
-
-    try:
-        import whisper as whisper_module
-    except Exception:
-        whisper = None
-        _OPENAI_WHISPER_AVAILABLE = False
-    else:
-        whisper = whisper_module
-        _OPENAI_WHISPER_AVAILABLE = True
-    return _OPENAI_WHISPER_AVAILABLE
-
 
 def _ensure_cv2() -> bool:
     global _cv2, _CV2_AVAILABLE
@@ -340,149 +305,8 @@ def _get_render_profile_settings(render_profile: str) -> dict[str, str]:
     return dict(RENDER_PROFILES[normalize_requested_render_profile(render_profile)])
 
 
-def _get_speaker_diarization_token() -> str:
-    return (
-        os.getenv("PYANNOTE_AUTH_TOKEN")
-        or os.getenv("HUGGINGFACE_ACCESS_TOKEN")
-        or os.getenv("HF_TOKEN")
-        or ""
-    ).strip()
-
-
-def _should_use_pyannote() -> bool:
-    if SPEAKER_DIARIZATION_MODE == "heuristic":
-        return False
-    if SPEAKER_DIARIZATION_MODE == "pyannote":
-        return True
-    return bool(_get_speaker_diarization_token())
-
-
-def _load_pyannote_pipeline() -> object | None:
-    global _pyannote_pipeline_cache
-    if not _should_use_pyannote():
-        return None
-
-    with _pyannote_pipeline_lock:
-        if _pyannote_pipeline_cache is not None:
-            return _pyannote_pipeline_cache
-
-        token = _get_speaker_diarization_token()
-        if not token:
-            return None
-
-        try:
-            import torch
-            from pyannote.audio import Pipeline
-        except Exception:
-            return None
-
-        try:
-            pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-community-1",
-                token=token,
-            )
-            if hasattr(pipeline, "to"):
-                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-                pipeline.to(device)
-            _pyannote_pipeline_cache = pipeline
-            return pipeline
-        except Exception:
-            return None
-
-
-def _speaker_analysis_backend_label(audio_meta: dict) -> str:
-    provider = str(audio_meta.get("audioSpeakerProvider") or "none")
-    if provider == "pyannote":
-        return "Pyannote diarization"
-    if provider == "heuristic":
-        return "Local heuristic diarization"
-    return "Speaker analysis unavailable"
-
-
 def _make_even(value: float) -> int:
     return max(2, int(round(value / 2) * 2))
-
-
-def _video_cache_key(video_url: str) -> str:
-    return hashlib.sha1(video_url.encode("utf-8")).hexdigest()[:16]
-
-
-def _cache_dir_for_url(video_url: str) -> Path:
-    return OUTPUT_CACHE_DIR / _video_cache_key(video_url)
-
-
-def _atomic_write_json(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(f"{path.suffix}.tmp")
-    temp_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
-    temp_path.replace(path)
-
-
-def _is_valid_transcript_payload(payload: dict | None) -> bool:
-    return (
-        isinstance(payload, dict)
-        and isinstance(payload.get("text"), str)
-        and isinstance(payload.get("segments"), list)
-    )
-
-
-def _find_cached_video(video_url: str) -> Path | None:
-    if not CACHE_ENABLED:
-        return None
-
-    cache_dir = _cache_dir_for_url(video_url)
-    matches = sorted(cache_dir.glob("source.*"))
-    for match in matches:
-        if match.is_file() and match.stat().st_size > 1024:
-            return match
-    return None
-
-
-def _restore_cached_video(video_url: str, destination_base: Path) -> Path | None:
-    cached_video = _find_cached_video(video_url)
-    if cached_video is None:
-        return None
-
-    destination_path = destination_base.with_suffix(cached_video.suffix)
-    destination_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(cached_video, destination_path)
-    return destination_path
-
-
-def _store_cached_video(video_url: str, video_path: Path) -> None:
-    if not CACHE_ENABLED or not video_path.exists():
-        return
-
-    cache_dir = _cache_dir_for_url(video_url)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    for existing in cache_dir.glob("source.*"):
-        existing.unlink(missing_ok=True)
-    shutil.copy2(video_path, cache_dir / f"source{video_path.suffix.lower()}")
-
-
-def _load_cached_transcript(video_url: str) -> dict | None:
-    if not CACHE_ENABLED:
-        return None
-
-    transcript_path = _cache_dir_for_url(video_url) / "transcript.json"
-    if not transcript_path.exists():
-        return None
-
-    try:
-        payload = json.loads(transcript_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if _is_valid_transcript_payload(payload) else None
-
-
-def _store_cached_transcript(video_url: str, transcript: dict) -> None:
-    if not CACHE_ENABLED:
-        return
-
-    if not _is_valid_transcript_payload(transcript):
-        return
-
-    _atomic_write_json(_cache_dir_for_url(video_url) / "transcript.json", transcript)
 
 
 def _resolve_downloaded_video_path(destination_base: Path) -> Path:
@@ -575,12 +399,6 @@ def normalize_requested_subtitle_style(subtitle_style: dict | None) -> dict:
             raise ValueError(f"subtitleStyle field '{key}' must be a string.")
 
     return subtitles.normalize_subtitle_style(subtitle_style)
-
-
-def get_render_fps(clip: VideoFileClip) -> int:
-    return max(24, round(clip.fps or 24))
-
-
 def _load_cascades() -> "tuple[_cv2.CascadeClassifier, _cv2.CascadeClassifier]":
     """Lazy-load Haar cascades into module-level singletons (once per process)."""
     global _FRONTAL_CASCADE, _PROFILE_CASCADE
@@ -2203,145 +2021,6 @@ def build_vertical_master_clip(clip: VideoFileClip, audio_speaker_meta: dict | N
             return clip.resized(new_size=(OUTPUT_WIDTH, OUTPUT_HEIGHT)), _CONTENT_MIXED, fallback_meta
 
 
-def write_high_quality_video(
-    clip: VideoFileClip,
-    output_path: str | Path,
-    audio_path: Path | None = None,
-    render_profile: str = DEFAULT_RENDER_PROFILE,
-) -> None:
-    """Write the clip to disk.
-
-    When *audio_path* is supplied the render is two-pass:
-      1. Write video-only (no MoviePy audio reader involved).
-      2. Mux the pre-extracted WAV in via a direct FFmpeg subprocess call.
-
-    This completely bypasses MoviePy's FFMPEG_AudioReader whose ``proc``
-    attribute can become ``None`` during long renders, causing:
-      AttributeError: 'NoneType' object has no attribute 'stdout'
-    """
-    fps = get_render_fps(clip)
-    # Predictable GOP: keyframe every 1 s for precise seeking (YouTube Shorts).
-    keyint = str(fps * 1)
-    keyint_min = str(fps)
-    output_path = Path(output_path)
-    render_settings = _get_render_profile_settings(render_profile)
-
-    base_ffmpeg_params = [
-        "-crf", render_settings["video_crf"],
-        "-b:v", render_settings["video_bitrate"],
-        "-maxrate", render_settings["video_maxrate"],
-        "-bufsize", render_settings["video_bufsize"],
-        "-movflags", "+faststart",
-        "-pix_fmt", "yuv420p",
-        "-profile:v", "high",
-        "-level:v", "4.2",
-        "-colorspace", "bt709",
-        "-color_primaries", "bt709",
-        "-color_trc", "bt709",
-        "-g", keyint,
-        "-keyint_min", keyint_min,
-        "-sc_threshold", "0",
-        "-sws_flags", "lanczos+accurate_rnd+full_chroma_int",
-        "-x264-params", render_settings.get("x264_params", "aq-mode=3:aq-strength=0.9:deblock=-1,-1"),
-    ]
-
-    if audio_path is not None and Path(audio_path).exists():
-        # Pass 1: write video-only — no audio reader whatsoever
-        video_only_path = output_path.with_suffix(".videoonly.mp4")
-        try:
-            clip.write_videofile(
-                str(video_only_path),
-                codec="libx264",
-                audio=False,
-                fps=fps,
-                threads=RENDER_THREADS,
-                preset=render_settings["video_preset"],
-                ffmpeg_params=base_ffmpeg_params,
-                logger=None,
-            )
-            # Pass 2: mux audio with direct FFmpeg — never touches MoviePy readers
-            ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
-            mux_proc = subprocess.run(
-                [
-                    ffmpeg_bin, "-y",
-                    "-i", str(video_only_path),
-                    "-i", str(audio_path),
-                    "-c:v", "copy",
-                    "-c:a", "aac",
-                    "-b:a", render_settings["audio_bitrate"],
-                    "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
-                    "-movflags", "+faststart",
-                    "-shortest",
-                    str(output_path),
-                ],
-                capture_output=True,
-                timeout=300,
-            )
-            if mux_proc.returncode != 0:
-                raise RuntimeError(
-                    f"FFmpeg audio mux failed (rc={mux_proc.returncode}): "
-                    f"{mux_proc.stderr.decode(errors='replace')[:500]}"
-                )
-        finally:
-            if video_only_path.exists():
-                video_only_path.unlink(missing_ok=True)
-    else:
-        # No pre-extracted audio — write directly (silent or with MoviePy audio)
-        clip.write_videofile(
-            str(output_path),
-            codec="libx264",
-            audio_codec="aac" if clip.audio is not None else None,
-            fps=fps,
-            audio_bitrate=render_settings["audio_bitrate"],
-            threads=RENDER_THREADS,
-            preset=render_settings["video_preset"],
-            ffmpeg_params=base_ffmpeg_params,
-            logger=None,
-        )
-
-
-def _extract_audio_segment(
-    video_path: Path,
-    start: float,
-    end: float,
-    temp_dir: Path,
-) -> Path | None:
-    """Pre-extract an audio segment to a WAV file using a direct FFmpeg call.
-
-    Returns the WAV path on success, or None if the source has no audio or
-    FFmpeg fails.  Using a standalone WAV file avoids MoviePy's chained
-    FFMPEG_AudioReader whose ``proc`` can be None under complex clip chains,
-    causing ``AttributeError: 'NoneType' object has no attribute 'stdout'``.
-    """
-    ffmpeg_bin = shutil.which("ffmpeg")
-    if not ffmpeg_bin:
-        return None
-
-    out_path = temp_dir / f"audio_tmp_{start:.3f}_{end:.3f}.wav"
-    duration = end - start
-    try:
-        proc = subprocess.run(
-            [
-                ffmpeg_bin, "-y",
-                "-ss", f"{start:.6f}",
-                "-t", f"{duration:.6f}",
-                "-i", str(video_path),
-                "-vn",
-                "-acodec", "pcm_s16le",
-                "-ar", "44100",
-                "-ac", "2",
-                str(out_path),
-            ],
-            capture_output=True,
-            timeout=120,
-        )
-        if proc.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
-            return None
-        return out_path
-    except Exception:
-        return None
-
-
 def ensure_dependencies() -> None:
     if shutil.which("ffmpeg"):
         return
@@ -2349,487 +2028,6 @@ def ensure_dependencies() -> None:
     raise EnvironmentError(
         "FFmpeg is not installed or not available in PATH. On Windows, install it with 'winget install Gyan.FFmpeg'."
     )
-
-
-def _get_whisper_model_candidates() -> list[str]:
-    configured = [candidate.strip() for candidate in WHISPER_MODEL.split(",") if candidate.strip()]
-    candidates: list[str] = []
-    for candidate in configured:
-        if candidate not in candidates:
-            candidates.append(candidate)
-    return candidates or ["distil-large-v3", "large-v3"]
-
-
-def _whisper_cache_contains_files() -> bool:
-    if not WHISPER_MODEL_CACHE_DIR.exists():
-        return False
-    try:
-        return any(path.is_file() for path in WHISPER_MODEL_CACHE_DIR.rglob("*"))
-    except OSError:
-        return False
-
-
-def _get_whisper_fallback_candidates(current_model: str) -> list[str]:
-    return [candidate for candidate in _get_whisper_model_candidates() if candidate != current_model]
-
-
-def _format_transcription_backend_error(error: Exception) -> str:
-    details = str(error).strip() or error.__class__.__name__
-    lowered = details.lower()
-    if "no space left on device" in lowered or "disk full" in lowered:
-        return (
-            f"Speech model setup failed because the disk is full. Free up space and try again. "
-            f"The local model cache lives in {WHISPER_MODEL_CACHE_DIR}."
-        )
-    if "permission denied" in lowered:
-        return (
-            f"Speech model setup could not write to {WHISPER_MODEL_CACHE_DIR}. "
-            "Check folder permissions and try again."
-        )
-    return (
-        f"Speech model setup failed in the local cache at {WHISPER_MODEL_CACHE_DIR}. "
-        f"Details: {details}"
-    )
-
-
-def _normalize_faster_whisper_result(segments, info) -> dict:
-    normalized_segments = []
-    full_text_parts: list[str] = []
-
-    for segment in segments:
-        text = (segment.text or "").strip()
-        words = []
-        for word in getattr(segment, "words", None) or []:
-            if word.start is None or word.end is None:
-                continue
-            words.append(
-                {
-                    "word": (word.word or "").strip(),
-                    "start": float(word.start),
-                    "end": float(word.end),
-                }
-            )
-
-        normalized_segments.append(
-            {
-                "start": float(segment.start),
-                "end": float(segment.end),
-                "text": text,
-                "words": words,
-            }
-        )
-        if text:
-            full_text_parts.append(text)
-
-    language = getattr(info, "language", None)
-    return {
-        "text": " ".join(full_text_parts).strip(),
-        "segments": normalized_segments,
-        "language": language,
-    }
-
-
-def _load_faster_whisper_model() -> tuple[str, object]:
-    if not _ensure_faster_whisper_available():
-        raise RuntimeError("faster-whisper is not installed.")
-
-    last_error = None
-    WHISPER_MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    with _whisper_model_lock:
-        for model_name in _get_whisper_model_candidates():
-            cache_key = f"faster::{model_name}"
-            cached_model = _whisper_model_cache.get(cache_key)
-            if cached_model is not None:
-                return model_name, cached_model
-
-            try:
-                model = _FasterWhisperModel(
-                    model_name,
-                    device="auto",
-                    compute_type="auto",
-                    download_root=str(WHISPER_MODEL_CACHE_DIR),
-                    local_files_only=False,
-                )
-                _whisper_model_cache[cache_key] = model
-                return model_name, model
-            except Exception as error:
-                last_error = error
-
-    raise RuntimeError(_format_transcription_backend_error(last_error or RuntimeError("Unknown faster-whisper error."))) from last_error
-
-
-def _load_openai_whisper_model() -> tuple[str, object]:
-    if not _ensure_openai_whisper_available() or whisper is None:
-        raise RuntimeError("openai-whisper is not installed.")
-
-    last_error = None
-    WHISPER_MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    with _whisper_model_lock:
-        for model_name in _get_whisper_model_candidates():
-            cache_key = f"openai::{model_name}"
-            cached_model = _whisper_model_cache.get(cache_key)
-            if cached_model is not None:
-                return model_name, cached_model
-
-            try:
-                model = whisper.load_model(model_name, download_root=str(WHISPER_MODEL_CACHE_DIR))
-                _whisper_model_cache[cache_key] = model
-                return model_name, model
-            except Exception as error:
-                last_error = error
-
-    raise RuntimeError(_format_transcription_backend_error(last_error or RuntimeError("Unknown whisper error."))) from last_error
-
-
-def load_whisper_model() -> tuple[str, str, object]:
-    backend_order = {
-        "auto": ["faster-whisper", "openai-whisper"],
-        "faster-whisper": ["faster-whisper", "openai-whisper"],
-        "openai-whisper": ["openai-whisper"],
-    }.get(WHISPER_BACKEND, ["faster-whisper", "openai-whisper"])
-
-    last_error = None
-    for backend in backend_order:
-        try:
-            if backend == "faster-whisper":
-                model_name, model = _load_faster_whisper_model()
-                return backend, model_name, model
-            model_name, model = _load_openai_whisper_model()
-            return backend, model_name, model
-        except Exception as error:
-            last_error = error
-
-    raise RuntimeError(_format_transcription_backend_error(last_error or RuntimeError("Unknown transcription backend error."))) from last_error
-
-
-def transcribe_media(media_path: Path, *, word_timestamps: bool) -> dict:
-    backend, model_name, model = load_whisper_model()
-    if backend == "faster-whisper":
-        try:
-            segments, info = model.transcribe(
-                str(media_path),
-                beam_size=5,
-                word_timestamps=word_timestamps,
-                vad_filter=True,
-                condition_on_previous_text=False,
-                temperature=0.0,
-            )
-            return _normalize_faster_whisper_result(list(segments), info)
-        except Exception as error:
-            if WHISPER_BACKEND == "faster-whisper":
-                raise RuntimeError("faster-whisper transcription failed.") from error
-            # fallback to openai-whisper
-            if _ensure_openai_whisper_available():
-                backend, model_name, model = "openai-whisper", *_load_openai_whisper_model()
-            else:
-                raise RuntimeError("faster-whisper transcription failed.") from error
-
-    transcribe_options = {
-        "fp16": False,
-        "verbose": False,
-        "condition_on_previous_text": False,
-        "temperature": 0.0,
-    }
-    if word_timestamps:
-        transcribe_options["word_timestamps"] = True
-
-    try:
-        return model.transcribe(str(media_path), **transcribe_options)
-    except TypeError:
-        fallback_options = dict(transcribe_options)
-        fallback_options.pop("word_timestamps", None)
-        return model.transcribe(str(media_path), **fallback_options)
-    except Exception as error:
-        if whisper is not None:
-            with _whisper_model_lock:
-                _whisper_model_cache.pop(f"openai::{model_name}", None)
-                WHISPER_MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-                for fallback_name in _get_whisper_fallback_candidates(model_name):
-                    fallback_key = f"openai::{fallback_name}"
-                    fallback_model = _whisper_model_cache.get(fallback_key)
-                    if fallback_model is None:
-                        try:
-                            fallback_model = whisper.load_model(fallback_name, download_root=str(WHISPER_MODEL_CACHE_DIR))
-                            _whisper_model_cache[fallback_key] = fallback_model
-                        except Exception:
-                            continue
-                    fallback_options = dict(transcribe_options)
-                    try:
-                        return fallback_model.transcribe(str(media_path), **fallback_options)
-                    except TypeError:
-                        fallback_options.pop("word_timestamps", None)
-                        return fallback_model.transcribe(str(media_path), **fallback_options)
-        raise RuntimeError("Whisper transcription failed.") from error
-
-
-def transcribe_video_fast(video_path: Path) -> dict:
-    return transcribe_media(video_path, word_timestamps=True)
-
-
-def transcribe_clip_for_subtitles(clip: VideoFileClip, output_dir: Path, clip_index: int) -> dict:
-    if clip.audio is None:
-        return {"text": "", "segments": []}
-
-    audio_path = output_dir / f"clip_audio_{clip_index:02d}.wav"
-    try:
-        clip.audio.write_audiofile(
-            str(audio_path),
-            fps=16000,
-            nbytes=2,
-            ffmpeg_params=["-ac", "1"],
-            logger=None,
-        )
-        return transcribe_media(audio_path, word_timestamps=True)
-    finally:
-        if audio_path.exists():
-            audio_path.unlink()
-
-
-def _load_wav_mono(audio_path: Path) -> tuple[int, "_np.ndarray"] | None:
-    try:
-        with wave.open(str(audio_path), "rb") as wav_file:
-            channels = wav_file.getnchannels()
-            sample_width = wav_file.getsampwidth()
-            frame_rate = wav_file.getframerate()
-            frame_count = wav_file.getnframes()
-            raw = wav_file.readframes(frame_count)
-    except (wave.Error, OSError):
-        return None
-
-    if sample_width != 2:
-        return None
-
-    audio = _np.frombuffer(raw, dtype=_np.int16).astype(_np.float32)
-    if channels > 1:
-        audio = audio.reshape(-1, channels).mean(axis=1)
-    audio /= 32768.0
-    return frame_rate, audio
-
-
-def _extract_audio_features(samples: "_np.ndarray", sample_rate: int) -> list[float]:
-    if len(samples) == 0:
-        return [0.0] * 6
-
-    window = samples - float(samples.mean())
-    rms = float(_np.sqrt(_np.mean(window ** 2)))
-    zcr = float(_np.mean(_np.abs(_np.diff(_np.signbit(window).astype(_np.int8)))))
-
-    spectrum = _np.abs(_np.fft.rfft(window * _np.hanning(len(window))))
-    freqs = _np.fft.rfftfreq(len(window), d=1.0 / sample_rate)
-    spec_sum = float(spectrum.sum()) or 1.0
-    centroid = float((freqs * spectrum).sum() / spec_sum)
-    cumulative = _np.cumsum(spectrum)
-    rolloff = float(freqs[min(len(freqs) - 1, int(_np.searchsorted(cumulative, spec_sum * 0.85)))])
-    peak_freq = float(freqs[int(_np.argmax(spectrum))]) if len(freqs) else 0.0
-    flatness = float(_np.exp(_np.mean(_np.log(spectrum + 1e-9))) / (_np.mean(spectrum + 1e-9) + 1e-9))
-
-    return [rms, zcr, centroid / 4000.0, rolloff / 4000.0, peak_freq / 4000.0, flatness]
-
-
-def _cluster_audio_segments(feature_rows: "_np.ndarray") -> tuple[list[int], float]:
-    if len(feature_rows) < 4:
-        return [0] * len(feature_rows), 0.0
-
-    centroids = _np.array([feature_rows[0], feature_rows[-1]], dtype=_np.float32)
-    labels = _np.zeros(len(feature_rows), dtype=_np.int32)
-
-    for _ in range(10):
-        distances = _np.linalg.norm(feature_rows[:, None, :] - centroids[None, :, :], axis=2)
-        new_labels = distances.argmin(axis=1)
-        if _np.array_equal(labels, new_labels):
-            break
-        labels = new_labels
-        for cluster_index in range(2):
-            members = feature_rows[labels == cluster_index]
-            if len(members) > 0:
-                centroids[cluster_index] = members.mean(axis=0)
-
-    counts = [_np.sum(labels == 0), _np.sum(labels == 1)]
-    if min(counts) < 2:
-        return labels.tolist(), 0.0
-
-    separation = float(_np.linalg.norm(centroids[0] - centroids[1]))
-    intra = 0.0
-    for cluster_index in range(2):
-        members = feature_rows[labels == cluster_index]
-        intra += float(_np.linalg.norm(members - centroids[cluster_index], axis=1).mean())
-    confidence = separation / max(0.05, intra)
-    return labels.tolist(), round(confidence, 3)
-
-
-def _smooth_speaker_labels(labels: list[int]) -> list[int]:
-    if len(labels) < 3:
-        return labels
-
-    smoothed = list(labels)
-    for _ in range(2):
-        updated = list(smoothed)
-        for index in range(1, len(smoothed) - 1):
-            prev_label = smoothed[index - 1]
-            next_label = smoothed[index + 1]
-            if prev_label == next_label and smoothed[index] != prev_label:
-                updated[index] = prev_label
-        smoothed = updated
-    return smoothed
-
-
-def _merge_audio_assignments(assignments: list[dict]) -> list[dict]:
-    if not assignments:
-        return []
-
-    merged: list[dict] = []
-    for assignment in sorted(assignments, key=lambda item: (float(item.get("start") or 0.0), float(item.get("end") or 0.0))):
-        start = round(float(assignment.get("start") or 0.0), 3)
-        end = round(max(start, float(assignment.get("end") or start)), 3)
-        speaker = str(assignment.get("speaker") or "S1")
-        if merged and merged[-1]["speaker"] == speaker and start - float(merged[-1]["end"]) <= 0.35:
-            merged[-1]["end"] = end
-            continue
-        merged.append({"start": start, "end": end, "speaker": speaker})
-    return merged
-
-
-def _build_audio_speaker_summary(assignments: list[dict]) -> dict:
-    merged = _merge_audio_assignments(assignments)
-    if not merged:
-        return {
-            "audioSpeakerCount": 0,
-            "audioSpeakerSwitches": 0,
-            "audioDominantSpeaker": None,
-            "audioDominantShare": 0.0,
-            "audioTurnDensity": 0.0,
-            "audioSpeakerAssignments": [],
-        }
-
-    totals: dict[str, float] = {}
-    switches = 0
-    previous_speaker = None
-    for assignment in merged:
-        speaker = str(assignment["speaker"])
-        duration = max(0.0, float(assignment["end"]) - float(assignment["start"]))
-        totals[speaker] = totals.get(speaker, 0.0) + duration
-        if previous_speaker is not None and previous_speaker != speaker:
-            switches += 1
-        previous_speaker = speaker
-
-    total_duration = max(0.001, sum(totals.values()))
-    dominant_speaker, dominant_duration = max(totals.items(), key=lambda item: item[1])
-    turn_density = switches / max(0.25, total_duration / 60.0)
-
-    return {
-        "audioSpeakerCount": len(totals),
-        "audioSpeakerSwitches": switches,
-        "audioDominantSpeaker": dominant_speaker,
-        "audioDominantShare": round(dominant_duration / total_duration, 3),
-        "audioTurnDensity": round(turn_density, 3),
-        "audioSpeakerAssignments": merged,
-    }
-
-
-def _analyze_audio_speakers_pyannote(audio_path: Path) -> dict | None:
-    pipeline = _load_pyannote_pipeline()
-    if pipeline is None:
-        return None
-
-    try:
-        diarization = pipeline(str(audio_path))
-    except Exception:
-        return None
-
-    assignments = []
-    for turn, _, speaker in diarization.itertracks(yield_label=True):
-        speaker_label = str(speaker)
-        assignments.append(
-            {
-                "start": round(float(turn.start), 3),
-                "end": round(float(turn.end), 3),
-                "speaker": speaker_label,
-            }
-        )
-
-    if not assignments:
-        return None
-
-    summary = _build_audio_speaker_summary(assignments)
-    summary["audioSpeakerConfidence"] = 0.92 if int(summary["audioSpeakerCount"]) > 1 else 0.75
-    summary["audioSpeakerProvider"] = "pyannote"
-    return summary
-
-
-def analyze_audio_speakers(audio_path: Path | None, transcript: dict) -> dict:
-    if audio_path is None or not audio_path.exists():
-        return {"audioSpeakerCount": 0, "audioSpeakerSwitches": 0, "audioSpeakerConfidence": 0.0, "audioSpeakerProvider": "none"}
-
-    pyannote_result = _analyze_audio_speakers_pyannote(audio_path)
-    if pyannote_result is not None:
-        return pyannote_result
-
-    loaded = _load_wav_mono(audio_path)
-    if loaded is None:
-        return {"audioSpeakerCount": 0, "audioSpeakerSwitches": 0, "audioSpeakerConfidence": 0.0, "audioSpeakerProvider": "none"}
-
-    sample_rate, audio = loaded
-    segment_rows: list[dict] = []
-    for index, segment in enumerate(transcript.get("segments") or []):
-        try:
-            start = max(0.0, float(segment.get("start") or 0.0))
-            end = max(start + 0.01, float(segment.get("end") or 0.0))
-        except (TypeError, ValueError):
-            continue
-
-        if end - start < 0.45:
-            continue
-
-        start_idx = int(start * sample_rate)
-        end_idx = min(len(audio), int(end * sample_rate))
-        samples = audio[start_idx:end_idx]
-        if len(samples) < int(sample_rate * 0.35):
-            continue
-
-        segment_rows.append(
-            {
-                "index": index,
-                "start": round(start, 3),
-                "end": round(end, 3),
-                "features": _extract_audio_features(samples, sample_rate),
-            }
-        )
-
-    if len(segment_rows) < 4:
-        return {"audioSpeakerCount": 1, "audioSpeakerSwitches": 0, "audioSpeakerConfidence": 0.0, "audioSpeakerProvider": "heuristic"}
-
-    feature_matrix = _np.array([row["features"] for row in segment_rows], dtype=_np.float32)
-    means = feature_matrix.mean(axis=0)
-    stds = feature_matrix.std(axis=0) + 1e-6
-    normalized = (feature_matrix - means) / stds
-    labels, confidence = _cluster_audio_segments(normalized)
-    labels = _smooth_speaker_labels(labels)
-
-    switches = 0
-    for prev, curr in zip(labels, labels[1:]):
-        if prev != curr:
-            switches += 1
-
-    speaker_count = 2 if confidence >= 1.15 and switches >= 1 else 1
-    assignments = []
-    for row, label in zip(segment_rows, labels):
-        assignments.append(
-            {
-                "start": row["start"],
-                "end": row["end"],
-                "speaker": f"S{label + 1 if speaker_count > 1 else 1}",
-            }
-        )
-
-    summary = _build_audio_speaker_summary(assignments)
-    summary["audioSpeakerCount"] = speaker_count
-    summary["audioSpeakerSwitches"] = int(summary["audioSpeakerSwitches"] or 0) if speaker_count > 1 else 0
-    summary["audioSpeakerConfidence"] = confidence if speaker_count > 1 else round(confidence * 0.4, 3)
-    summary["audioSpeakerProvider"] = "heuristic"
-    if speaker_count <= 1:
-        summary["audioDominantSpeaker"] = "S1"
-        summary["audioDominantShare"] = 1.0 if summary["audioSpeakerAssignments"] else 0.0
-    return summary
 
 
 def _slice_segment_words(words: list[dict], clip_start_time: float, clip_end_time: float) -> list[dict]:
@@ -3170,13 +2368,13 @@ def create_short_from_url(
     download_info: dict = {}
 
     try:
-        video_path = _restore_cached_video(video_url, temp_base)
+        video_path = restore_cached_video(video_url, temp_base)
         if video_path is not None:
             _emit(progress_callback, "downloading", "Reusing cached source video from a previous local run...")
         else:
             _emit(progress_callback, "downloading", "Downloading the highest-quality source video and audio from YouTube...")
             video_path, download_info = download_video(video_url, temp_base, progress_callback)
-            _store_cached_video(video_url, video_path)
+            store_cached_video(video_url, video_path)
 
         if video_path is not None:
             if not download_info:
@@ -3184,12 +2382,12 @@ def create_short_from_url(
             download_info["localPath"] = str(video_path)
             source_meta_path.write_text(json.dumps(download_info, ensure_ascii=True, indent=2), encoding="utf-8")
 
-        result = _load_cached_transcript(video_url)
+        result = load_cached_transcript(video_url)
         if result is not None:
             _emit(progress_callback, "transcribing", "Reusing cached transcript from a previous local run...")
         else:
-            whisper_model = _get_whisper_model_candidates()[0]
-            if _whisper_cache_contains_files():
+            whisper_model = get_whisper_model_candidates()[0]
+            if whisper_cache_contains_files():
                 _emit(progress_callback, "transcribing", f"Transcribing full video once with Whisper ({whisper_model}) for analysis and subtitles...")
             else:
                 _emit(
@@ -3198,7 +2396,7 @@ def create_short_from_url(
                     f"Preparing the local speech model ({whisper_model}) for first run. This one-time download can take a few minutes, then transcription starts automatically...",
                 )
             result = transcribe_video_fast(video_path)
-            _store_cached_transcript(video_url, result)
+            store_cached_transcript(video_url, result)
             _emit(progress_callback, "transcribing", f"Transcription complete. Found {len(result.get('segments') or [])} segments.")
 
         transcript_path.write_text(
@@ -3254,7 +2452,7 @@ def create_short_from_url(
             # preventing the proc=None crash on long clips.
             audio_temp_path: Path | None = None
             if clip.audio is not None:
-                audio_temp_path = _extract_audio_segment(video_path, start, end, audio_dir)
+                audio_temp_path = extract_audio_segment(video_path, start, end, audio_dir)
 
             _emit(progress_callback, "rendering", f"Preparing subtitle timing for clip {index}...")
             clip_transcript, requires_precise_fallback = extract_clip_transcript_from_full(result, start, end)
@@ -3266,7 +2464,7 @@ def create_short_from_url(
             _emit(
                 progress_callback,
                 "rendering",
-                f"Speaker analysis for clip {index}: {_speaker_analysis_backend_label(audio_speaker_meta)} "
+                f"Speaker analysis for clip {index}: {speaker_analysis_backend_label(audio_speaker_meta)} "
                 f"({audio_speaker_meta.get('audioSpeakerCount', 0)} speaker estimate).",
             )
 
@@ -3310,7 +2508,8 @@ def create_short_from_url(
                 clip_final,
                 output_path,
                 audio_path=audio_temp_path,
-                render_profile=render_profile,
+                render_settings=render_settings,
+                render_threads=RENDER_THREADS,
             )
 
             clips_output.append(

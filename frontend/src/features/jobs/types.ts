@@ -68,6 +68,7 @@ export type JobPayload = {
   error?: string
   errorHelp?: string
   errorCategory?: string
+  errorId?: string
   logs?: JobLog[]
   result?: JobResult
   clipCount?: number
@@ -90,6 +91,7 @@ export type BootstrapPayload = {
   doctorStatus: string
   runtime: Record<string, string>
   logPath: string
+  doctorReportPath?: string
 }
 
 export type DoctorCheck = {
@@ -104,6 +106,7 @@ export type DoctorReport = {
   checks: DoctorCheck[]
   paths: Record<string, string>
   logPath: string
+  reportPath: string
   whisper: {
     backendMode: string
     requestedModels: string[]

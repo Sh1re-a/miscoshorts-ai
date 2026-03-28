@@ -38,11 +38,17 @@ def explain_exception(error: Exception) -> FriendlyError:
             summary="FFmpeg is missing.",
             hint="Install FFmpeg and restart the app. The setup scripts can do this automatically on supported machines.",
         )
+    if "faster-whisper is not installed" in lowered or "the faster-whisper package is missing" in lowered:
+        return FriendlyError(
+            category="dependency",
+            summary="The local speech engine is missing.",
+            hint="Run the launcher again so it can repair the Python environment before the next render.",
+        )
     if "speech model setup failed" in lowered or "whisper transcription failed" in lowered or "faster-whisper transcription failed" in lowered:
         return FriendlyError(
             category="speech_model",
             summary="The local speech transcription model could not be prepared or used.",
-            hint="Run the launcher again so the Whisper preflight can repair the model cache, then retry the render.",
+            hint="Run the launcher again so the Whisper preflight can repair the model cache, then retry the render. If it still fails, send the doctor report from .miscoshorts/setup.",
         )
     if "permission denied" in lowered:
         return FriendlyError(

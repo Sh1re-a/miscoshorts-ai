@@ -17,6 +17,7 @@ SETUP_DIR="$INTERNAL_DIR/setup"
 VENV_DIR="$RUNTIME_DIR/venv"
 VENV_PYTHON="$VENV_DIR/bin/python3"
 LOG_PATH="$SETUP_DIR/macos-setup.log"
+DOCTOR_REPORT_PATH="$SETUP_DIR/doctor-report.json"
 PYTHON_CORE_STAMP="$SETUP_DIR/python-core.state"
 PYTHON_OPTIONAL_STAMP="$SETUP_DIR/python-optional.state"
 FRONTEND_DEPS_STAMP="$SETUP_DIR/frontend-deps.state"
@@ -121,6 +122,7 @@ echo "${CYAN}Miscoshorts AI${RESET}"
 echo "${DIM}Local setup and launch${RESET}"
 info "Private runtime files live in $INTERNAL_DIR and are ignored by Git/GitHub."
 info "Speech model cache lives in $MODEL_CACHE_DIR."
+info "If something fails, send the files in $SETUP_DIR for support."
 
 # ─── Step 1: Check & install tools ───
 step "Checking local tools"
@@ -275,8 +277,11 @@ fi
 # ─── Step 4: Launch ───
 step "Starting app"
 
+action "Refreshing support diagnostics snapshot..."
+"$VENV_PYTHON" -m app.doctor --json > "$DOCTOR_REPORT_PATH" 2>> "$LOG_PATH" || info "Doctor snapshot could not be refreshed automatically before launch."
 info "Opening the local app in your browser. Keep this window open."
 info "Need support later? Run: $VENV_PYTHON -m app.doctor"
+info "Doctor report: $DOCTOR_REPORT_PATH"
 if dir_has_files "$MODEL_CACHE_DIR/whisper"; then
 	reuse "existing local speech-model cache"
 else

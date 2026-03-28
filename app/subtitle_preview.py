@@ -7,9 +7,9 @@ from pathlib import Path
 from moviepy import ColorClip, VideoFileClip
 from PIL import Image
 
-from app.shorts_service import write_high_quality_video
 from app import subtitles
 from app.paths import OUTPUTS_DIR
+from app.video_render import write_high_quality_video
 
 
 DEFAULT_VIDEO_SIZE = (1080, 1920)
