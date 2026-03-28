@@ -42,6 +42,7 @@ $pythonCoreStamp = Join-Path $stateDir "python-core.state"
 $pythonOptionalStamp = Join-Path $stateDir "python-optional.state"
 $frontendDepsStamp = Join-Path $stateDir "frontend-deps.state"
 $frontendBuildStamp = Join-Path $stateDir "frontend-build.state"
+$whisperModelStamp = Join-Path $stateDir "whisper-model.state"
 $script:SetupStep = 0
 $script:SetupStartedAt = Get-Date
 $whisperDistilLargeV3DownloadBytes = 1536MB
@@ -590,6 +591,12 @@ function Test-ShouldInstallOptionalPythonDeps {
     )
 }
 
+function Get-WhisperModelSignature {
+    $requestedModels = if ([string]::IsNullOrWhiteSpace($env:WHISPER_MODEL)) { "distil-large-v3,large-v3" } else { $env:WHISPER_MODEL }
+    $requestedBackend = if ([string]::IsNullOrWhiteSpace($env:WHISPER_BACKEND)) { "auto" } else { $env:WHISPER_BACKEND }
+    return Get-StringHash "$requestedModels`n$requestedBackend"
+}
+
 function Read-StateValue($statePath) {
     if (-not (Test-Path $statePath)) {
         return $null
@@ -636,6 +643,7 @@ function Invoke-Setup {
         $optionalDepsMode = "on"
     }
     $pythonOptionalSignature = "{0}|optional={1}" -f (Get-StateSignature @("requirements-optional.txt")), $optionalDepsMode
+    $whisperModelSignature = Get-WhisperModelSignature
     $frontendDepsSignature = Get-StateSignature @("frontend/package.json", "frontend/package-lock.json")
     $frontendBuildSignature = Get-StateSignature @("frontend/src", "frontend/index.html", "frontend/package.json", "frontend/vite.config.ts")
 
@@ -681,6 +689,20 @@ function Invoke-Setup {
         }
     } else {
         Write-SetupReuse "Optional Python add-ons disabled"
+    }
+
+    if ((Test-StateMatch $whisperModelStamp $whisperModelSignature) -and (Get-DirectoryHasFiles (Join-Path $modelCacheDir "whisper"))) {
+        Write-SetupReuse "Whisper model cache already prepared"
+    }
+    else {
+        Write-SetupAction "Preparing the configured Whisper model before the first render ..."
+        Write-SetupInfo "This avoids model-missing failures during transcription."
+        $env:HF_HOME = Join-Path $modelCacheDir "huggingface"
+        $env:XDG_CACHE_HOME = Join-Path $modelCacheDir "xdg"
+        $env:WHISPER_MODEL_CACHE_DIR = Join-Path $modelCacheDir "whisper"
+        Invoke-CheckedCommand $venvPython @("-m", "app.preflight") "Preparing the Whisper model failed."
+        Write-StateValue $whisperModelStamp $whisperModelSignature
+        Write-SetupDone "Whisper model is ready."
     }
 
     Start-SetupStep "Preparing app interface"

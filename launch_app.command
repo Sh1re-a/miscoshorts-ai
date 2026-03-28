@@ -21,6 +21,7 @@ PYTHON_CORE_STAMP="$SETUP_DIR/python-core.state"
 PYTHON_OPTIONAL_STAMP="$SETUP_DIR/python-optional.state"
 FRONTEND_DEPS_STAMP="$SETUP_DIR/frontend-deps.state"
 FRONTEND_BUILD_STAMP="$SETUP_DIR/frontend-build.state"
+WHISPER_MODEL_STAMP="$SETUP_DIR/whisper-model.state"
 MODEL_CACHE_DIR="$RUNTIME_DIR/model-cache"
 WHISPER_DISTIL_LARGE_V3_DOWNLOAD_BYTES=$((1536 * 1024 * 1024))
 WHISPER_LARGE_V3_DOWNLOAD_BYTES=$((3100 * 1024 * 1024))
@@ -93,6 +94,10 @@ frontend_deps_signature() {
 
 frontend_build_signature() {
 	find frontend/src frontend/index.html frontend/package.json frontend/vite.config.ts -type f -print0 2>/dev/null | sort -z | xargs -0 shasum -a 256 2>/dev/null | shasum -a 256 | awk '{print $1}'
+}
+
+whisper_model_signature() {
+	printf '%s\n%s\n' "${WHISPER_MODEL:-distil-large-v3,large-v3}" "${WHISPER_BACKEND:-auto}" | shasum -a 256 | awk '{print $1}'
 }
 
 stamp_matches() {
@@ -178,6 +183,7 @@ fi
 
 CURRENT_CORE_SIGNATURE=$(core_deps_signature)
 CURRENT_OPTIONAL_SIGNATURE=$(optional_deps_signature)
+CURRENT_WHISPER_SIGNATURE=$(whisper_model_signature)
 
 if stamp_matches "$PYTHON_CORE_STAMP" "$CURRENT_CORE_SIGNATURE"; then
 	reuse "Python core packages (unchanged)"
@@ -202,6 +208,19 @@ if [[ -f "requirements-optional.txt" && ( -n "${PYANNOTE_AUTH_TOKEN:-}" || -n "$
 	fi
 else
 	reuse "Optional Python add-ons disabled"
+fi
+
+if stamp_matches "$WHISPER_MODEL_STAMP" "$CURRENT_WHISPER_SIGNATURE" && dir_has_files "$MODEL_CACHE_DIR/whisper"; then
+	reuse "Whisper model cache (configured model already prepared)"
+else
+	action "Preparing the configured Whisper model before the first render..."
+	info "This avoids model-missing failures during transcription."
+	HF_HOME="$MODEL_CACHE_DIR/huggingface" \
+	XDG_CACHE_HOME="$MODEL_CACHE_DIR/xdg" \
+	WHISPER_MODEL_CACHE_DIR="$MODEL_CACHE_DIR/whisper" \
+	"$VENV_PYTHON" -m app.preflight 2>&1 | tee -a "$LOG_PATH" || fail "Whisper preflight failed. Check $LOG_PATH for details."
+	echo "$CURRENT_WHISPER_SIGNATURE" > "$WHISPER_MODEL_STAMP"
+	done_msg "Whisper model is ready"
 fi
 
 # ─── Step 3: Frontend ───

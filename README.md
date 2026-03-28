@@ -35,6 +35,8 @@ The launcher stores internal runtime files inside `.miscoshorts/` so the main pr
 
 Speech models are also kept inside `.miscoshorts/runtime/model-cache/` now, not in a giant shared global cache. If a tester deletes that folder by mistake, the app downloads the same configured Whisper model again on the next run.
 
+The launcher now runs a Whisper preflight during setup, so missing speech models are caught and repaired before the first render instead of failing halfway through a job.
+
 If the folder already contains `frontend/dist`, the launcher uses that built app directly and skips Node.js completely.
 
 If you are sending this to a friend, send the full project folder, not just the launcher file.
