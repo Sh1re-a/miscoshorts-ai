@@ -61,14 +61,34 @@ def _load_jobs_from_disk() -> None:
         return
 
     loaded_jobs: dict[str, dict] = {}
+    recovered_job_ids: list[str] = []
+    recoverable_statuses = {"queued", "validating", "downloading", "transcribing", "analyzing", "rendering"}
+    recovered_at = time.time()
     for path in JOB_STATE_DIR.glob("*.json"):
         try:
-            loaded_jobs[path.stem] = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
+        if payload.get("status") in recoverable_statuses:
+            payload["status"] = "failed"
+            payload["queuePosition"] = 0
+            payload["error"] = "This older job was interrupted by an app restart before it finished."
+            payload["errorHelp"] = "Start the render again. The recovered job state was cleared so the queue can continue."
+            payload["errorCategory"] = "recovered"
+            payload["message"] = "Recovered interrupted job state after restart."
+            payload["updatedAt"] = recovered_at
+            payload["etaSeconds"] = None
+            recovered_job_ids.append(path.stem)
+        loaded_jobs[path.stem] = payload
 
     with jobs_lock:
         jobs.update(loaded_jobs)
+        _refresh_queue_positions_locked()
+        for job_id in loaded_jobs:
+            _persist_job_locked(job_id)
+
+    if recovered_job_ids:
+        logger.warning("Recovered %s interrupted job(s) from disk after restart: %s", len(recovered_job_ids), ", ".join(recovered_job_ids))
 
 
 def _get_job(job_id: str) -> dict | None:

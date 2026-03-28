@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import shutil
+import tempfile
 import time
 from pathlib import Path
 
@@ -16,8 +17,16 @@ JOB_OUTPUT_RETENTION_DAYS = max(1, int(os.getenv("JOB_OUTPUT_RETENTION_DAYS", "3
 
 def atomic_write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(f"{path.suffix}.tmp")
-    temp_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f"{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        handle.write(json.dumps(payload, ensure_ascii=True, indent=2))
+        temp_path = Path(handle.name)
     temp_path.replace(path)
 
 
