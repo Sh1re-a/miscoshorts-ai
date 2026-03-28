@@ -25,6 +25,8 @@ That is the supported first-run path.
 
 On Windows, the project folder can live on an external SSD, but the app now defaults to storing runtime files and outputs under the user's local AppData folder for better write reliability.
 
+For backward compatibility, the Windows setup also tries to create project-level compatibility links such as `.miscoshorts` so older scripts that still look inside the repo keep working.
+
 ### What The Launcher Does
 
 - checks Python

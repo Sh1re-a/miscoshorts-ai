@@ -20,6 +20,8 @@ $appDir = Join-Path $root "app"
 $frontendDir = Join-Path $root "frontend"
 $frontendDistDir = Join-Path $frontendDir "dist"
 $frontendEntry = Join-Path $frontendDistDir "index.html"
+$projectCompatInternalDir = Join-Path $root ".miscoshorts"
+$projectCompatOutputsDir = Join-Path $root "outputs"
 $internalDir = $env:MISCOSHORTS_INTERNAL_DIR
 $runtimeDir = Join-Path $internalDir "runtime"
 $modelCacheDir = Join-Path $runtimeDir "model-cache"
@@ -559,6 +561,39 @@ function Ensure-StateDir {
     }
 }
 
+function Ensure-CompatibilityJunction($linkPath, $targetPath, $label) {
+    $resolvedLink = [System.IO.Path]::GetFullPath($linkPath)
+    $resolvedTarget = [System.IO.Path]::GetFullPath($targetPath)
+
+    if ($resolvedLink -eq $resolvedTarget) {
+        return
+    }
+
+    if (Test-Path $linkPath) {
+        try {
+            if ((Resolve-Path $linkPath).Path -eq (Resolve-Path $targetPath).Path) {
+                Write-SetupReuse "$label compatibility path already points to $targetPath"
+                return
+            }
+        }
+        catch {
+            Write-SetupInfo "$label compatibility path already exists at $linkPath."
+            return
+        }
+
+        Write-SetupInfo "$label compatibility path already exists at $linkPath."
+        return
+    }
+
+    try {
+        New-Item -ItemType Junction -Path $linkPath -Target $targetPath | Out-Null
+        Write-SetupDone "$label compatibility link created at $linkPath"
+    }
+    catch {
+        Write-SetupInfo "Could not create $label compatibility link at $linkPath. Old scripts should use the real path in $targetPath instead."
+    }
+}
+
 function Get-StringHash($value) {
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($value)
     $sha = [System.Security.Cryptography.SHA256]::Create()
@@ -665,6 +700,8 @@ function Invoke-Setup {
     Write-SetupBanner
     Refresh-SessionPath
     Ensure-StateDir
+    Ensure-CompatibilityJunction $projectCompatInternalDir $internalDir "Internal runtime"
+    Ensure-CompatibilityJunction $projectCompatOutputsDir $outputsDir "Outputs"
 
     Start-SetupStep "Checking local tools"
     $pythonSpec = Ensure-Python
