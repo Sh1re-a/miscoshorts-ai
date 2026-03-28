@@ -199,6 +199,31 @@ class RunObserver:
         )
         return report_path
 
+    def write_failure_report(self, error_summary: str, *, cleanup_ok: bool | None = None) -> Path:
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        report_path = LOGS_DIR / f"run-{self.job_id}.json"
+        summary = self.build_summary(status="failed", cleanup_ok=cleanup_ok, promotion_ok=False)
+        atomic_write_json(
+            report_path,
+            {
+                "jobId": self.job_id,
+                "jobFingerprint": self.fingerprint,
+                "videoUrl": self.video_url,
+                "outputFilename": self.output_filename,
+                "renderProfile": self.render_profile,
+                "startedAt": self.started_at,
+                "endedAt": time.time(),
+                "error": error_summary,
+                "summary": summary,
+                "phases": self.phases,
+                "cache": self.cache,
+                "snapshots": self.snapshots,
+                "events": self.events,
+                "clips": self.clip_metrics,
+            },
+        )
+        return report_path
+
 
 def load_run_report(path: str | Path) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -247,28 +272,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-    def write_failure_report(self, error_summary: str, *, cleanup_ok: bool | None = None) -> Path:
-        LOGS_DIR.mkdir(parents=True, exist_ok=True)
-        report_path = LOGS_DIR / f"run-{self.job_id}.json"
-        summary = self.build_summary(status="failed", cleanup_ok=cleanup_ok, promotion_ok=False)
-        atomic_write_json(
-            report_path,
-            {
-                "jobId": self.job_id,
-                "jobFingerprint": self.fingerprint,
-                "videoUrl": self.video_url,
-                "outputFilename": self.output_filename,
-                "renderProfile": self.render_profile,
-                "startedAt": self.started_at,
-                "endedAt": time.time(),
-                "error": error_summary,
-                "summary": summary,
-                "phases": self.phases,
-                "cache": self.cache,
-                "snapshots": self.snapshots,
-                "events": self.events,
-                "clips": self.clip_metrics,
-            },
-        )
-        return report_path

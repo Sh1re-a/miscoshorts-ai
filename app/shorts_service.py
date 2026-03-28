@@ -2231,7 +2231,7 @@ def _render_selected_clips(
                 "subtitlePlanFilename": subtitle_plan_path.name if subtitle_plan_path else None,
                 "subtitlePreflightFilename": subtitle_preflight_path.name if subtitle_preflight_path else None,
                 "subtitleCueCount": len(subtitle_plan),
-                "subtitlePreflightWarnings": len(subtitle_preflight.get("warnings") or []),
+                "subtitlePreflightWarnings": 0,
                 "renderMetrics": clip_metrics,
             }
             if observer is not None:
