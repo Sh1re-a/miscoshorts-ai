@@ -276,6 +276,7 @@ fi
 step "Starting app"
 
 info "Opening the local app in your browser. Keep this window open."
+info "Need support later? Run: $VENV_PYTHON -m app.doctor"
 if dir_has_files "$MODEL_CACHE_DIR/whisper"; then
 	reuse "existing local speech-model cache"
 else

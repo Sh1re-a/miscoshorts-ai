@@ -12,7 +12,11 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request, send_file, send_from_directory
 
+from app import analytics, subtitle_preview
+from app.doctor import run_doctor
+from app.errors import explain_exception
 from app.paths import FRONTEND_DIST_DIR, OUTPUTS_DIR, OUTPUT_JOBS_DIR
+from app.runtime import configure_logging, is_debug_enabled, load_local_env, runtime_summary
 from app.shorts_service import (
     create_short_from_url,
     normalize_requested_render_profile,
@@ -21,7 +25,10 @@ from app.shorts_service import (
     sanitize_output_filename,
     validate_video_url,
 )
-from app import analytics, subtitle_preview
+
+load_local_env()
+logger, SERVER_LOG_PATH = configure_logging("server")
+DEBUG_MODE = is_debug_enabled()
 
 
 app = Flask(__name__, static_folder=str(FRONTEND_DIST_DIR), static_url_path="/")
@@ -231,6 +238,7 @@ def _set_job(job_id: str, **fields) -> None:
 
 def _job_progress(job_id: str, stage: str, message: str) -> None:
     print(f"[{stage}] {message}", flush=True)
+    logger.info("[%s] %s", stage, message)
     _append_job_log(job_id, stage, message)
     job = _get_job(job_id) or {}
     progress_fields = _derive_progress_fields(job, stage, message)
@@ -266,13 +274,20 @@ def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, cl
         _append_job_log(job_id, "completed", "Render finished successfully.")
         _set_job(job_id, status="completed", result=result, updatedAt=time.time(), overallProgress=100.0, stageProgress=100.0, etaSeconds=0.0)
     except Exception as error:
-        print(traceback.format_exc(), flush=True)
-        _append_job_log(job_id, "failed", str(error))
+        friendly = explain_exception(error)
+        logger.exception("Job %s failed", job_id)
+        if DEBUG_MODE:
+            print(traceback.format_exc(), flush=True)
+        _append_job_log(job_id, "failed", friendly.summary)
         _set_job(
             job_id,
             status="failed",
-            error=str(error),
-            traceback=traceback.format_exc(),
+            error=friendly.summary,
+            errorHelp=friendly.hint,
+            errorCategory=friendly.category,
+            traceback=traceback.format_exc() if DEBUG_MODE else None,
+            technicalError=str(error) if DEBUG_MODE else None,
+            logPath=str(SERVER_LOG_PATH),
             updatedAt=time.time(),
             etaSeconds=None,
         )
@@ -306,6 +321,7 @@ def healthcheck():
 
 @app.get("/api/bootstrap")
 def bootstrap():
+    doctor_report = run_doctor(prepare_whisper=False)
     return jsonify(
         {
             "hasConfiguredApiKey": bool((os.getenv("GEMINI_API_KEY") or "").strip()),
@@ -316,8 +332,18 @@ def bootstrap():
             "hasPyannoteToken": bool(
                 (os.getenv("PYANNOTE_AUTH_TOKEN") or os.getenv("HUGGINGFACE_ACCESS_TOKEN") or os.getenv("HF_TOKEN") or "").strip()
             ),
+            "doctorStatus": doctor_report["status"],
+            "runtime": runtime_summary(),
+            "logPath": str(SERVER_LOG_PATH),
         }
     )
+
+
+@app.get("/api/doctor")
+def doctor_report():
+    report = run_doctor(prepare_whisper=False)
+    report["logPath"] = str(SERVER_LOG_PATH)
+    return jsonify(report)
 
 
 @app.post("/api/process")

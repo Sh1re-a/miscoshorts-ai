@@ -9,7 +9,7 @@ import { Input } from './components/ui/input'
 import { Label } from './components/ui/label'
 import { Progress } from './components/ui/progress'
 import { feedbackTags, progressByStatus, stageDescriptions, statusTitles } from './features/jobs/config'
-import type { AnalyticsInsights, BootstrapPayload, ClipFeedback, JobPayload, JobStatus } from './features/jobs/types'
+import type { AnalyticsInsights, BootstrapPayload, ClipFeedback, DoctorReport, JobPayload, JobStatus } from './features/jobs/types'
 import { apiKeyStorageKey, formatEta, formatLogTime, getEtaWindow, loadSavedApiKey, readJsonResponse } from './features/jobs/utils'
 
 const fallbackRenderProfile = 'studio'
@@ -39,6 +39,7 @@ function App() {
   const [analyticsData, setAnalyticsData] = useState<AnalyticsInsights | null>(null)
   const [showAnalytics, setShowAnalytics] = useState(false)
   const [selectedClipCount, setSelectedClipCount] = useState(3)
+  const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -63,7 +64,23 @@ function App() {
       }
     }
 
+    async function loadDoctor() {
+      try {
+        const response = await fetch('/api/doctor')
+        if (!response.ok) {
+          return
+        }
+        const payload = await readJsonResponse<DoctorReport>(response)
+        if (!cancelled) {
+          setDoctorReport(payload)
+        }
+      } catch {
+        // Keep the app usable even if diagnostics fail.
+      }
+    }
+
     void loadBootstrap()
+    void loadDoctor()
 
     return () => {
       cancelled = true
@@ -142,6 +159,10 @@ function App() {
   const effectiveClipCount = job.result?.clipCount ?? job.clipCount ?? selectedClipCount
   const currentRenderProfileLabel = renderProfiles[selectedRenderProfile] ?? renderProfiles[fallbackRenderProfile] ?? 'Studio HQ 1080x1920 MP4'
   const progressValue = job.overallProgress ?? progressByStatus[job.status]
+  const highlightedDoctorChecks = useMemo(
+    () => (doctorReport?.checks ?? []).filter((check) => check.status !== 'PASS').slice(0, 4),
+    [doctorReport],
+  )
 
   function resetFlow() {
     setJobId(null)
@@ -360,6 +381,31 @@ function App() {
                   <p className="mt-2 text-slate-500">Subtitle style: fixed professional editorial preset. No manual tweaking in the dashboard.</p>
                 </div>
 
+                {doctorReport ? (
+                  <div className={`rounded-[24px] border px-4 py-4 text-sm leading-6 ${
+                    doctorReport.status === 'FAIL'
+                      ? 'border-rose-200 bg-rose-50 text-rose-900'
+                      : doctorReport.status === 'WARN'
+                        ? 'border-amber-200 bg-amber-50 text-amber-950'
+                        : 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                  }`}>
+                    <p className="font-semibold">System check: {doctorReport.status}</p>
+                    <p className="mt-1">Log file: {doctorReport.logPath}</p>
+                    <p className="mt-1">Speech model cache: {doctorReport.paths.modelCacheDir}</p>
+                    {highlightedDoctorChecks.length > 0 ? (
+                      <div className="mt-2 space-y-1 text-xs">
+                        {highlightedDoctorChecks.map((check) => (
+                          <p key={check.name}>
+                            {check.name}: {check.message}
+                          </p>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="mt-2 text-xs">The machine looks ready for local renders.</p>
+                    )}
+                  </div>
+                ) : null}
+
                 <div className="space-y-2">
                   <Label>Number of clips</Label>
                   <div className="flex gap-2">
@@ -481,9 +527,15 @@ function App() {
                   <p className="font-semibold text-slate-900">What happens now</p>
                   <p className="mt-2">{stageDescriptions[job.status]}</p>
                   <p className="mt-3 text-slate-500">Requested clips: {effectiveClipCount}. Output profile: {job.result?.renderProfile ?? currentRenderProfileLabel}. Finished files are saved locally in the outputs folder and will appear below when ready.</p>
+                  {doctorReport ? <p className="mt-2 text-slate-500">Support log: {doctorReport.logPath}</p> : null}
                 </div>
 
-                {job.error ? <p className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{job.error}</p> : null}
+                {job.error ? (
+                  <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                    <p>{job.error}</p>
+                    {job.errorHelp ? <p className="mt-2 text-rose-800">{job.errorHelp}</p> : null}
+                  </div>
+                ) : null}
 
                 <div className="space-y-3">
                   <div>

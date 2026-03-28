@@ -1,199 +1,97 @@
-import yt_dlp
-from moviepy import VideoFileClip
+from __future__ import annotations
+
+import argparse
 import os
-import shutil
-import whisper
-import warnings
-from pathlib import Path
 
-from dotenv import load_dotenv
+from app.doctor import run_doctor
+from app.errors import explain_exception
+from app.runtime import configure_logging, load_local_env
+from app.shorts_service import create_short_from_url
 
-from app import gemini_analyzer, shorts_service, subtitles
-from app.paths import ENV_FILE, OUTPUTS_DIR
-
-warnings.filterwarnings("ignore")
-load_dotenv(dotenv_path=ENV_FILE)
-
-URL_VIDEO = os.getenv("URL_VIDEO", "").strip()
-OUTPUT_FILENAME = os.getenv("OUTPUT_FILENAME", "short_con_subs.mp4").strip() or "short_con_subs.mp4"
-ENV_PATH = ENV_FILE
+load_local_env()
+logger, LOG_PATH = configure_logging("cli")
 
 
-def update_env_file(key, value):
-    lines = []
-    if ENV_PATH.exists():
-        with ENV_PATH.open("r", encoding="utf-8") as file_handle:
-            lines = file_handle.readlines()
-
-    new_line = f"{key}={value}\n"
-    replaced = False
-
-    for index, line in enumerate(lines):
-        if line.startswith(f"{key}="):
-            lines[index] = new_line
-            replaced = True
-            break
-
-    if not replaced:
-        lines.append(new_line)
-
-    with ENV_PATH.open("w", encoding="utf-8") as file_handle:
-        file_handle.writelines(lines)
-
-
-def prompt_value(message, current_value=""):
-    suffix = f" [{current_value}]" if current_value else ""
+def _prompt(message: str, default: str = "") -> str:
+    suffix = f" [{default}]" if default else ""
     value = input(f"{message}{suffix}: ").strip()
-    return value or current_value
+    return value or default
 
 
-def is_positive_confirmation(value):
-    return value.strip().lower() in {"j", "ja", "s", "si", "y", "yes"}
+def _progress(stage: str, message: str) -> None:
+    print(f"[{stage.upper()}] {message}")
 
 
-def ensure_dependencies():
-    if shutil.which("ffmpeg"):
-        return
-
-    raise EnvironmentError(
-        "FFmpeg is not installed or not available in PATH. On Windows, install it with 'winget install Gyan.FFmpeg' and restart the terminal."
-    )
-
-
-def get_video_url():
-    url = URL_VIDEO
-    if not url or url == "TU_URL_DE_VIDEO_AQUI":
-        url = prompt_value("Paste the YouTube video URL")
-
-    if not url:
-        raise ValueError("You must provide a YouTube URL to continue.")
-
-    save_value = input("Do you want to save this URL as the default in .env? (y/N): ").strip()
-    if is_positive_confirmation(save_value):
-        update_env_file("URL_VIDEO", url)
-
-    return url
+def _resolve_api_key(explicit_value: str | None) -> str:
+    if explicit_value and explicit_value.strip():
+        return explicit_value.strip()
+    env_value = (os.getenv("GEMINI_API_KEY") or "").strip()
+    if env_value:
+        return env_value
+    return _prompt("Gemini API key")
 
 
-def get_output_filename():
-    return prompt_value("Output filename", OUTPUT_FILENAME) or "short_con_subs.mp4"
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Run the local MicroShorts AI pipeline without the browser UI.")
+    parser.add_argument("--doctor", action="store_true", help="Run environment checks and exit.")
+    parser.add_argument("--video-url", help="YouTube URL to process.")
+    parser.add_argument("--api-key", help="Gemini API key.")
+    parser.add_argument("--output", default="short_con_subs.mp4", help="Output filename.")
+    parser.add_argument("--clips", type=int, default=3, help="Number of clips to request (1-5).")
+    parser.add_argument("--render-profile", default="studio", help="Render profile: fast, balanced, studio.")
+    args = parser.parse_args(argv)
 
+    if args.doctor:
+        report = run_doctor(prepare_whisper=False)
+        print(f"Doctor status: {report['status']}")
+        for check in report["checks"]:
+            print(f"[{check['status']}] {check['name']}: {check['message']}")
+        print(f"Log file: {report['logPath']}")
+        return 0 if report["status"] != "FAIL" else 1
 
-def get_api_key():
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
-    if api_key:
-        return api_key
-
-    api_key = prompt_value("Enter your GEMINI_API_KEY")
+    video_url = args.video_url or _prompt("YouTube video URL")
+    api_key = _resolve_api_key(args.api_key)
     if not api_key:
-        raise ValueError("No GEMINI_API_KEY was provided.")
+        print("Gemini API key is required.")
+        return 1
 
-    save_value = input("Do you want to save your API key in .env so you do not need to enter it every time? (y/N): ").strip()
-    if is_positive_confirmation(save_value):
-        update_env_file("GEMINI_API_KEY", api_key)
-
-    return api_key
-
-def download_video(url):
-    print(f"📥 Downloading video: {url}...")
-    ydl_opts = {
-        'format': shorts_service.DOWNLOAD_FORMAT,
-        'outtmpl': 'video_temp.%(ext)s',
-        'merge_output_format': 'mp4',
-        'noplaylist': True,
-        'quiet': True,
-        'no_warnings': True,
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
-    return str(shorts_service._resolve_downloaded_video_path(Path("video_temp")))
-
-def parse_gemini_response(text):
-    """Extract structured fields from Gemini's plain-text response."""
-    data = {}
-    for line in text.split('\n'):
-        if "TITLE:" in line:
-            data['title'] = line.split("TITLE:")[1].strip()
-        if "START:" in line:
-            data['start'] = float(line.split("START:")[1].strip())
-        if "END:" in line:
-            data['end'] = float(line.split("END:")[1].strip())
-        if "REASON:" in line:
-            data['reason'] = line.split("REASON:")[1].strip()
-    return data
-
-def main():
-    video_path = None
-    clip = None
-    clip_vertical = None
-    clip_final = None
-    transcript_path = OUTPUTS_DIR / "transcripcion_completa.txt"
+    print("MicroShorts AI CLI")
+    print("==================")
+    print(f"Log file: {LOG_PATH}")
+    print(f"Output filename: {args.output}")
+    print(f"Clip count: {args.clips}")
+    print(f"Render profile: {args.render_profile}")
+    print("")
 
     try:
-        ensure_dependencies()
-        video_url = get_video_url()
-        output_filename = get_output_filename()
-        api_key = get_api_key()
+        result = create_short_from_url(
+            video_url=video_url,
+            api_key=api_key,
+            output_filename=args.output,
+            clip_count=args.clips,
+            render_profile=args.render_profile,
+            progress_callback=_progress,
+        )
+    except Exception as error:
+        friendly = explain_exception(error)
+        logger.exception("CLI render failed")
+        print("")
+        print(f"Failed: {friendly.summary}")
+        if friendly.hint:
+            print(f"How to fix: {friendly.hint}")
+        print(f"Log file: {LOG_PATH}")
+        return 1
 
-        video_path = download_video(video_url)
+    clips = result.get("clips") or []
+    print("")
+    print("Done")
+    print(f"Output folder: {result.get('outputDir')}")
+    print(f"Transcript: {result.get('transcriptPath')}")
+    print(f"Clips exported: {len(clips)}")
+    for clip in clips:
+        print(f"  - {clip.get('outputPath')}")
+    return 0
 
-        print("🔍 Transcribing audio to get timestamps...")
-        model = whisper.load_model("base")
-        result = model.transcribe(video_path)
-        OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-        with transcript_path.open("w", encoding="utf-8") as f:
-            f.write(f"URL: {video_url}\n")
-            f.write(result['text'])
-
-        analysis = gemini_analyzer.find_viral_clip(result['segments'], api_key)
-        clip_data = parse_gemini_response(analysis)
-
-        if 'start' not in clip_data or 'end' not in clip_data:
-            raise ValueError("Gemini did not return a valid START and END range.")
-
-        print("🤖 SHORT PROPOSAL:")
-        print(f"📌 Title: {clip_data.get('title')}")
-        print(f"⏱️ Time: {clip_data.get('start')}s --> {clip_data.get('end')}s")
-        print(f"💡 Reason: {clip_data.get('reason')}")
-        confirmation = input("Do you want to create it? Type 'y' to accept, or enter custom timestamps (for example 120-140): ")
-
-        start = 0
-        end = 0
-        if is_positive_confirmation(confirmation):
-            start = clip_data['start']
-            end = clip_data['end']
-        elif '-' in confirmation:
-            parts = confirmation.split('-')
-            start = float(parts[0])
-            end = float(parts[1])
-        else:
-            print("Cancelled.")
-            return
-
-        print(f"🚀 Rendering the short ({start}s to {end}s) in {shorts_service.RENDER_PROFILE_LABEL}...")
-        clip = VideoFileClip(video_path).subclipped(start, end)
-
-        clip_vertical, content_type, _clip_meta = shorts_service.build_vertical_master_clip(clip)
-        print(f"  📐 Content type: {content_type}")
-        if clip.audio is not None:
-            clip_vertical = clip_vertical.with_audio(clip.audio.with_duration(clip_vertical.duration))
-
-        clip_final = subtitles.create_subtitles(clip_vertical, result['segments'], start)
-        shorts_service.write_high_quality_video(clip_final, output_filename)
-
-        print(f"🎉 Video ready: {output_filename}!")
-    finally:
-        if clip_final is not None:
-            clip_final.close()
-        if clip_vertical is not None:
-            clip_vertical.close()
-        if clip is not None:
-            clip.close()
-        if video_path and os.path.exists(video_path):
-            os.remove(video_path)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as error:
-        print(f"\n❌ Error: {error}")
+    raise SystemExit(main())

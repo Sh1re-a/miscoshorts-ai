@@ -10,7 +10,10 @@ import urllib.request
 import webbrowser
 
 from app.paths import FRONTEND_DIR, PROJECT_ROOT
+from app.runtime import configure_logging, load_local_env
 
+load_local_env()
+logger, LOG_PATH = configure_logging("start-local")
 
 BACKEND_HEALTH_URL = "http://127.0.0.1:5001/api/health"
 
@@ -82,8 +85,10 @@ def main() -> None:
     backend_process = None
     if url_responds(BACKEND_HEALTH_URL):
         print("A local backend is already running on http://127.0.0.1:5001 and will be reused.")
+        logger.info("Reusing local backend on http://127.0.0.1:5001")
     else:
         print("Starting local backend on http://127.0.0.1:5001 ...")
+        logger.info("Starting local backend on http://127.0.0.1:5001")
         backend_process = subprocess.Popen(
             [sys.executable, "-m", "app.server"],
             cwd=PROJECT_ROOT,
@@ -92,6 +97,8 @@ def main() -> None:
     frontend_process = None
     try:
         print(f"Starting React frontend on {frontend_url} ...")
+        print(f"Support log: {LOG_PATH}")
+        logger.info("Starting frontend dev server on %s", frontend_url)
         frontend_process = subprocess.Popen(
             [npm_command(), "run", "dev", "--", "--port", str(frontend_port), "--strictPort"],
             cwd=FRONTEND_DIR,
@@ -123,5 +130,7 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
+        logger.exception("Local dev startup failed")
         print(f"\nStartup error: {error}")
+        print(f"See log for details: {LOG_PATH}")
         raise SystemExit(1) from error

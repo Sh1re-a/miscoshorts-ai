@@ -66,6 +66,8 @@ export type JobPayload = {
   status: JobStatus
   message?: string
   error?: string
+  errorHelp?: string
+  errorCategory?: string
   logs?: JobLog[]
   result?: JobResult
   clipCount?: number
@@ -85,4 +87,27 @@ export type BootstrapPayload = {
   renderProfiles: Record<string, string>
   speakerDiarizationMode: string
   hasPyannoteToken: boolean
+  doctorStatus: string
+  runtime: Record<string, string>
+  logPath: string
+}
+
+export type DoctorCheck = {
+  status: 'PASS' | 'WARN' | 'FAIL'
+  name: string
+  message: string
+  fix?: string | null
+}
+
+export type DoctorReport = {
+  status: 'PASS' | 'WARN' | 'FAIL'
+  checks: DoctorCheck[]
+  paths: Record<string, string>
+  logPath: string
+  whisper: {
+    backendMode: string
+    requestedModels: string[]
+    configuredValue: string
+    cacheSizeBytes: number
+  }
 }

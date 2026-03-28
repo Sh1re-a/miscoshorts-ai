@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -152,7 +153,10 @@ _CLS_SCENE_CHANGE_THRESHOLD = 0.06 # inter-frame diff above this = scene change
 
 from app import gemini_analyzer, subtitles
 from app.paths import MODEL_CACHE_DIR, OUTPUTS_DIR, OUTPUT_CACHE_DIR, OUTPUT_JOBS_DIR
+from app.runtime import configure_logging, load_local_env
 
+load_local_env()
+logger, _LOG_PATH = configure_logging("shorts-service")
 
 ProgressCallback = Callable[[str, str], None]
 OUTPUT_WIDTH = 1080
@@ -314,6 +318,15 @@ def _ensure_cv2() -> bool:
 def _emit(callback: ProgressCallback | None, stage: str, message: str) -> None:
     if callback is not None:
         callback(stage, message)
+    logger.info("[%s] %s", stage, message)
+
+
+def _debug_note(message: str) -> None:
+    logger.debug(message)
+
+
+def _warn_note(message: str) -> None:
+    logger.warning(message)
 
 
 def normalize_requested_render_profile(render_profile: str | None) -> str:
@@ -398,6 +411,21 @@ def _cache_dir_for_url(video_url: str) -> Path:
     return OUTPUT_CACHE_DIR / _video_cache_key(video_url)
 
 
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(f"{path.suffix}.tmp")
+    temp_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+    temp_path.replace(path)
+
+
+def _is_valid_transcript_payload(payload: dict | None) -> bool:
+    return (
+        isinstance(payload, dict)
+        and isinstance(payload.get("text"), str)
+        and isinstance(payload.get("segments"), list)
+    )
+
+
 def _find_cached_video(video_url: str) -> Path | None:
     if not CACHE_ENABLED:
         return None
@@ -405,7 +433,7 @@ def _find_cached_video(video_url: str) -> Path | None:
     cache_dir = _cache_dir_for_url(video_url)
     matches = sorted(cache_dir.glob("source.*"))
     for match in matches:
-        if match.is_file():
+        if match.is_file() and match.stat().st_size > 1024:
             return match
     return None
 
@@ -441,21 +469,20 @@ def _load_cached_transcript(video_url: str) -> dict | None:
         return None
 
     try:
-        return json.loads(transcript_path.read_text(encoding="utf-8"))
+        payload = json.loads(transcript_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    return payload if _is_valid_transcript_payload(payload) else None
 
 
 def _store_cached_transcript(video_url: str, transcript: dict) -> None:
     if not CACHE_ENABLED:
         return
 
-    cache_dir = _cache_dir_for_url(video_url)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    (cache_dir / "transcript.json").write_text(
-        json.dumps(transcript, ensure_ascii=True, indent=2),
-        encoding="utf-8",
-    )
+    if not _is_valid_transcript_payload(transcript):
+        return
+
+    _atomic_write_json(_cache_dir_for_url(video_url) / "transcript.json", transcript)
 
 
 def _resolve_downloaded_video_path(destination_base: Path) -> Path:
@@ -1544,7 +1571,7 @@ def _build_podcast_duo_clip(clip: VideoFileClip) -> VideoFileClip:
 
         return CompositeVideoClip(layers, size=(out_w, out_h)).with_duration(clip.duration)
     except Exception as exc:
-        print(f"  ⚠️  Podcast duo layout failed ({exc}), falling back to fullframe")
+        _warn_note(f"Podcast duo layout failed ({exc}), falling back to fullframe.")
         return _build_fullframe_vertical_clip(clip)
 
 
@@ -1677,7 +1704,7 @@ def _build_meeting_gallery_clip(clip: VideoFileClip) -> VideoFileClip:
 
         return _build_fullframe_vertical_clip(clip)
     except Exception as exc:
-        print(f"  ⚠️  Meeting gallery layout failed ({exc}), falling back to fullframe")
+        _warn_note(f"Meeting gallery layout failed ({exc}), falling back to fullframe.")
         return _build_fullframe_vertical_clip(clip)
 
 
@@ -1763,7 +1790,7 @@ def _build_news_broadcast_clip(clip: VideoFileClip) -> VideoFileClip:
 
         return _build_fullframe_vertical_clip(clip)
     except Exception as exc:
-        print(f"  ⚠️  News broadcast layout failed ({exc}), falling back to fullframe")
+        _warn_note(f"News broadcast layout failed ({exc}), falling back to fullframe.")
         return _build_fullframe_vertical_clip(clip)
 
 
@@ -1876,7 +1903,7 @@ def _build_smooth_pan_speaker_clip(clip: VideoFileClip) -> VideoFileClip:
         return pan_clip
 
     except Exception as exc:
-        print(f"  ⚠️  Smooth pan layout failed ({exc}), falling back to static crop")
+        _warn_note(f"Smooth pan layout failed ({exc}), falling back to static crop.")
         return _build_static_speaker_crop(clip)
 
 
@@ -1995,7 +2022,7 @@ def _build_broll_ken_burns_clip(clip: VideoFileClip) -> VideoFileClip:
         return CompositeVideoClip(layers, size=(out_w, out_h)).with_duration(duration)
 
     except Exception as exc:
-        print(f"  ⚠️  Ken Burns B-roll layout failed ({exc}), falling back to fullframe")
+        _warn_note(f"Ken Burns B-roll layout failed ({exc}), falling back to fullframe.")
         return _build_fullframe_vertical_clip(clip)
 
 
@@ -2058,7 +2085,7 @@ def _apply_adaptive_adjustment(content_type: str, meta: dict) -> tuple[str, dict
     # If confidence is now very low, fall through to mixed (safer layout)
     if adjusted < 0.3 and content_type not in (_CONTENT_MIXED, _CONTENT_SINGLE_SPEAKER):
         meta["adaptive_override"] = content_type
-        print(f"  🔄 Adaptive override: {content_type} → mixed (approval {approval:.0%}, {rated} samples)")
+        _debug_note(f"Adaptive override: {content_type} -> mixed (approval {approval:.0%}, {rated} samples).")
         return _CONTENT_MIXED, meta
 
     return content_type, meta
@@ -2077,7 +2104,7 @@ def _ensure_output_size(clip: VideoFileClip, label: str = "") -> VideoFileClip:
         return clip
 
     tag = f" [{label}]" if label else ""
-    print(f"  ⚠️  Layout returned {w}×{h} instead of {OUTPUT_WIDTH}×{OUTPUT_HEIGHT}{tag} — correcting...")
+    _warn_note(f"Layout returned {w}x{h} instead of {OUTPUT_WIDTH}x{OUTPUT_HEIGHT}{tag}; correcting.")
 
     # Scale to fit preserving aspect ratio
     scale = min(OUTPUT_WIDTH / w, OUTPUT_HEIGHT / h)
@@ -2131,10 +2158,12 @@ def build_vertical_master_clip(clip: VideoFileClip, audio_speaker_meta: dict | N
 
         label = _CONTENT_LABELS.get(content_type, content_type)
         confidence = meta.get("confidence", 0)
-        print(f"  📐 Visual content type: {label} (confidence={confidence})")
-        print(f"     Signals: faces={meta.get('avg_faces',0):.1f}  edge={meta.get('avg_edge',0):.3f}  "
-              f"text={meta.get('avg_text',0):.3f}  motion={meta.get('avg_motion',0):.4f}  "
-              f"clusters={meta.get('cx_clusters',0)}  scene_transitions={meta.get('scene_change_transitions',0)}")
+        _debug_note(
+            f"Visual content type: {label} (confidence={confidence}). "
+            f"Signals: faces={meta.get('avg_faces',0):.1f} edge={meta.get('avg_edge',0):.3f} "
+            f"text={meta.get('avg_text',0):.3f} motion={meta.get('avg_motion',0):.4f} "
+            f"clusters={meta.get('cx_clusters',0)} scene_transitions={meta.get('scene_change_transitions',0)}."
+        )
 
         meta = _augment_meta_with_speaker_data(meta, content_type, clip)
         content_type, meta = _refine_content_type_with_speaker_data(content_type, meta, audio_speaker_meta)
@@ -2155,7 +2184,7 @@ def build_vertical_master_clip(clip: VideoFileClip, audio_speaker_meta: dict | N
 
     except Exception as exc:
         _clear_face_cache()
-        print(f"  ⚠️  Master composition failed ({exc}), using safe centre-crop fallback")
+        _warn_note(f"Master composition failed ({exc}), using safe centre-crop fallback.")
         fallback_meta = {"confidence": 0.0, "layout_fallback": True, "error": str(exc)}
         try:
             source_ratio = width / height
@@ -2334,14 +2363,14 @@ def _get_whisper_model_candidates() -> list[str]:
 def _whisper_cache_contains_files() -> bool:
     if not WHISPER_MODEL_CACHE_DIR.exists():
         return False
-
-
-def _get_whisper_fallback_candidates(current_model: str) -> list[str]:
-    return [candidate for candidate in _get_whisper_model_candidates() if candidate != current_model]
     try:
         return any(path.is_file() for path in WHISPER_MODEL_CACHE_DIR.rglob("*"))
     except OSError:
         return False
+
+
+def _get_whisper_fallback_candidates(current_model: str) -> list[str]:
+    return [candidate for candidate in _get_whisper_model_candidates() if candidate != current_model]
 
 
 def _format_transcription_backend_error(error: Exception) -> str:
@@ -3197,7 +3226,9 @@ def create_short_from_url(
             s = max(0.0, min(s, video_duration - 1.0))
             e = max(s + 5.0, min(e, video_duration))
             if e - s < 20.0:
-                print(f"  ⚠️  Skipping clip {cd.get('title', 'unknown')}: too short after clamping ({e - s:.1f}s < 20 s minimum)")
+                _warn_note(
+                    f"Skipping clip {cd.get('title', 'unknown')}: too short after clamping ({e - s:.1f}s < 20 s minimum)."
+                )
                 continue
             cd["start"] = round(s, 2)
             cd["end"] = round(e, 2)

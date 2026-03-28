@@ -4,42 +4,54 @@ Create vertical YouTube Shorts from long-form videos using local Whisper transcr
 
 This fork adds a cleaner local workflow, a browser-first React dashboard, and a more shareable setup for demos and non-technical users.
 
-## Run The App
+## Quickstart
 
-If you are not technical, use the app launch file and nothing else:
+For real testers, use the launcher and nothing else:
 
 - macOS: double-click `launch_app.command`
 - Windows: double-click `launch_app.bat`
 
-That is the main way to run this project.
+That is the supported first-run path.
 
-## Recommended Customer Flow
+### Recommended Tester Flow
 
-If someone is testing this from GitHub, the clean path is:
+1. Download the full GitHub ZIP.
+2. Extract it to a normal writable folder.
+3. Open the extracted folder.
+4. Run `launch_app.bat` on Windows or `launch_app.command` on macOS.
+5. Keep the launcher window open while the app is running.
+6. Wait for setup/preflight to finish.
+7. Open the browser app, paste a YouTube URL, add a Gemini key if needed, and start the render.
 
-1. Click `Code` on GitHub and choose `Download ZIP`
-2. Extract the full zip to a normal folder
-3. Open the extracted project folder
-4. Double-click `launch_app.bat` on Windows or `launch_app.command` on macOS
-5. Keep the launcher window open while the app runs
-6. Paste a YouTube URL, add a Gemini API key if needed, and start the render
-7. Download the finished clips and transcript from the browser
+### What The Launcher Does
 
-The browser is just the interface. The launcher window is what keeps the local app alive.
+- checks Python
+- checks FFmpeg
+- checks the local writable folders
+- prepares a local virtual environment when needed
+- installs Python dependencies only when needed
+- prepares the configured Whisper model before the first render
+- builds the frontend only when `frontend/dist` is missing or outdated
+- opens the local browser app
 
-On Windows, the launcher can also handle first-time setup for you. It installs missing dependencies, prepares the app, and opens it in the browser. Later launches are faster and reuse the existing setup.
+### First-Run Behavior
 
-On macOS, `launch_app.command` now prefers the built app when `frontend/dist` is included, and falls back to the local developer flow only when the built frontend is missing.
+The first run is intentionally heavier than later runs.
 
-The launcher stores internal runtime files inside `.miscoshorts/` so the main project folder stays cleaner.
+- The local runtime lives in `.miscoshorts/`
+- Logs live in `.miscoshorts/logs/`
+- Setup state lives in `.miscoshorts/setup/`
+- The Whisper model cache lives in `.miscoshorts/runtime/model-cache/`
+- Reusable source/transcript cache lives in `outputs/cache/`
+- Job outputs live in `outputs/jobs/<job-id>/`
 
-Speech models are also kept inside `.miscoshorts/runtime/model-cache/` now, not in a giant shared global cache. If a tester deletes that folder by mistake, the app downloads the same configured Whisper model again on the next run.
+Nothing inside `.miscoshorts/` is meant for GitHub. It is private local runtime state.
 
-The launcher now runs a Whisper preflight during setup, so missing speech models are caught and repaired before the first render instead of failing halfway through a job.
+If the Whisper cache is deleted, the launcher preflight prepares it again before the next real render.
 
-If the folder already contains `frontend/dist`, the launcher uses that built app directly and skips Node.js completely.
+If the folder already contains `frontend/dist`, the launcher can skip Node.js entirely for normal users.
 
-If you are sending this to a friend, send the full project folder, not just the launcher file.
+If you are sending this to another person, send the full project folder, not only the launcher file.
 
 ## Thanks
 
@@ -78,9 +90,42 @@ If `GEMINI_API_KEY` already exists in `.env`, the browser app can use that autom
 
 The current browser flow is intentionally simplified: it runs the default 3-clip Shorts workflow and exports them with the `Studio HQ 1080x1920 MP4` profile.
 
+## Doctor / Diagnostics
+
+You can run a machine check without starting a render:
+
+```bash
+python3 -m app.doctor
+```
+
+```powershell
+py -m app.doctor
+```
+
+This reports friendly `PASS`, `WARN`, and `FAIL` checks for:
+
+- Python
+- FFmpeg
+- writable runtime folders
+- frontend availability
+- Gemini key presence
+- required Python packages
+- diarization state
+- Whisper cache state
+
+To force preparation of the configured Whisper model during diagnostics:
+
+```bash
+python3 -m app.doctor --prepare-whisper
+```
+
+```powershell
+py -m app.doctor --prepare-whisper
+```
+
 ## Requirements
 
-- Python 3.12+
+- Python 3.12+ recommended
 - Node.js 20+
 - FFmpeg installed and available in `PATH`
 - A Gemini API key
@@ -246,7 +291,7 @@ http://127.0.0.1:5001
 
 ## Terminal Mode
 
-The original terminal flow still exists if you prefer it.
+The terminal flow now uses the same main pipeline as the browser app.
 
 ```bash
 python3 -m app.cli
@@ -254,6 +299,12 @@ python3 -m app.cli
 
 ```powershell
 py -m app.cli
+```
+
+You can also run:
+
+```bash
+python3 -m app.cli --doctor
 ```
 
 ## Configuration
@@ -276,6 +327,12 @@ Example values:
 GEMINI_API_KEY=your_gemini_api_key_here
 URL_VIDEO=https://www.youtube.com/watch?v=example
 OUTPUT_FILENAME=short_con_subs.mp4
+DEFAULT_RENDER_PROFILE=studio
+LOCAL_CACHE_ENABLED=1
+WHISPER_BACKEND=auto
+WHISPER_MODEL=distil-large-v3,large-v3
+SPEAKER_DIARIZATION_MODE=auto
+MISCOSHORTS_DEBUG=0
 ```
 
 `.env` is ignored by git, so your key stays local.
@@ -289,6 +346,19 @@ Typical artifacts:
 - rendered short `.mp4`
 - full transcript `.txt`
 - temporary download cleaned up automatically after processing
+
+Reusable caches live here:
+
+- `outputs/cache/` for source video and transcript reuse
+- `.miscoshorts/runtime/model-cache/` for Whisper and related model downloads
+
+Support logs live here:
+
+- `.miscoshorts/logs/`
+
+Windows setup logs live here:
+
+- `.miscoshorts/setup/windows-setup.log`
 
 ## Troubleshooting
 
@@ -327,13 +397,30 @@ pip install -r requirements.txt
 
 ### Missing Or Deleted Whisper Cache
 
-If someone deletes the local speech-model cache, the app should now rebuild it automatically inside:
+If someone deletes the local speech-model cache, the launcher and doctor can rebuild it automatically inside:
 
 ```text
 .miscoshorts/runtime/model-cache/
 ```
 
-The first transcription on that machine will be slower once while the smaller default model downloads again.
+The first transcription or Whisper preflight on that machine will be slower once while the configured model downloads again.
+
+### Run Diagnostics Before Asking For Help
+
+```bash
+python3 -m app.doctor
+```
+
+```powershell
+py -m app.doctor
+```
+
+Send:
+
+- the launcher error text
+- the doctor output
+- the latest file in `.miscoshorts/logs/`
+- `windows-setup.log` if setup failed on Windows
 
 ### Whisper Package Conflicts
 
@@ -355,6 +442,21 @@ The current subtitle renderer now prefers higher-quality system fonts first, use
 - make sure your API key is valid
 - make sure you still have Gemini quota available
 - check that your local firewall or proxy is not blocking requests
+
+### Debug Mode
+
+To keep normal users out of raw stack traces, the app runs in a calmer mode by default.
+
+If you need more technical detail for debugging:
+
+```bash
+MISCOSHORTS_DEBUG=1 python3 -m app.doctor
+```
+
+```powershell
+$env:MISCOSHORTS_DEBUG=1
+py -m app.doctor
+```
 
 ## Project Structure
 

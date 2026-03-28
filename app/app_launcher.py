@@ -11,7 +11,10 @@ import urllib.request
 import webbrowser
 
 from app.paths import PROJECT_ROOT
+from app.runtime import configure_logging, load_local_env
 
+load_local_env()
+logger, LOG_PATH = configure_logging("launcher")
 
 APP_URL = "http://127.0.0.1:5001"
 HEALTH_URL = f"{APP_URL}/api/health"
@@ -119,18 +122,22 @@ def main() -> None:
         bootstrap_payload = load_bootstrap_payload(BOOTSTRAP_URL)
         if bootstrap_is_compatible(bootstrap_payload):
             print(f"A local app is already available on {APP_URL}. Reusing it.")
+            logger.info("Reusing local app at %s", APP_URL)
         else:
             print(f"An older local app is already running on {APP_URL}. Restarting it...")
+            logger.info("Restarting incompatible local app at %s", APP_URL)
             stop_listener_on_port(5001)
             time.sleep(1)
             backend_process = subprocess.Popen([sys.executable, "-m", "app.server"], cwd=PROJECT_ROOT)
             wait_for_url(HEALTH_URL, timeout=20, process=backend_process, name="local app")
     else:
         print(f"Starting local app on {APP_URL} ...")
+        logger.info("Starting local app at %s", APP_URL)
         backend_process = subprocess.Popen([sys.executable, "-m", "app.server"], cwd=PROJECT_ROOT)
         wait_for_url(HEALTH_URL, timeout=20, process=backend_process, name="local app")
 
     print(f"Private speech-model cache: {whisper_cache_dir}")
+    print(f"Support log: {LOG_PATH}")
     print("Opening browser...")
     webbrowser.open(APP_URL)
     print("Press Ctrl+C to stop the local app.")
@@ -150,5 +157,7 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
+        logger.exception("Launcher failed")
         print(f"\nLaunch error: {error}")
+        print(f"See log for details: {LOG_PATH}")
         raise SystemExit(1) from error

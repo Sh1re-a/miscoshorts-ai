@@ -779,6 +779,7 @@ function Invoke-Setup {
 
     Start-SetupStep "Starting app"
     Write-SetupInfo "Opening the local app in your browser. Keep this window open while the app runs."
+    Write-SetupInfo "Need support later? Run: $venvPython -m app.doctor"
     $env:HF_HOME = Join-Path $modelCacheDir "huggingface"
     $env:XDG_CACHE_HOME = Join-Path $modelCacheDir "xdg"
     $env:WHISPER_MODEL_CACHE_DIR = Join-Path $modelCacheDir "whisper"

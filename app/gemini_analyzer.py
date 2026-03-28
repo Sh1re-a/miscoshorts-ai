@@ -1,12 +1,12 @@
 import os
 import time
-from dotenv import load_dotenv
 from google import genai
 from google.genai import errors, types
 
-from app.paths import ENV_FILE
+from app.runtime import configure_logging, load_local_env
 
-load_dotenv(dotenv_path=ENV_FILE)
+load_local_env()
+logger, _LOG_PATH = configure_logging("gemini")
 
 # Retry configuration for transient Gemini failures
 _GEMINI_MAX_RETRIES = 3
@@ -28,7 +28,7 @@ def find_viral_clip(whisper_segments, api_key=None):
 
 
 def find_viral_clips(whisper_segments, api_key=None, clip_count=3):
-    print("✨ Asking Gemini with timestamps...")
+    logger.info("Requesting clip selection from Gemini for %s clip(s).", clip_count)
 
     timed_text = ""
     for segment in whisper_segments:
@@ -144,12 +144,12 @@ Continue until CLIP {clip_count}."""
                 # Empty response — retry with higher temperature
                 last_error = RuntimeError("Gemini returned an empty response.")
                 if attempt < _GEMINI_MAX_RETRIES - 1:
-                    print(f"  ⚠️  Gemini returned empty response, retrying ({attempt + 2}/{_GEMINI_MAX_RETRIES})...")
+                    logger.warning("Gemini returned an empty response. Retrying (%s/%s).", attempt + 2, _GEMINI_MAX_RETRIES)
                     time.sleep(_GEMINI_RETRY_DELAY_S)
             except errors.APIError as error:
                 last_error = RuntimeError(f"Gemini request failed: {error.message}")
                 if attempt < _GEMINI_MAX_RETRIES - 1:
-                    print(f"  ⚠️  Gemini API error, retrying ({attempt + 2}/{_GEMINI_MAX_RETRIES})...")
+                    logger.warning("Gemini API error. Retrying (%s/%s).", attempt + 2, _GEMINI_MAX_RETRIES)
                     time.sleep(_GEMINI_RETRY_DELAY_S * (attempt + 1))
     finally:
         client.close()
