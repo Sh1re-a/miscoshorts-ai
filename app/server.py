@@ -355,7 +355,9 @@ def doctor_report():
 def process_video():
     _cleanup_expired_jobs()
     doctor_report = run_doctor(prepare_whisper=False)
-    blocking_checks = [check for check in doctor_report.get("checks", []) if check.get("status") == "FAIL"]
+    blocking_checks = doctor_report.get("blockingChecks") or [
+        check for check in doctor_report.get("checks", []) if check.get("blocks_rendering")
+    ]
     if blocking_checks:
         blocking_summary = "; ".join(
             f"{check.get('name')}: {check.get('message')}" for check in blocking_checks[:3]
@@ -364,8 +366,9 @@ def process_video():
             jsonify(
                 {
                     "error": "This machine is not ready for rendering yet. Fix the blocking setup checks first.",
-                    "errorHelp": "Move the project to a normal local writable folder, rerun launch_app.bat, then try again.",
+                    "errorHelp": "Run the launcher again so it can repair the managed runtime, then reopen the app and retry.",
                     "doctorStatus": doctor_report.get("status"),
+                    "renderReady": doctor_report.get("renderReady"),
                     "doctorReportPath": doctor_report.get("reportPath"),
                     "blockingChecks": blocking_checks,
                     "details": blocking_summary,

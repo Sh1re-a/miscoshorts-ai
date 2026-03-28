@@ -13,6 +13,33 @@ For real testers, use the launcher and nothing else:
 
 That is the supported first-run path.
 
+## Get Me Render-Ready
+
+If the app feels broken or blocked, use this exact recovery path:
+
+### macOS
+
+```bash
+cd /Users/shirre/ws/miscoshorts-ai
+zsh launch_app.command
+```
+
+### Windows
+
+Double-click [launch_app.bat](/Users/shirre/ws/miscoshorts-ai/launch_app.bat)
+
+What “render-ready” means now:
+
+- `REQUIRED` checks are passing
+- the managed runtime has `faster-whisper`
+- FFmpeg is available
+- runtime/cache/output folders are writable
+- the configured Whisper model can load
+
+If the launcher says `Render readiness: BLOCKED`, fix only the `REQUIRED` items it prints.
+
+If it says `Render readiness: READY WITH WARNINGS`, rendering can continue. Warnings are optional.
+
 ### Recommended Tester Flow
 
 1. Download the full GitHub ZIP.
@@ -178,6 +205,22 @@ This reports friendly `PASS`, `WARN`, and `FAIL` checks for:
 - diarization state
 - Whisper cache state
 
+Doctor now also tells you:
+
+- `requirement`: `required`, `optional`, or `optional-premium`
+- `blocks_rendering`: whether that item really stops rendering
+- `renderReady`: whether the machine is actually ready for a real render
+
+For a stronger readiness check that loads the speech backend too:
+
+```bash
+.miscoshorts/runtime/venv/bin/python -m app.doctor --render-smoke
+```
+
+```powershell
+.miscoshorts\runtime\venv\Scripts\python.exe -m app.doctor --render-smoke
+```
+
 Every doctor run also refreshes `.miscoshorts/setup/doctor-report.json` so a tester can send a stable support snapshot instead of pasting random terminal output.
 
 The doctor report now also includes storage usage for:
@@ -207,11 +250,16 @@ py -m app.doctor --prepare-whisper
 
 Important:
 
-- Missing Gemini key is a warning until you actually try to render
-- Missing FFmpeg is blocking
-- Missing core Python packages is blocking
-- Missing Whisper cache is not blocking if the launcher can prepare it
-- Missing optional pyannote diarization is not blocking unless you explicitly force pyannote mode
+- `REQUIRED`: `faster-whisper`, FFmpeg, core Python packages, writable runtime folders
+- `REQUIRED`: Whisper model preflight must pass before a real render
+- `OPTIONAL`: Gemini key can be pasted in the app at render time
+- `OPTIONAL`: Whisper cache may start empty if the launcher can prepare it
+- `OPTIONAL-PREMIUM`: pyannote diarization is not required for normal rendering
+
+Important distinction:
+
+- a missing package in your normal shell Python does not matter if the managed launcher runtime is healthy
+- the supported runtime is the private environment under `.miscoshorts/runtime/venv` on macOS/Linux or the corresponding Windows runtime path
 
 Optional server-oriented environment variables:
 

@@ -678,6 +678,39 @@ function Write-DoctorSnapshot {
     }
 }
 
+function Assert-RenderReadyFromDoctorReport {
+    if (-not (Test-Path $doctorReportPath)) {
+        Write-SetupInfo "Doctor snapshot is missing. Continuing with launch."
+        return
+    }
+
+    $report = Get-Content -Path $doctorReportPath -Raw | ConvertFrom-Json
+    $blockingChecks = @($report.blockingChecks)
+    $warningChecks = @($report.warningChecks)
+
+    if ($report.renderReady) {
+        if ($warningChecks.Count -gt 0) {
+            Write-SetupInfo "Render readiness: READY WITH WARNINGS"
+            foreach ($check in $warningChecks | Select-Object -First 3) {
+                Write-SetupInfo "OPTIONAL: $($check.name): $($check.message)"
+            }
+        }
+        else {
+            Write-SetupInfo "Render readiness: READY"
+        }
+        return
+    }
+
+    Write-SetupInfo "Render readiness: BLOCKED"
+    foreach ($check in $blockingChecks) {
+        Write-SetupInfo "REQUIRED: $($check.name): $($check.message)"
+        if ($check.fix) {
+            Write-SetupInfo "Fix: $($check.fix)"
+        }
+    }
+    throw "Blocking setup checks are still failing. Fix the required items above, then run launch_app.bat again."
+}
+
 function Test-StateMatch($statePath, $expectedValue) {
     $currentValue = Read-StateValue $statePath
     return $null -ne $currentValue -and $currentValue -eq $expectedValue
@@ -832,6 +865,7 @@ function Invoke-Setup {
     Start-SetupStep "Final checks"
     Write-SetupAction "Refreshing support diagnostics snapshot ..."
     Write-DoctorSnapshot
+    Assert-RenderReadyFromDoctorReport
     $elapsed = New-TimeSpan -Start $script:SetupStartedAt -End (Get-Date)
     Write-SetupDone "Local setup is complete."
     Write-SetupInfo "Internal setup files are stored outside the project folder so external SSD installs stay more stable."

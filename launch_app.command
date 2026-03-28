@@ -279,6 +279,38 @@ step "Starting app"
 
 action "Refreshing support diagnostics snapshot..."
 "$VENV_PYTHON" -m app.doctor --json > "$DOCTOR_REPORT_PATH" 2>> "$LOG_PATH" || info "Doctor snapshot could not be refreshed automatically before launch."
+if ! "$VENV_PYTHON" - <<PY
+import json
+from pathlib import Path
+path = Path(${(q)DOCTOR_REPORT_PATH})
+if not path.exists():
+    print("  Doctor snapshot is missing. Continuing with launch.")
+    raise SystemExit(0)
+report = json.loads(path.read_text(encoding="utf-8"))
+render_ready = bool(report.get("renderReady"))
+blocking = report.get("blockingChecks") or []
+warnings = report.get("warningChecks") or []
+if render_ready:
+    if warnings:
+        print("  Render readiness: READY WITH WARNINGS")
+        for check in warnings[:3]:
+            print(f"    OPTIONAL: {check.get('name')}: {check.get('message')}")
+    else:
+        print("  Render readiness: READY")
+    raise SystemExit(0)
+print("  Render readiness: BLOCKED")
+for check in blocking:
+    print(f"    REQUIRED: {check.get('name')}: {check.get('message')}")
+    fix = check.get("fix")
+    if fix:
+        print(f"      Fix: {fix}")
+raise SystemExit(1)
+PY
+then
+	:
+else
+	fail "Blocking setup checks are still failing. Fix the required items above, then run the launcher again."
+fi
 info "Opening the local app in your browser. Keep this window open."
 info "Need support later? Run: $VENV_PYTHON -m app.doctor"
 info "Doctor report: $DOCTOR_REPORT_PATH"

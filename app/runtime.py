@@ -12,6 +12,7 @@ from app.paths import DOCTOR_REPORT_PATH, ENV_FILE, INTERNAL_DIR, LOGS_DIR, MODE
 _ENV_LOADED = False
 _CONFIGURED_LOGGERS: set[str] = set()
 _BACKEND_SIGNATURE_FILES = (
+    "app/doctor.py",
     "app/server.py",
     "app/shorts_service.py",
     "app/run_report.py",

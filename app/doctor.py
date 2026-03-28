@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -28,6 +29,8 @@ class DoctorCheck:
     name: str
     message: str
     fix: str | None = None
+    requirement: str = "required"
+    blocks_rendering: bool = False
 
 
 def _directory_size(path: Path) -> int:
@@ -47,8 +50,28 @@ def _format_bytes(num_bytes: int) -> str:
     return f"{num_bytes} B"
 
 
-def _add_check(results: list[DoctorCheck], status: str, name: str, message: str, fix: str | None = None) -> None:
-    results.append(DoctorCheck(status=status, name=name, message=message, fix=fix))
+def _add_check(
+    results: list[DoctorCheck],
+    status: str,
+    name: str,
+    message: str,
+    fix: str | None = None,
+    *,
+    requirement: str = "required",
+    blocks_rendering: bool | None = None,
+) -> None:
+    if blocks_rendering is None:
+        blocks_rendering = status == "FAIL" and requirement == "required"
+    results.append(
+        DoctorCheck(
+            status=status,
+            name=name,
+            message=message,
+            fix=fix,
+            requirement=requirement,
+            blocks_rendering=blocks_rendering,
+        )
+    )
 
 
 def _module_exists(module_name: str) -> bool:
@@ -56,6 +79,41 @@ def _module_exists(module_name: str) -> bool:
         return importlib.util.find_spec(module_name) is not None
     except ModuleNotFoundError:
         return False
+
+
+def _managed_runtime_python() -> Path | None:
+    candidates = [
+        RUNTIME_DIR / "venv" / "bin" / "python",
+        RUNTIME_DIR / "venv" / "bin" / "python3",
+        RUNTIME_DIR / "venv" / "Scripts" / "python.exe",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _probe_modules_in_python(python_path: Path, module_names: list[str]) -> dict[str, bool]:
+    probe_script = (
+        "import importlib.util, json; "
+        f"modules={module_names!r}; "
+        "print(json.dumps({name: importlib.util.find_spec(name) is not None for name in modules}))"
+    )
+    completed = subprocess.run(
+        [str(python_path), "-c", probe_script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=20,
+    )
+    if completed.returncode != 0:
+        return {name: False for name in module_names}
+    try:
+        payload = json.loads(completed.stdout.strip() or "{}")
+    except json.JSONDecodeError:
+        return {name: False for name in module_names}
+    return {name: bool(payload.get(name)) for name in module_names}
 
 
 def _check_writable(path: Path) -> bool:
@@ -85,12 +143,20 @@ def _write_report_snapshot(report: dict) -> None:
     atomic_write_json(DOCTOR_REPORT_PATH, report)
 
 
-def run_doctor(*, prepare_whisper: bool = False) -> dict:
+def run_doctor(*, prepare_whisper: bool = False, render_smoke: bool = False) -> dict:
     load_local_env()
     ensure_runtime_dirs()
     logger, log_path = configure_logging("doctor")
 
     checks: list[DoctorCheck] = []
+    managed_python = _managed_runtime_python()
+    current_python_path = Path(sys.executable).resolve()
+    managed_python_path = managed_python.resolve() if managed_python is not None else None
+    using_managed_python = managed_python_path is not None and managed_python_path == current_python_path
+    managed_probe_modules = _probe_modules_in_python(
+        managed_python_path,
+        ["faster_whisper", "yt_dlp", "moviepy", "PIL", "flask", "google.genai", "cv2"],
+    ) if managed_python_path is not None else {}
 
     python_version = sys.version_info
     if python_version >= (3, 12):
@@ -99,6 +165,35 @@ def run_doctor(*, prepare_whisper: bool = False) -> dict:
         _add_check(checks, "WARN", "Python", f"Python {python_version.major}.{python_version.minor} works, but 3.12 is recommended.", "Upgrade to Python 3.12 for the cleanest Windows setup experience.")
     else:
         _add_check(checks, "FAIL", "Python", f"Python {python_version.major}.{python_version.minor} is too old.", "Install Python 3.12+ and rerun the launcher.")
+
+    if managed_python_path is not None:
+        if using_managed_python:
+            _add_check(
+                checks,
+                "PASS",
+                "Managed runtime",
+                f"The supported managed runtime is active: {managed_python_path}.",
+            )
+        else:
+            _add_check(
+                checks,
+                "WARN",
+                "Managed runtime",
+                f"The supported runtime exists at {managed_python_path}, but the current shell is using {current_python_path}.",
+                "Use the launcher, or run the managed runtime directly when checking readiness.",
+                requirement="optional",
+                blocks_rendering=False,
+            )
+    else:
+        _add_check(
+            checks,
+            "WARN",
+            "Managed runtime",
+            "The local managed runtime has not been created yet.",
+            "Run the launcher once so it can create the private runtime and install dependencies.",
+            requirement="required",
+            blocks_rendering=False,
+        )
 
     try:
         ensure_dependencies()
@@ -135,13 +230,30 @@ def run_doctor(*, prepare_whisper: bool = False) -> dict:
 
     api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
     if api_key:
-        _add_check(checks, "PASS", "Gemini API key", "A GEMINI_API_KEY is configured in the environment.")
+        _add_check(checks, "PASS", "Gemini API key", "A GEMINI_API_KEY is configured in the environment.", requirement="optional", blocks_rendering=False)
     else:
-        _add_check(checks, "WARN", "Gemini API key", "No GEMINI_API_KEY is configured yet.", "The user can still paste a key in the app before rendering.")
+        _add_check(
+            checks,
+            "WARN",
+            "Gemini API key",
+            "No GEMINI_API_KEY is configured yet.",
+            "The user can still paste a key in the app before rendering.",
+            requirement="optional",
+            blocks_rendering=False,
+        )
 
     faster_whisper_available = _module_exists("faster_whisper")
+    managed_faster_whisper_available = bool(managed_probe_modules.get("faster_whisper"))
     if faster_whisper_available:
         _add_check(checks, "PASS", "faster-whisper", f"Configured backend mode is '{WHISPER_BACKEND}'.")
+    elif managed_faster_whisper_available and not using_managed_python:
+        _add_check(
+            checks,
+            "PASS",
+            "faster-whisper",
+            f"The managed runtime has faster-whisper installed at {managed_python_path}. The current shell interpreter does not.",
+            "Use the launcher or the managed runtime Python when running the app.",
+        )
     else:
         _add_check(checks, "FAIL", "faster-whisper", "The faster-whisper package is missing.", "Reinstall Python dependencies with the launcher.")
 
@@ -154,6 +266,14 @@ def run_doctor(*, prepare_whisper: bool = False) -> dict:
         "cv2": "opencv-python",
     }
     missing_modules = [package_name for module_name, package_name in required_modules.items() if not _module_exists(module_name)]
+    if missing_modules and managed_probe_modules and not using_managed_python:
+        managed_missing_modules = [
+            package_name
+            for module_name, package_name in required_modules.items()
+            if not managed_probe_modules.get(module_name, False)
+        ]
+        if not managed_missing_modules:
+            missing_modules = []
     if missing_modules:
         _add_check(
             checks,
@@ -169,13 +289,13 @@ def run_doctor(*, prepare_whisper: bool = False) -> dict:
     pyannote_installed = _module_exists("pyannote.audio")
     pyannote_token = bool(get_speaker_diarization_token())
     if pyannote_requested and not pyannote_installed:
-        _add_check(checks, "FAIL", "Pyannote diarization", "Pyannote mode is enabled but pyannote.audio is not installed.", "Install requirements-optional.txt or switch diarization mode back to auto.")
+        _add_check(checks, "FAIL", "Pyannote diarization", "Pyannote mode is enabled but pyannote.audio is not installed.", "Install requirements-optional.txt or switch diarization mode back to auto.", requirement="optional-premium", blocks_rendering=False)
     elif pyannote_requested and not pyannote_token:
-        _add_check(checks, "FAIL", "Pyannote diarization", "Pyannote mode is enabled but no Hugging Face token was found.", "Set PYANNOTE_AUTH_TOKEN or HF_TOKEN.")
+        _add_check(checks, "FAIL", "Pyannote diarization", "Pyannote mode is enabled but no Hugging Face token was found.", "Set PYANNOTE_AUTH_TOKEN or HF_TOKEN.", requirement="optional-premium", blocks_rendering=False)
     elif pyannote_installed and pyannote_token:
-        _add_check(checks, "PASS", "Pyannote diarization", "Optional pyannote diarization is available.")
+        _add_check(checks, "PASS", "Pyannote diarization", "Optional pyannote diarization is available.", requirement="optional-premium", blocks_rendering=False)
     else:
-        _add_check(checks, "WARN", "Pyannote diarization", "Optional pyannote diarization is not active.", "This is fine unless you explicitly want the higher-accuracy diarization path.")
+        _add_check(checks, "WARN", "Pyannote diarization", "Optional pyannote diarization is not active.", "This is fine unless you explicitly want the higher-accuracy diarization path.", requirement="optional-premium", blocks_rendering=False)
 
     existing_model_cache_size = _directory_size(MODEL_CACHE_DIR)
     if existing_model_cache_size > 0:
@@ -192,6 +312,8 @@ def run_doctor(*, prepare_whisper: bool = False) -> dict:
             "Whisper cache",
             f"No local speech-model cache was found yet. Requested model order: {', '.join(get_whisper_model_candidates())}.",
             "The launcher can prepare this automatically before the first render.",
+            requirement="required",
+            blocks_rendering=False,
         )
 
     if prepare_whisper:
@@ -215,6 +337,26 @@ def run_doctor(*, prepare_whisper: bool = False) -> dict:
                 f"Prepared {backend} with model {model_name}. Cache size: {_format_bytes(cache_size)}.",
             )
 
+    if render_smoke:
+        try:
+            backend, model_name, _model = load_whisper_model()
+        except Exception as error:
+            logger.exception("Render smoke test failed")
+            _add_check(
+                checks,
+                "FAIL",
+                "Render smoke test",
+                f"Core render stack could not load the speech backend: {error}",
+                "Run the launcher again and keep the window open until setup completes.",
+            )
+        else:
+            _add_check(
+                checks,
+                "PASS",
+                "Render smoke test",
+                f"Core render stack loaded successfully with {backend} / {model_name}.",
+            )
+
     status_order = {"PASS": 0, "WARN": 1, "FAIL": 2}
     overall_status = "PASS"
     for check in checks:
@@ -226,6 +368,9 @@ def run_doctor(*, prepare_whisper: bool = False) -> dict:
         "checks": [asdict(check) for check in checks],
         "paths": runtime_summary(),
         "storage": storage_summary(),
+        "renderReady": not any(check.blocks_rendering for check in checks),
+        "blockingChecks": [asdict(check) for check in checks if check.blocks_rendering],
+        "warningChecks": [asdict(check) for check in checks if check.status == "WARN"],
         "logPath": str(log_path),
         "reportPath": str(DOCTOR_REPORT_PATH),
         "whisper": {
@@ -233,6 +378,11 @@ def run_doctor(*, prepare_whisper: bool = False) -> dict:
             "requestedModels": get_whisper_model_candidates(),
             "configuredValue": WHISPER_MODEL,
             "cacheSizeBytes": _directory_size(MODEL_CACHE_DIR),
+        },
+        "python": {
+            "currentExecutable": str(current_python_path),
+            "managedExecutable": str(managed_python_path) if managed_python_path is not None else None,
+            "usingManagedRuntime": using_managed_python,
         },
         "debugEnabled": is_debug_enabled(),
     }
@@ -246,9 +396,13 @@ def _print_report(report: dict) -> None:
     print("MicroShorts AI Doctor")
     print("=====================")
     print(f"Overall status: {report['status']}")
+    readiness = "READY" if report.get("renderReady") else "BLOCKED"
+    print(f"Render readiness: {readiness}")
     print("")
     for check in report["checks"]:
-        print(f"[{check['status']}] {check['name']}: {check['message']}")
+        requirement = check.get("requirement", "required").upper()
+        block_note = " BLOCKS_RENDER" if check.get("blocks_rendering") else ""
+        print(f"[{check['status']}] {requirement}{block_note} {check['name']}: {check['message']}")
         if check.get("fix"):
             print(f"  Fix: {check['fix']}")
     print("")
@@ -267,14 +421,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check whether MicroShorts AI is ready to run.")
     parser.add_argument("--json", action="store_true", help="Print the report as JSON.")
     parser.add_argument("--prepare-whisper", action="store_true", help="Prepare the configured Whisper model during the check.")
+    parser.add_argument("--render-smoke", action="store_true", help="Load the core render speech stack to verify render readiness.")
     args = parser.parse_args(argv)
 
-    report = run_doctor(prepare_whisper=args.prepare_whisper)
+    report = run_doctor(prepare_whisper=args.prepare_whisper or args.render_smoke, render_smoke=args.render_smoke)
     if args.json:
         print(json.dumps(report, ensure_ascii=True, indent=2))
     else:
         _print_report(report)
-    return 0 if report["status"] != "FAIL" else 1
+    return 0 if report.get("renderReady") else 1
 
 
 if __name__ == "__main__":
