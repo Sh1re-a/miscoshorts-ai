@@ -13,14 +13,18 @@ $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$windowsDataRoot = if (-not [string]::IsNullOrWhiteSpace($env:MISCOSHORTS_DATA_DIR)) { $env:MISCOSHORTS_DATA_DIR } else { Join-Path $env:LOCALAPPDATA "MiscoshortsAI" }
+$env:MISCOSHORTS_INTERNAL_DIR = if (-not [string]::IsNullOrWhiteSpace($env:MISCOSHORTS_INTERNAL_DIR)) { $env:MISCOSHORTS_INTERNAL_DIR } else { Join-Path $windowsDataRoot "internal" }
+$env:MISCOSHORTS_OUTPUTS_DIR = if (-not [string]::IsNullOrWhiteSpace($env:MISCOSHORTS_OUTPUTS_DIR)) { $env:MISCOSHORTS_OUTPUTS_DIR } else { Join-Path $windowsDataRoot "outputs" }
 $appDir = Join-Path $root "app"
 $frontendDir = Join-Path $root "frontend"
 $frontendDistDir = Join-Path $frontendDir "dist"
 $frontendEntry = Join-Path $frontendDistDir "index.html"
-$internalDir = Join-Path $root ".miscoshorts"
+$internalDir = $env:MISCOSHORTS_INTERNAL_DIR
 $runtimeDir = Join-Path $internalDir "runtime"
 $modelCacheDir = Join-Path $runtimeDir "model-cache"
 $setupDir = Join-Path $internalDir "setup"
+$outputsDir = $env:MISCOSHORTS_OUTPUTS_DIR
 $venvDir = Join-Path $runtimeDir "venv"
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
 $stateDir = $setupDir
@@ -85,9 +89,11 @@ function Write-SetupBanner {
     Write-Host "Local setup and launch" -ForegroundColor DarkCyan
     Write-Host ""
     Write-Host "This window keeps the local app alive while it is running." -ForegroundColor DarkGray
-    Write-Host "Private runtime files live in .miscoshorts and are ignored by Git/GitHub." -ForegroundColor DarkGray
-    Write-Host "Speech models are cached locally in .miscoshorts\runtime\model-cache." -ForegroundColor DarkGray
-    Write-Host "If something fails, send the setup log and doctor report from .miscoshorts\setup." -ForegroundColor DarkGray
+    Write-Host "Project files can stay anywhere, including an external SSD." -ForegroundColor DarkGray
+    Write-Host "Private runtime files live in $internalDir and are ignored by Git/GitHub." -ForegroundColor DarkGray
+    Write-Host "Speech models are cached locally in $modelCacheDir." -ForegroundColor DarkGray
+    Write-Host "Rendered outputs are stored in $outputsDir." -ForegroundColor DarkGray
+    Write-Host "If something fails, send the setup log and doctor report from $setupDir." -ForegroundColor DarkGray
 }
 
 function Start-SetupStep($title) {
@@ -536,7 +542,7 @@ function Ensure-Ffmpeg {
 }
 
 function Ensure-StateDir {
-    foreach ($directory in @($internalDir, $runtimeDir, $modelCacheDir, $setupDir, $installerDir)) {
+    foreach ($directory in @($internalDir, $runtimeDir, $modelCacheDir, $setupDir, $installerDir, $outputsDir)) {
         if (-not (Test-Path $directory)) {
             New-Item -ItemType Directory -Path $directory | Out-Null
         }
@@ -791,7 +797,8 @@ function Invoke-Setup {
     Write-DoctorSnapshot
     $elapsed = New-TimeSpan -Start $script:SetupStartedAt -End (Get-Date)
     Write-SetupDone "Local setup is complete."
-    Write-SetupInfo "Internal setup files are stored in .miscoshorts so the project folder stays clean."
+    Write-SetupInfo "Internal setup files are stored outside the project folder so external SSD installs stay more stable."
+    Write-SetupInfo "Outputs are stored in $outputsDir."
     if (Get-DirectoryHasFiles (Join-Path $modelCacheDir "whisper")) {
         Write-SetupReuse "existing local speech-model cache"
     }

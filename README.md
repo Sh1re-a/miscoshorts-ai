@@ -23,6 +23,8 @@ That is the supported first-run path.
 6. Wait for setup/preflight to finish.
 7. Open the browser app, paste a YouTube URL, add a Gemini key if needed, and start the render.
 
+On Windows, the project folder can live on an external SSD, but the app now defaults to storing runtime files and outputs under the user's local AppData folder for better write reliability.
+
 ### What The Launcher Does
 
 - checks Python
@@ -48,6 +50,14 @@ The first run is intentionally heavier than later runs.
 - Job outputs live in `outputs/jobs/<job-id>/`
 
 Nothing inside `.miscoshorts/` is meant for GitHub. It is private local runtime state.
+
+On Windows, the default storage behavior is different on purpose:
+
+- the project folder can stay on an external SSD
+- internal runtime files default to `%LOCALAPPDATA%\\MiscoshortsAI\\internal`
+- outputs default to `%LOCALAPPDATA%\\MiscoshortsAI\\outputs`
+
+This avoids common Windows write-permission issues on external drives, shared drives, and protected folders.
 
 If the Whisper cache is deleted, the launcher preflight prepares it again before the next real render.
 
@@ -277,6 +287,8 @@ For a confused Windows tester, the safest path is:
 3. Double-click `launch_app.bat`.
 4. Leave the launcher window open.
 5. Wait for setup to finish and the browser to open.
+
+If the project itself is on an external SSD, that is fine. The Windows launcher now keeps the working runtime and output folders under local AppData by default so the render pipeline is less likely to fail on drive permissions.
 
 What may be downloaded on the first Windows run:
 
