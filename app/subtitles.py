@@ -1170,7 +1170,8 @@ def _render_header_bitmap_clip(text, video_clip, subtitle_style, *, reason=False
     return _prime_clip_duration(ImageClip(np.array(image)))
 
 
-def _render_vertical_gradient_image(width, height, *, height_ratio, anchor, max_alpha):
+@functools.lru_cache(maxsize=16)
+def _render_vertical_gradient_image_cached(width, height, height_ratio, anchor, max_alpha):
     gradient_height = max(32, int(height * height_ratio))
     gradient = np.zeros((gradient_height, width, 4), dtype=np.uint8)
 
@@ -1180,6 +1181,10 @@ def _render_vertical_gradient_image(width, height, *, height_ratio, anchor, max_
         gradient[row, :, 3] = opacity
 
     return Image.fromarray(gradient, mode='RGBA')
+
+
+def _render_vertical_gradient_image(width, height, *, height_ratio, anchor, max_alpha):
+    return _render_vertical_gradient_image_cached(width, height, float(height_ratio), anchor, int(max_alpha)).copy()
 
 
 def _render_vertical_gradient_clip(video_clip, *, height_ratio, anchor, max_alpha):
@@ -1315,31 +1320,89 @@ class _SubtitleProbeVideo:
         self.h = height
 
 
+def _position_subtitle_size(clip_width, clip_height, video_clip):
+    safe_left = int(video_clip.w * SUBTITLE_HORIZONTAL_MARGIN_RATIO)
+    safe_right = video_clip.w - safe_left
+    safe_top = int(video_clip.h * SUBTITLE_VERTICAL_MARGIN_RATIO)
+    safe_bottom = video_clip.h - safe_top
+    x = max(safe_left, int((video_clip.w - clip_width) / 2))
+    x = min(x, safe_right - clip_width)
+    target_center_y = int(video_clip.h * SUBTITLE_Y_RATIO)
+    y = int(target_center_y - (clip_height / 2))
+    y = max(safe_top, min(y, safe_bottom - clip_height))
+    return (x, y)
+
+
+def _prepare_subtitle_runtime(video_clip, subtitle_cues, resolved_style):
+    cue_layouts = []
+    for cue in subtitle_cues:
+        locked_layout = _build_locked_text_layout(
+            cue,
+            video_clip,
+            resolved_style,
+            max_width_ratio=SUBTITLE_SAFE_WIDTH_RATIO,
+            max_height_ratio=SUBTITLE_MAX_HEIGHT_RATIO,
+            base_font_ratio=SUBTITLE_BASE_FONT_RATIO,
+            min_font_ratio=SUBTITLE_MIN_FONT_RATIO,
+            max_font_ratio=SUBTITLE_MAX_FONT_RATIO,
+            padding_x=SUBTITLE_TEXT_PADDING_X,
+            padding_y=SUBTITLE_TEXT_PADDING_Y,
+            line_gap_ratio=0.008,
+            tracking=SUBTITLE_LETTER_SPACING,
+        )
+        candidate_indexes = {-1}
+        if cue.get("wordEntries"):
+            candidate_indexes.update(range(len(cue["wordEntries"])))
+        else:
+            candidate_indexes.add(cue.get("highlightIndex", -1))
+        cue_layouts.append(
+            {
+                "cue": cue,
+                "layout": locked_layout,
+                "candidateIndexes": candidate_indexes,
+                "shadow": _render_shadow_for_layout(locked_layout),
+                "position": _position_subtitle_size(locked_layout["size"][0], locked_layout["size"][1], video_clip),
+            }
+        )
+    return cue_layouts
+
+
+def prepare_subtitle_runtime(video_clip, whisper_segments, clip_start_time, subtitle_style=None):
+    resolved_style = normalize_subtitle_style(subtitle_style)
+    video_duration = _safe_duration(video_clip.duration)
+    subtitle_cues = build_subtitle_plan(whisper_segments, clip_start_time, video_duration)
+    return {
+        "resolvedStyle": resolved_style,
+        "videoDuration": video_duration,
+        "headerDuration": _header_overlay_duration(video_duration),
+        "subtitleCues": subtitle_cues,
+        "cueLayouts": _prepare_subtitle_runtime(video_clip, subtitle_cues, resolved_style),
+    }
+
+
+def validate_prepared_subtitle_runtime(prepared_runtime):
+    results = []
+    for item in prepared_runtime["cueLayouts"]:
+        cue = item["cue"]
+        width, height = item["layout"]["size"]
+        results.append(
+            {
+                "start": round(float(cue["start"]), 3),
+                "end": round(float(cue["end"]), 3),
+                "text": cue["text"],
+                "width": int(width),
+                "height": int(height),
+                "position": item["position"],
+            }
+        )
+    return results
+
+
 def validate_subtitle_plan_renderability(video_size, subtitle_cues, subtitle_style=None):
     resolved_style = normalize_subtitle_style(subtitle_style)
     probe_video = _SubtitleProbeVideo(video_size[0], video_size[1])
-    results = []
-
-    for cue in subtitle_cues:
-        clip = None
-        try:
-            clip = _render_subtitle_bitmap_clip(cue, probe_video, resolved_style)
-            positioned = _position_subtitle_clip(clip, probe_video)
-            results.append(
-                {
-                    "start": round(float(cue["start"]), 3),
-                    "end": round(float(cue["end"]), 3),
-                    "text": cue["text"],
-                    "width": int(clip.w),
-                    "height": int(clip.h),
-                    "position": tuple(positioned.pos(0)),
-                }
-            )
-        finally:
-            if clip is not None:
-                clip.close()
-
-    return results
+    cue_layouts = _prepare_subtitle_runtime(probe_video, subtitle_cues, resolved_style)
+    return validate_prepared_subtitle_runtime({"cueLayouts": cue_layouts})
 
 
 def create_subtitle_preview_frames(video_size, subtitle_cues, subtitle_style=None, backgrounds=None):
@@ -1519,15 +1582,7 @@ def _resolve_active_index_for_time(cue, local_time):
 
 
 def _position_subtitle_clip(clip, video_clip):
-    safe_left = int(video_clip.w * SUBTITLE_HORIZONTAL_MARGIN_RATIO)
-    safe_right = video_clip.w - safe_left
-    safe_top = int(video_clip.h * SUBTITLE_VERTICAL_MARGIN_RATIO)
-    safe_bottom = video_clip.h - safe_top
-    x = max(safe_left, int((video_clip.w - clip.w) / 2))
-    x = min(x, safe_right - clip.w)
-    target_center_y = int(video_clip.h * SUBTITLE_Y_RATIO)
-    y = int(target_center_y - (clip.h / 2))
-    y = max(safe_top, min(y, safe_bottom - clip.h))
+    x, y = _position_subtitle_size(clip.w, clip.h, video_clip)
     return clip.with_position((x, y))
 
 
@@ -1655,45 +1710,28 @@ def _blend_frames(frame_a, frame_b, factor):
     return (fa + (frame_b.astype(np.float32) - fa) * factor + 0.5).astype(np.uint8)
 
 
-def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_style=None, clip_title=None, clip_reason=None):
-    resolved_style = normalize_subtitle_style(subtitle_style)
-    video_duration = _safe_duration(video_clip.duration)
-    header_duration = _header_overlay_duration(video_duration)
-
-    subtitle_cues = build_subtitle_plan(whisper_segments, clip_start_time, video_duration)
+def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_style=None, clip_title=None, clip_reason=None, prepared_runtime=None):
+    if prepared_runtime is None:
+        prepared_runtime = prepare_subtitle_runtime(video_clip, whisper_segments, clip_start_time, subtitle_style)
+    resolved_style = prepared_runtime["resolvedStyle"]
+    video_duration = prepared_runtime["videoDuration"]
+    header_duration = prepared_runtime["headerDuration"]
+    subtitle_cues = prepared_runtime["subtitleCues"]
 
     # Track all allocated clips for cleanup on failure
     _allocated_clips: list = []
 
     try:
-        # Build layouts once, but render highlight bitmaps lazily per cue so long clips
-        # do not allocate every highlight state up front.
-        cue_layouts = []
-        for cue in subtitle_cues:
-            locked_layout = _build_locked_text_layout(
-                cue,
-                video_clip,
-                resolved_style,
-                max_width_ratio=SUBTITLE_SAFE_WIDTH_RATIO,
-                max_height_ratio=SUBTITLE_MAX_HEIGHT_RATIO,
-                base_font_ratio=SUBTITLE_BASE_FONT_RATIO,
-                min_font_ratio=SUBTITLE_MIN_FONT_RATIO,
-                max_font_ratio=SUBTITLE_MAX_FONT_RATIO,
-                padding_x=SUBTITLE_TEXT_PADDING_X,
-                padding_y=SUBTITLE_TEXT_PADDING_Y,
-                line_gap_ratio=0.008,
-                tracking=SUBTITLE_LETTER_SPACING,
-            )
-            candidate_indexes = {-1}
-            if cue.get("wordEntries"):
-                candidate_indexes.update(range(len(cue["wordEntries"])))
-            else:
-                candidate_indexes.add(cue.get("highlightIndex", -1))
-            cue_layouts.append((cue, locked_layout, candidate_indexes, _render_shadow_for_layout(locked_layout)))
+        cue_layouts = prepared_runtime["cueLayouts"]
 
         # --- Build subtitle video clips with smooth crossfade ---
         subtitle_layers = []
-        for cue, locked_layout, candidate_indexes, shadow in cue_layouts:
+        for item in cue_layouts:
+            cue = item["cue"]
+            locked_layout = item["layout"]
+            candidate_indexes = item["candidateIndexes"]
+            shadow = item["shadow"]
+            position = item["position"]
             rendered_states: dict[int, np.ndarray] = {}
             word_boundaries = _build_word_boundaries(cue)
 
@@ -1732,7 +1770,7 @@ def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_sty
                 fade_out_duration=SUBTITLE_FADE_OUT,
             )
             subtitle_clip = _with_clip_timing(subtitle_clip, cue_start, cue_end)
-            subtitle_clip = _position_subtitle_clip(subtitle_clip, video_clip)
+            subtitle_clip = subtitle_clip.with_position(position)
             subtitle_layers.append(subtitle_clip)
             _allocated_clips.append(subtitle_clip)
 

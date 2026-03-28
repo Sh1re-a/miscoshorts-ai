@@ -2099,17 +2099,18 @@ def _render_selected_clips(
             ct_label = _CONTENT_LABELS.get(content_type, content_type)
             _emit(progress_callback, "rendering", f"Clip {index} detected as {ct_label} — composing vertical frame...")
 
-            subtitle_started_at = time.time()
-            subtitle_plan = subtitles.build_subtitle_plan(
+            subtitle_runtime_started_at = time.time()
+            subtitle_runtime = subtitles.prepare_subtitle_runtime(
+                clip_vertical,
                 clip_transcript.get("segments") or [],
                 0,
-                clip_vertical.duration,
-            )
-            subtitle_preflight = subtitles.validate_subtitle_plan_renderability(
-                clip_vertical.size,
-                subtitle_plan,
                 subtitle_style,
             )
+            clip_metrics["subtitleRuntimePrepSeconds"] = round(time.time() - subtitle_runtime_started_at, 2)
+            subtitle_plan = subtitle_runtime["subtitleCues"]
+            subtitle_preflight_started_at = time.time()
+            subtitle_preflight = subtitles.validate_prepared_subtitle_runtime(subtitle_runtime)
+            clip_metrics["subtitlePreflightSeconds"] = round(time.time() - subtitle_preflight_started_at, 2)
             if KEEP_RENDER_DIAGNOSTICS:
                 subtitle_plan_path = workspace.diagnostics_dir / f"clip_{index:02d}_subtitles.json"
                 subtitle_plan_path.write_text(
@@ -2123,6 +2124,7 @@ def _render_selected_clips(
                 )
             _emit(progress_callback, "rendering", f"Subtitle preflight passed for clip {index}.")
 
+            subtitle_compose_started_at = time.time()
             clip_final = subtitles.create_subtitles(
                 clip_vertical,
                 clip_transcript.get("segments") or [],
@@ -2130,8 +2132,9 @@ def _render_selected_clips(
                 subtitle_style,
                 clip_title=clip_data.get("title"),
                 clip_reason=clip_data.get("reason"),
+                prepared_runtime=subtitle_runtime,
             )
-            clip_metrics["subtitleComposeSeconds"] = round(time.time() - subtitle_started_at, 2)
+            clip_metrics["subtitleComposeSeconds"] = round(time.time() - subtitle_compose_started_at, 2)
             encode_metrics = write_high_quality_video(
                 clip_final,
                 temp_output_path,
