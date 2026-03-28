@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from app.paths import DOCTOR_REPORT_PATH, FRONTEND_DIST_DIR, FRONTEND_DIR, LOGS_DIR, MODEL_CACHE_DIR, OUTPUT_CACHE_DIR, OUTPUTS_DIR, OUTPUT_TEMP_DIR, RUNTIME_DIR
-from app.runtime import configure_logging, ensure_runtime_dirs, is_debug_enabled, load_local_env, runtime_summary
+from app.runtime import configure_logging, ensure_runtime_dirs, is_debug_enabled, load_local_env, managed_runtime_python, runtime_identity, runtime_summary
 from app.shorts_service import ensure_dependencies
 from app.storage import atomic_write_json, storage_summary
 from app.transcription import (
@@ -81,18 +81,6 @@ def _module_exists(module_name: str) -> bool:
         return False
 
 
-def _managed_runtime_python() -> Path | None:
-    candidates = [
-        RUNTIME_DIR / "venv" / "bin" / "python",
-        RUNTIME_DIR / "venv" / "bin" / "python3",
-        RUNTIME_DIR / "venv" / "Scripts" / "python.exe",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return None
-
-
 def _probe_modules_in_python(python_path: Path, module_names: list[str]) -> dict[str, bool]:
     probe_script = (
         "import importlib.util, json; "
@@ -149,10 +137,11 @@ def run_doctor(*, prepare_whisper: bool = False, render_smoke: bool = False) -> 
     logger, log_path = configure_logging("doctor")
 
     checks: list[DoctorCheck] = []
-    managed_python = _managed_runtime_python()
-    current_python_path = Path(sys.executable).resolve()
-    managed_python_path = managed_python.resolve() if managed_python is not None else None
-    using_managed_python = managed_python_path is not None and managed_python_path == current_python_path
+    runtime_info = runtime_identity()
+    managed_python = managed_runtime_python()
+    current_python_path = Path(runtime_info["currentExecutable"])
+    managed_python_path = Path(runtime_info["managedExecutable"]) if runtime_info.get("managedExecutable") else None
+    using_managed_python = bool(runtime_info.get("usingManagedRuntime"))
     managed_probe_modules = _probe_modules_in_python(
         managed_python_path,
         ["faster_whisper", "yt_dlp", "moviepy", "PIL", "flask", "google.genai", "cv2"],
@@ -379,13 +368,9 @@ def run_doctor(*, prepare_whisper: bool = False, render_smoke: bool = False) -> 
             "configuredValue": WHISPER_MODEL,
             "cacheSizeBytes": _directory_size(MODEL_CACHE_DIR),
         },
-        "python": {
-            "currentExecutable": str(current_python_path),
-            "managedExecutable": str(managed_python_path) if managed_python_path is not None else None,
-            "usingManagedRuntime": using_managed_python,
-        },
-        "debugEnabled": is_debug_enabled(),
-    }
+            "python": runtime_info,
+            "debugEnabled": is_debug_enabled(),
+        }
     _write_report_snapshot(report)
     logger.info("Doctor report generated with status %s", overall_status)
     return report

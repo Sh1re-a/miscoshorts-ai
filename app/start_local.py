@@ -9,9 +9,10 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
+from pathlib import Path
 
 from app.paths import DOCTOR_REPORT_PATH, FRONTEND_DIR, PROJECT_ROOT
-from app.runtime import configure_logging, load_local_env
+from app.runtime import configure_logging, load_local_env, managed_runtime_python
 
 load_local_env()
 logger, LOG_PATH = configure_logging("start-local")
@@ -84,6 +85,7 @@ def main() -> None:
     frontend_url = f"http://127.0.0.1:{frontend_port}"
 
     backend_process = None
+    backend_python = managed_runtime_python() or Path(sys.executable)
     launch_env = dict(os.environ)
     launch_env.setdefault("PYTHONUTF8", "1")
     launch_env.setdefault("PYTHONIOENCODING", "utf-8")
@@ -94,7 +96,7 @@ def main() -> None:
         print("Starting local backend on http://127.0.0.1:5001 ...")
         logger.info("Starting local backend on http://127.0.0.1:5001")
         backend_process = subprocess.Popen(
-            [sys.executable, "-m", "app.server"],
+            [str(backend_python), "-m", "app.server"],
             cwd=PROJECT_ROOT,
             env=launch_env,
         )

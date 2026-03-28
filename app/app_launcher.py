@@ -10,9 +10,10 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
+from pathlib import Path
 
 from app.paths import DOCTOR_REPORT_PATH, PROJECT_ROOT
-from app.runtime import backend_code_signature, configure_logging, load_local_env, runtime_summary
+from app.runtime import backend_code_signature, configure_logging, load_local_env, managed_runtime_python, runtime_identity, runtime_summary
 
 load_local_env()
 logger, LOG_PATH = configure_logging("launcher")
@@ -61,7 +62,21 @@ def bootstrap_is_compatible(payload: dict | None) -> bool:
     if not (isinstance(payload.get("renderProfiles"), dict) and bool(payload.get("defaultRenderProfile"))):
         return False
 
-    return payload.get("backendSignature") == backend_code_signature()
+    if payload.get("backendSignature") != backend_code_signature():
+        return False
+
+    expected_runtime = runtime_identity()
+    running_python = payload.get("python") if isinstance(payload.get("python"), dict) else {}
+    expected_managed = expected_runtime.get("managedExecutable")
+    running_managed = running_python.get("managedExecutable")
+
+    if expected_managed and running_managed and Path(str(expected_managed)) != Path(str(running_managed)):
+        return False
+
+    if expected_managed and not running_python.get("usingManagedRuntime"):
+        return False
+
+    return True
 
 
 def find_listener_pid(port: int) -> int | None:
@@ -138,6 +153,7 @@ def stop_process(process: subprocess.Popen[str] | None) -> None:
 
 def main() -> None:
     backend_process = None
+    backend_python = managed_runtime_python() or Path(sys.executable)
     whisper_cache_dir = os.getenv("WHISPER_MODEL_CACHE_DIR", ".miscoshorts/runtime/model-cache/whisper")
     runtime_paths = runtime_summary()
     launch_env = dict(os.environ)
@@ -161,12 +177,12 @@ def main() -> None:
             )
             stop_listener_on_port(5001)
             time.sleep(1)
-            backend_process = subprocess.Popen([sys.executable, "-m", "app.server"], cwd=PROJECT_ROOT, env=launch_env)
+            backend_process = subprocess.Popen([str(backend_python), "-m", "app.server"], cwd=PROJECT_ROOT, env=launch_env)
             wait_for_url(HEALTH_URL, timeout=20, process=backend_process, name="local app")
     else:
         print(f"Starting local app on {APP_URL} ...")
         logger.info("Starting local app at %s", APP_URL)
-        backend_process = subprocess.Popen([sys.executable, "-m", "app.server"], cwd=PROJECT_ROOT, env=launch_env)
+        backend_process = subprocess.Popen([str(backend_python), "-m", "app.server"], cwd=PROJECT_ROOT, env=launch_env)
         wait_for_url(HEALTH_URL, timeout=20, process=backend_process, name="local app")
 
     print(f"Private speech-model cache: {whisper_cache_dir}")

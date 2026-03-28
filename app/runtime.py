@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -81,6 +82,42 @@ def runtime_summary() -> dict[str, str]:
         "modelCacheDir": str(MODEL_CACHE_DIR),
         "doctorReportPath": str(DOCTOR_REPORT_PATH),
         "envFile": str(ENV_FILE),
+    }
+
+
+def managed_runtime_python() -> Path | None:
+    candidates = (
+        RUNTIME_DIR / "venv" / "bin" / "python3",
+        RUNTIME_DIR / "venv" / "bin" / "python",
+        RUNTIME_DIR / "venv" / "Scripts" / "python.exe",
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def runtime_identity() -> dict[str, str | bool | None]:
+    managed_python = managed_runtime_python()
+    current_executable = Path(sys.executable)
+    managed_runtime_dir = RUNTIME_DIR / "venv"
+    current_prefix = Path(sys.prefix)
+    current_base_prefix = Path(getattr(sys, "base_prefix", sys.prefix))
+    using_managed_runtime = False
+
+    if current_prefix == managed_runtime_dir:
+        using_managed_runtime = True
+    elif os.getenv("VIRTUAL_ENV"):
+        using_managed_runtime = Path(os.getenv("VIRTUAL_ENV", "")).resolve() == managed_runtime_dir.resolve()
+    elif managed_python is not None and current_executable == managed_python:
+        using_managed_runtime = True
+
+    return {
+        "currentExecutable": str(current_executable),
+        "managedExecutable": str(managed_python) if managed_python is not None else None,
+        "currentPrefix": str(current_prefix),
+        "currentBasePrefix": str(current_base_prefix),
+        "usingManagedRuntime": using_managed_runtime,
     }
 
 

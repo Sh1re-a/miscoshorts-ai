@@ -15,7 +15,7 @@ from app import analytics, subtitle_preview
 from app.doctor import run_doctor
 from app.errors import explain_exception
 from app.paths import FRONTEND_DIST_DIR, OUTPUTS_DIR
-from app.runtime import backend_code_signature, configure_logging, is_debug_enabled, load_local_env, runtime_summary
+from app.runtime import backend_code_signature, configure_logging, is_debug_enabled, load_local_env, runtime_identity, runtime_summary
 from app.storage import prune_runtime_storage
 from app.shorts_service import (
     create_short_from_url,
@@ -357,7 +357,9 @@ def bootstrap():
                 (os.getenv("PYANNOTE_AUTH_TOKEN") or os.getenv("HUGGINGFACE_ACCESS_TOKEN") or os.getenv("HF_TOKEN") or "").strip()
             ),
             "doctorStatus": doctor_report["status"],
+            "renderReady": doctor_report.get("renderReady"),
             "runtime": runtime_summary(),
+            "python": runtime_identity(),
             "logPath": str(SERVER_LOG_PATH),
             "doctorReportPath": doctor_report.get("reportPath"),
         }
