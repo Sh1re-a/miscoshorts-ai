@@ -32,6 +32,7 @@ OUTPUTS_DIR = _resolve_path("MISCOSHORTS_OUTPUTS_DIR", _default_outputs_dir)
 OUTPUT_JOBS_DIR = OUTPUTS_DIR / "jobs"
 OUTPUT_CACHE_DIR = OUTPUTS_DIR / "cache"
 OUTPUT_TEMP_DIR = OUTPUTS_DIR / "temp"
+OUTPUT_LOCKS_DIR = OUTPUTS_DIR / "_locks"
 MODEL_CACHE_DIR = RUNTIME_DIR / "model-cache"
 DOCTOR_REPORT_PATH = SETUP_DIR / "doctor-report.json"
 ENV_FILE = PROJECT_ROOT / ".env"

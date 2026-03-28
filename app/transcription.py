@@ -342,6 +342,12 @@ def transcribe_video_fast(video_path: Path) -> dict:
     return transcribe_media(video_path, word_timestamps=True)
 
 
+def transcribe_audio_path_for_subtitles(audio_path: Path | None) -> dict:
+    if audio_path is None or not audio_path.exists():
+        return {"text": "", "segments": []}
+    return transcribe_media(audio_path, word_timestamps=True)
+
+
 def transcribe_clip_for_subtitles(clip: VideoFileClip, output_dir: Path, clip_index: int) -> dict:
     if clip.audio is None:
         return {"text": "", "segments": []}

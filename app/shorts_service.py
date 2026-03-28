@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import hashlib
+import gc
 import json
 import logging
 import os
@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, urlencode, urlparse
 
-import yt_dlp
 from moviepy import CompositeVideoClip, ImageClip, VideoFileClip
 
 try:
@@ -145,25 +144,31 @@ _CLS_VOTE_TEXT_NEWS = 0.10          # per-frame text for news vote
 # Scene-change detection
 _CLS_SCENE_CHANGE_THRESHOLD = 0.06 # inter-frame diff above this = scene change
 
-from app import gemini_analyzer, subtitles
-from app.media_cache import (
-    find_cached_video,
-    load_cached_clip_candidates,
-    load_cached_transcript,
-    store_cached_clip_candidates,
-    store_cached_transcript,
-    store_cached_video,
-)
+from app import subtitles
+from app.clip_transcript import extract_clip_transcript_from_segments
 from app.paths import OUTPUT_JOBS_DIR
+from app.render_session import (
+    RenderWorkspace,
+    acquire_fingerprint_lock,
+    job_fingerprint,
+    load_existing_result,
+    write_result_manifest,
+)
 from app.runtime import configure_logging, load_local_env
-from app.storage import atomic_write_json, prune_runtime_storage
+from app.source_pipeline import (
+    emit_workload_warning,
+    ensure_disk_headroom,
+    probe_video_duration,
+    resolve_source_video,
+    resolve_transcript,
+    select_clip_candidates,
+    validate_clip_candidates,
+)
+from app.storage import prune_runtime_storage
 from app.transcription import (
     analyze_audio_speakers,
-    get_whisper_model_candidates,
     speaker_analysis_backend_label,
-    transcribe_clip_for_subtitles,
-    transcribe_video_fast,
-    whisper_cache_contains_files,
+    transcribe_audio_path_for_subtitles,
 )
 from app.video_render import DEFAULT_RENDER_THREADS, extract_audio_segment, write_high_quality_video
 
@@ -180,22 +185,11 @@ VIDEO_BITRATE = os.getenv("VIDEO_BITRATE", "12M")
 VIDEO_MAXRATE = os.getenv("VIDEO_MAXRATE", "18M")
 VIDEO_BUFSIZE = os.getenv("VIDEO_BUFSIZE", "24M")
 VIDEO_AUDIO_BITRATE = os.getenv("VIDEO_AUDIO_BITRATE", "320k")
-YTDLP_MAX_HEIGHT = max(1080, int(os.getenv("YTDLP_MAX_HEIGHT", "4320")))
-DOWNLOAD_FORMAT = os.getenv(
-    "YTDLP_FORMAT",
-    f"bestvideo*[height<={YTDLP_MAX_HEIGHT}]+bestaudio/best[height<={YTDLP_MAX_HEIGHT}]/best",
-)
-DOWNLOAD_FORMAT_SORT = [
-    field.strip()
-    for field in os.getenv("YTDLP_FORMAT_SORT", "res,fps,hdr:12,vcodec:h264,acodec:aac").split(",")
-    if field.strip()
-]
 RENDER_THREADS = DEFAULT_RENDER_THREADS
 DEFAULT_CLIP_COUNT = 3
 DEFAULT_RENDER_PROFILE = os.getenv("DEFAULT_RENDER_PROFILE", "studio").strip().lower() or "studio"
 KEEP_RENDER_DIAGNOSTICS = os.getenv("KEEP_RENDER_DIAGNOSTICS", "0").strip().lower() in {"1", "true", "yes", "on"}
 REUSE_COMPLETED_RENDERS = os.getenv("REUSE_COMPLETED_RENDERS", "1").strip().lower() not in {"0", "false", "no"}
-_PIPELINE_FINGERPRINT_VERSION = "v2"
 _LAST_STORAGE_PRUNE_AT = 0.0
 RENDER_PROFILES = {
     "fast": {
@@ -265,8 +259,6 @@ WINDOWS_RESERVED_FILENAMES = {
     "LPT8",
     "LPT9",
 }
-GEMINI_FIELD_PATTERN = re.compile(r"^(TITLE|START|END|REASON)\s*:\s*(.+?)\s*$", re.IGNORECASE)
-GEMINI_CLIP_PATTERN = re.compile(r"^CLIP\s+\d+\s*:?\s*$", re.IGNORECASE)
 
 
 def _ensure_cv2() -> bool:
@@ -316,20 +308,6 @@ def _get_render_profile_settings(render_profile: str) -> dict[str, str]:
 
 def _make_even(value: float) -> int:
     return max(2, int(round(value / 2) * 2))
-
-
-def _resolve_downloaded_video_path(destination_base: Path) -> Path:
-    preferred_extensions = (".mp4", ".mkv", ".mov", ".webm")
-    for extension in preferred_extensions:
-        candidate = destination_base.with_suffix(extension)
-        if candidate.exists():
-            return candidate
-
-    matches = sorted(destination_base.parent.glob(f"{destination_base.name}.*"))
-    if matches:
-        return matches[0]
-
-    raise FileNotFoundError("yt-dlp completed without producing a video file.")
 
 
 def validate_video_url(url: str) -> str:
@@ -2039,294 +2017,6 @@ def ensure_dependencies() -> None:
     )
 
 
-def _slice_segment_words(words: list[dict], clip_start_time: float, clip_end_time: float) -> list[dict]:
-    clip_duration = max(0.0, clip_end_time - clip_start_time)
-    sliced_words: list[dict] = []
-
-    for word in words:
-        raw_text = (word.get("word") or "").strip()
-        raw_start = word.get("start")
-        raw_end = word.get("end")
-        if not raw_text or raw_start is None or raw_end is None:
-            continue
-
-        try:
-            word_start = float(raw_start)
-            word_end = float(raw_end)
-        except (TypeError, ValueError):
-            continue
-
-        if word_end <= clip_start_time or word_start >= clip_end_time:
-            continue
-
-        relative_start = max(0.0, word_start - clip_start_time)
-        relative_end = min(clip_duration, word_end - clip_start_time)
-        if relative_end <= relative_start:
-            relative_end = min(clip_duration, relative_start + 0.12)
-
-        sliced_words.append(
-            {
-                "word": raw_text,
-                "start": relative_start,
-                "end": relative_end,
-            }
-        )
-
-    return sliced_words
-
-
-def extract_clip_transcript_from_full(full_transcript: dict, clip_start_time: float, clip_end_time: float) -> tuple[dict, bool]:
-    clip_duration = max(0.0, clip_end_time - clip_start_time)
-    clip_segments: list[dict] = []
-    transcript_text_parts: list[str] = []
-    requires_precise_fallback = False
-
-    for raw_segment in full_transcript.get("segments") or []:
-        raw_start = raw_segment.get("start")
-        raw_end = raw_segment.get("end")
-        if raw_start is None or raw_end is None:
-            continue
-
-        try:
-            segment_start = float(raw_start)
-            segment_end = float(raw_end)
-        except (TypeError, ValueError):
-            continue
-
-        if segment_end <= clip_start_time or segment_start >= clip_end_time:
-            continue
-
-        relative_start = max(0.0, segment_start - clip_start_time)
-        relative_end = min(clip_duration, segment_end - clip_start_time)
-        if relative_end <= relative_start:
-            continue
-
-        sliced_words = _slice_segment_words(raw_segment.get("words") or [], clip_start_time, clip_end_time)
-        if sliced_words:
-            segment_text = " ".join(word["word"] for word in sliced_words)
-        else:
-            segment_text = (raw_segment.get("text") or "").strip()
-            if segment_start < clip_start_time or segment_end > clip_end_time:
-                requires_precise_fallback = True
-
-        if not segment_text and not sliced_words:
-            continue
-
-        clipped_segment = {
-            "start": relative_start,
-            "end": relative_end,
-            "text": segment_text,
-        }
-        if sliced_words:
-            clipped_segment["words"] = sliced_words
-
-        clip_segments.append(clipped_segment)
-        if segment_text:
-            transcript_text_parts.append(segment_text)
-
-    return {
-        "text": " ".join(transcript_text_parts).strip(),
-        "segments": clip_segments,
-    }, requires_precise_fallback
-
-
-def _summarize_download_info(info: dict | None) -> dict:
-    if not info:
-        return {}
-
-    requested = info.get("requested_formats") or []
-    video_format = next((fmt for fmt in requested if fmt.get("vcodec") not in {None, "none"}), info)
-    audio_format = next((fmt for fmt in requested if fmt.get("acodec") not in {None, "none"}), info)
-
-    width = video_format.get("width") or info.get("width")
-    height = video_format.get("height") or info.get("height")
-    fps = video_format.get("fps") or info.get("fps")
-    source_summary = {
-        "id": info.get("id"),
-        "title": info.get("title"),
-        "webpageUrl": info.get("webpage_url") or info.get("original_url"),
-        "extractor": info.get("extractor_key") or info.get("extractor"),
-        "container": info.get("ext"),
-        "width": width,
-        "height": height,
-        "fps": fps,
-        "videoCodec": video_format.get("vcodec") or info.get("vcodec"),
-        "audioCodec": audio_format.get("acodec") or info.get("acodec"),
-        "videoBitrate": video_format.get("tbr") or info.get("tbr"),
-        "audioBitrate": audio_format.get("abr") or info.get("abr"),
-    }
-    return {
-        key: value
-        for key, value in source_summary.items()
-        if value is not None and value != "" and value != []
-    }
-
-
-def _format_download_quality_label(download_info: dict) -> str:
-    if not download_info:
-        return "Source download complete."
-
-    dimensions = "x".join(
-        str(int(value))
-        for value in (download_info.get("width"), download_info.get("height"))
-        if value is not None
-    )
-    fps = download_info.get("fps")
-    codec = download_info.get("videoCodec")
-    audio = download_info.get("audioCodec")
-    parts = [part for part in [dimensions, f"{fps}fps" if fps else None, codec, audio] if part]
-    if not parts:
-        return "Source download complete."
-    return f"Source download complete: {' / '.join(parts)}."
-
-
-def download_video(url: str, destination_base: Path, progress_callback: ProgressCallback | None = None) -> tuple[Path, dict]:
-    last_reported: dict[str, int] = {"pct": -1}
-
-    def _ydl_progress(d: dict) -> None:
-        if d.get("status") != "downloading":
-            return
-        total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-        downloaded = d.get("downloaded_bytes") or 0
-        if total > 0:
-            pct = int(downloaded / total * 100)
-            # Report at most every 10%
-            if pct >= last_reported["pct"] + 10:
-                last_reported["pct"] = pct
-                speed = d.get("speed") or 0
-                speed_mb = speed / 1_048_576 if speed else 0
-                eta = d.get("eta") or 0
-                msg = f"Downloading... {pct}%"
-                if speed_mb >= 0.1:
-                    msg += f"  ({speed_mb:.1f} MB/s"
-                    if eta:
-                        msg += f", ~{eta}s left"
-                    msg += ")"
-                _emit(progress_callback, "downloading", msg)
-        elif d.get("info_dict"):
-            # No size info yet — just confirm it started
-            if last_reported["pct"] < 0:
-                last_reported["pct"] = 0
-                _emit(progress_callback, "downloading", "Downloading video… (size unknown)")
-
-    ydl_opts = {
-        "format": DOWNLOAD_FORMAT,
-        "format_sort": DOWNLOAD_FORMAT_SORT,
-        "outtmpl": str(destination_base.with_suffix(".%(ext)s")),
-        "merge_output_format": "mp4",
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "check_formats": True,
-        "concurrent_fragment_downloads": 4,
-        "retries": 10,
-        "fragment_retries": 10,
-        "file_access_retries": 3,
-        "progress_hooks": [_ydl_progress],
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-    download_info = _summarize_download_info(info)
-    _emit(progress_callback, "downloading", _format_download_quality_label(download_info))
-    return _resolve_downloaded_video_path(destination_base), download_info
-
-
-def _extract_gemini_clip_blocks(text: str) -> list[dict[str, str]]:
-    clips: list[dict[str, str]] = []
-    current: dict[str, str] = {}
-
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-
-        if GEMINI_CLIP_PATTERN.match(line):
-            if current:
-                clips.append(current)
-            current = {}
-            continue
-
-        match = GEMINI_FIELD_PATTERN.match(line)
-        if not match:
-            continue
-
-        key = match.group(1).lower()
-        value = match.group(2).strip()
-
-        if key == "title" and current.get("title") and current.get("start") and current.get("end"):
-            clips.append(current)
-            current = {}
-
-        current[key] = value
-
-    if current:
-        clips.append(current)
-
-    return clips
-
-
-def _parse_gemini_float(raw_value: str | None, field_name: str) -> float:
-    if raw_value is None or not raw_value.strip():
-        raise ValueError(f"Gemini response is missing {field_name.upper()}.")
-
-    try:
-        return float(raw_value.strip())
-    except ValueError as error:
-        raise ValueError(f"Gemini returned an invalid {field_name.upper()} value: {raw_value!r}") from error
-
-
-def _normalize_gemini_clip(raw_clip: dict[str, str]) -> dict:
-    start = _parse_gemini_float(raw_clip.get("start"), "start")
-    end = _parse_gemini_float(raw_clip.get("end"), "end")
-    if end <= start:
-        raise ValueError(f"Gemini returned an invalid clip interval: start={start}, end={end}")
-
-    title = (raw_clip.get("title") or "").strip() or None
-    reason = (raw_clip.get("reason") or "").strip() or None
-    return {
-        "title": title,
-        "start": start,
-        "end": end,
-        "reason": reason,
-    }
-
-
-def parse_gemini_response(text: str) -> dict:
-    clips = parse_gemini_responses(text)
-    if not clips:
-        raise ValueError("Gemini did not return any valid clip intervals.")
-    return clips[0]
-
-
-def parse_gemini_responses(text: str) -> list[dict]:
-    raw_clips = _extract_gemini_clip_blocks(text)
-    normalized: list[dict] = []
-    seen_ranges: set[tuple[int, int]] = set()
-    parse_errors: list[str] = []
-
-    for raw_clip in raw_clips:
-        try:
-            clip = _normalize_gemini_clip(raw_clip)
-        except ValueError as error:
-            parse_errors.append(str(error))
-            continue
-
-        key = (round(clip["start"] * 10), round(clip["end"] * 10))
-        if key in seen_ranges:
-            continue
-
-        seen_ranges.add(key)
-        normalized.append(clip)
-
-    if normalized:
-        return normalized
-
-    if parse_errors:
-        raise ValueError(parse_errors[0])
-
-    return []
-
-
 def _run_storage_maintenance_if_due() -> None:
     global _LAST_STORAGE_PRUNE_AT
     now = time.time()
@@ -2339,234 +2029,45 @@ def _run_storage_maintenance_if_due() -> None:
         logger.warning("Background storage maintenance failed.", exc_info=True)
 
 
-def _job_fingerprint(
+def _render_selected_clips(
     *,
-    video_url: str,
+    video_path: Path,
+    workspace: RenderWorkspace,
+    clip_candidates: list[dict],
+    transcript_segments: list[dict],
     output_filename: str,
-    clip_count: int,
-    render_profile: str,
     subtitle_style: dict,
-) -> str:
-    payload = {
-        "version": _PIPELINE_FINGERPRINT_VERSION,
-        "videoUrl": video_url,
-        "outputFilename": output_filename,
-        "clipCount": clip_count,
-        "renderProfile": render_profile,
-        "subtitleStyle": subtitle_style,
-    }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-    return hashlib.sha1(encoded).hexdigest()[:16]
-
-
-def _result_manifest_path(output_dir: Path) -> Path:
-    return output_dir / "meta" / "result.json"
-
-
-def _result_paths_exist(result: dict) -> bool:
-    transcript_path = result.get("transcriptPath")
-    if transcript_path and not Path(transcript_path).exists():
-        return False
-    for clip in result.get("clips") or []:
-        output_path = clip.get("outputPath")
-        if not output_path or not Path(output_path).exists():
-            return False
-    output_path = result.get("outputPath")
-    if output_path and not Path(output_path).exists():
-        return False
-    return True
-
-
-def _load_existing_result(output_dir: Path, fingerprint: str) -> dict | None:
-    manifest_path = _result_manifest_path(output_dir)
-    if not manifest_path.exists():
-        return None
-    try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if payload.get("jobFingerprint") != fingerprint:
-        return None
-    if not _result_paths_exist(payload):
-        return None
-    payload["lastUsedAt"] = time.time()
-    atomic_write_json(manifest_path, payload)
-    return payload
-
-
-def create_output_dir(base_dir: str | Path = OUTPUT_JOBS_DIR, job_id: str | None = None) -> tuple[str, Path]:
-    job_id = job_id or uuid.uuid4().hex[:10]
-    output_dir = Path(base_dir) / job_id
-    (output_dir / "source").mkdir(parents=True, exist_ok=True)
-    (output_dir / "audio").mkdir(parents=True, exist_ok=True)
-    (output_dir / "clips").mkdir(parents=True, exist_ok=True)
-    (output_dir / "meta").mkdir(parents=True, exist_ok=True)
-    (output_dir / "diagnostics").mkdir(parents=True, exist_ok=True)
-    return job_id, output_dir
-
-
-def create_short_from_url(
-    video_url: str,
-    api_key: str,
-    output_filename: str = "short_con_subs.mp4",
-    base_dir: str | Path = OUTPUT_JOBS_DIR,
-    job_id: str | None = None,
+    render_settings: dict[str, str],
     progress_callback: ProgressCallback | None = None,
-    subtitle_style: dict | None = None,
-    clip_count: int = DEFAULT_CLIP_COUNT,
-    render_profile: str = DEFAULT_RENDER_PROFILE,
-) -> dict:
-    video_url = validate_video_url(video_url)
-    output_filename = sanitize_output_filename(output_filename)
-    subtitle_style = normalize_requested_subtitle_style(subtitle_style)
-    render_profile = normalize_requested_render_profile(render_profile)
-    render_settings = _get_render_profile_settings(render_profile)
-    clip_count = max(1, min(5, int(clip_count)))
-    job_id = job_id or uuid.uuid4().hex[:10]
-    job_fingerprint = _job_fingerprint(
-        video_url=video_url,
-        output_filename=output_filename,
-        clip_count=clip_count,
-        render_profile=render_profile,
-        subtitle_style=subtitle_style,
-    )
-    _run_storage_maintenance_if_due()
+) -> list[dict]:
+    clips_output: list[dict] = []
 
-    output_dir = Path(base_dir) / job_fingerprint
-    if REUSE_COMPLETED_RENDERS:
-        existing_result = _load_existing_result(output_dir, job_fingerprint)
-        if existing_result is not None:
-            _emit(progress_callback, "completed", "Existing clips already match this request. Reusing previous render output.")
-            existing_result["jobId"] = job_id
-            existing_result["reusedExisting"] = True
-            existing_result["jobFingerprint"] = job_fingerprint
-            existing_result["outputDir"] = str(output_dir)
-            return existing_result
+    for index, clip_data in enumerate(clip_candidates, start=1):
+        start = clip_data["start"]
+        end = clip_data["end"]
+        current_filename = build_clip_filename(output_filename, index, len(clip_candidates))
+        temp_output_path = workspace.clips_dir / current_filename
+        clip_source = None
+        clip = None
+        clip_vertical = None
+        clip_final = None
+        audio_temp_path: Path | None = None
+        subtitle_plan_path = None
+        subtitle_preflight_path = None
 
-    ensure_dependencies()
-    _emit(progress_callback, "validating", "Checking subtitle rendering compatibility...")
-    subtitles.assert_subtitle_rendering_ready(subtitle_style)
+        try:
+            _emit(progress_callback, "rendering", f"Rendering clip {index} of {len(clip_candidates)} with a fresh source handle to reduce memory pressure...")
+            clip_source = VideoFileClip(str(video_path))
+            clip = clip_source.subclipped(start, end)
 
-    if output_dir.exists():
-        _warn_note(f"Cleaning stale output directory before rerender: {output_dir}")
-        shutil.rmtree(output_dir, ignore_errors=True)
-
-    _created_dir_name, output_dir = create_output_dir(base_dir=base_dir, job_id=job_fingerprint)
-    source_dir = output_dir / "source"
-    audio_dir = output_dir / "audio"
-    meta_dir = output_dir / "meta"
-    clips_dir = output_dir / "clips"
-    diagnostics_dir = output_dir / "diagnostics"
-    transcript_path = meta_dir / "full_transcript.txt"
-    source_meta_path = meta_dir / "source_download.json"
-    temp_base = source_dir / "source_video"
-
-    video_path = None
-    source_video = None
-    clip = None
-    clip_vertical = None
-    clip_final = None
-    download_info: dict = {}
-    remove_source_video_at_end = False
-    render_completed = False
-
-    try:
-        video_path = find_cached_video(video_url)
-        if video_path is not None:
-            _emit(progress_callback, "downloading", "Reusing cached source video from a previous local run...")
-        else:
-            _emit(progress_callback, "downloading", "Downloading the highest-quality source video and audio from YouTube...")
-            video_path, download_info = download_video(video_url, temp_base, progress_callback)
-            store_cached_video(video_url, video_path)
-            remove_source_video_at_end = True
-
-        if video_path is not None:
-            if not download_info:
-                download_info = {"webpageUrl": video_url}
-            download_info["localPath"] = str(video_path)
-            source_meta_path.write_text(json.dumps(download_info, ensure_ascii=True, indent=2), encoding="utf-8")
-
-        result = load_cached_transcript(video_url)
-        if result is not None:
-            _emit(progress_callback, "transcribing", "Reusing cached transcript from a previous local run...")
-        else:
-            whisper_model = get_whisper_model_candidates()[0]
-            if whisper_cache_contains_files():
-                _emit(progress_callback, "transcribing", f"Transcribing full video once with Whisper ({whisper_model}) for analysis and subtitles...")
-            else:
-                _emit(
-                    progress_callback,
-                    "transcribing",
-                    f"Preparing the local speech model ({whisper_model}) for first run. This one-time download can take a few minutes, then transcription starts automatically...",
-                )
-            result = transcribe_video_fast(video_path)
-            store_cached_transcript(video_url, result)
-            _emit(progress_callback, "transcribing", f"Transcription complete. Found {len(result.get('segments') or [])} segments.")
-
-        transcript_path.write_text(
-            f"URL: {video_url}\n{result['text']}", encoding="utf-8"
-        )
-
-        cached_clip_candidates = load_cached_clip_candidates(video_url, clip_count)
-        if cached_clip_candidates is not None:
-            _emit(progress_callback, "analyzing", f"Reusing cached clip selection for {clip_count} clips...")
-            clip_candidates = cached_clip_candidates
-        else:
-            _emit(progress_callback, "analyzing", f"Asking Gemini for the best {clip_count} clips...")
-            analysis = gemini_analyzer.find_viral_clips(result["segments"], api_key, clip_count=clip_count)
-            clip_candidates = parse_gemini_responses(analysis)
-            if not clip_candidates:
-                clip_candidates = [parse_gemini_response(analysis)]
-            clip_candidates = clip_candidates[:clip_count]
-            store_cached_clip_candidates(video_url, clip_count, clip_candidates)
-
-        # Validate clip timestamps against actual video duration
-        clips_output = []
-        source_video = VideoFileClip(str(video_path))
-        video_duration = source_video.duration or 0.0
-
-        valid_candidates = []
-        for cd in clip_candidates:
-            s, e = cd["start"], cd["end"]
-            # Clamp endpoints to video boundaries
-            s = max(0.0, min(s, video_duration - 1.0))
-            e = max(s + 5.0, min(e, video_duration))
-            if e - s < 20.0:
-                _warn_note(
-                    f"Skipping clip {cd.get('title', 'unknown')}: too short after clamping ({e - s:.1f}s < 20 s minimum)."
-                )
-                continue
-            cd["start"] = round(s, 2)
-            cd["end"] = round(e, 2)
-            valid_candidates.append(cd)
-
-        if not valid_candidates:
-            raise ValueError("No valid clips remain after timestamp validation against video duration.")
-
-        clip_candidates = valid_candidates
-
-        for index, clip_data in enumerate(clip_candidates, start=1):
-            start = clip_data["start"]
-            end = clip_data["end"]
-            current_filename = build_clip_filename(output_filename, index, len(clip_candidates))
-            output_path = clips_dir / current_filename
-
-            _emit(progress_callback, "rendering", f"Rendering clip {index} of {len(clip_candidates)}...")
-            clip = source_video.subclipped(start, end)
-
-            # Pre-extract audio to a WAV file via direct FFmpeg.
-            # Audio is muxed in by write_high_quality_video (2-pass) so that
-            # MoviePy's FFMPEG_AudioReader is never used during the render,
-            # preventing the proc=None crash on long clips.
-            audio_temp_path: Path | None = None
             if clip.audio is not None:
-                audio_temp_path = extract_audio_segment(video_path, start, end, audio_dir)
+                audio_temp_path = extract_audio_segment(video_path, start, end, workspace.audio_dir)
 
             _emit(progress_callback, "rendering", f"Preparing subtitle timing for clip {index}...")
-            clip_transcript, requires_precise_fallback = extract_clip_transcript_from_full(result, start, end)
+            clip_transcript, requires_precise_fallback = extract_clip_transcript_from_segments(transcript_segments, start, end)
             if requires_precise_fallback:
-                _emit(progress_callback, "rendering", f"Refining subtitle timing for clip {index}...")
-                clip_transcript = transcribe_clip_for_subtitles(clip, audio_dir, index)
+                _emit(progress_callback, "rendering", f"Refining subtitle timing for clip {index} from the pre-extracted audio track...")
+                clip_transcript = transcribe_audio_path_for_subtitles(audio_temp_path)
 
             audio_speaker_meta = analyze_audio_speakers(audio_temp_path, clip_transcript)
             _emit(
@@ -2592,15 +2093,13 @@ def create_short_from_url(
                 subtitle_plan,
                 subtitle_style,
             )
-            subtitle_plan_path = None
-            subtitle_preflight_path = None
             if KEEP_RENDER_DIAGNOSTICS:
-                subtitle_plan_path = diagnostics_dir / f"clip_{index:02d}_subtitles.json"
+                subtitle_plan_path = workspace.diagnostics_dir / f"clip_{index:02d}_subtitles.json"
                 subtitle_plan_path.write_text(
                     json.dumps(subtitles.export_subtitle_plan(subtitle_plan), ensure_ascii=True, indent=2),
                     encoding="utf-8",
                 )
-                subtitle_preflight_path = diagnostics_dir / f"clip_{index:02d}_subtitle_preflight.json"
+                subtitle_preflight_path = workspace.diagnostics_dir / f"clip_{index:02d}_subtitle_preflight.json"
                 subtitle_preflight_path.write_text(
                     json.dumps(subtitle_preflight, ensure_ascii=True, indent=2),
                     encoding="utf-8",
@@ -2617,7 +2116,7 @@ def create_short_from_url(
             )
             write_high_quality_video(
                 clip_final,
-                output_path,
+                temp_output_path,
                 audio_path=audio_temp_path,
                 render_settings=render_settings,
                 render_threads=RENDER_THREADS,
@@ -2633,66 +2132,205 @@ def create_short_from_url(
                     "contentType": content_type,
                     "analytics": clip_analytics,
                     "outputFilename": current_filename,
-                    "outputPath": str(output_path),
-                    "subtitlePlanPath": str(subtitle_plan_path) if subtitle_plan_path else None,
-                    "subtitlePreflightPath": str(subtitle_preflight_path) if subtitle_preflight_path else None,
+                    "subtitlePlanFilename": subtitle_plan_path.name if subtitle_plan_path else None,
+                    "subtitlePreflightFilename": subtitle_preflight_path.name if subtitle_preflight_path else None,
                     "subtitleCueCount": len(subtitle_plan),
                     "subtitlePreflightWarnings": len(subtitle_preflight.get("warnings") or []),
                 }
             )
-
-            clip_final.close()
-            clip_final = None
+        finally:
+            if clip_final is not None:
+                clip_final.close()
+            if clip_vertical is not None:
+                clip_vertical.close()
+            if clip is not None:
+                clip.close()
+            if clip_source is not None:
+                clip_source.close()
             if audio_temp_path is not None and audio_temp_path.exists():
                 audio_temp_path.unlink(missing_ok=True)
-                audio_temp_path = None
-            clip_vertical.close()
-            clip_vertical = None
-            clip.close()
-            clip = None
+            gc.collect()
 
-        _emit(progress_callback, "completed", f"{len(clips_output)} high-quality clips are ready to download.")
-        first_clip = clips_output[0]
-        now = time.time()
-        result_payload = {
-            "jobId": job_id,
-            "jobFingerprint": job_fingerprint,
-            "videoUrl": video_url,
-            "title": first_clip.get("title"),
-            "reason": first_clip.get("reason"),
-            "start": first_clip["start"],
-            "end": first_clip["end"],
-            "outputFilename": first_clip["outputFilename"],
-            "subtitleStyle": subtitle_style,
-            "outputPath": first_clip["outputPath"],
-            "transcriptPath": str(transcript_path),
-            "sourceMetaPath": str(source_meta_path),
-            "sourceDownload": download_info,
-            "outputDir": str(output_dir),
-            "renderProfile": render_settings["label"],
-            "renderProfileKey": render_profile,
-            "clips": clips_output,
-            "clipCount": len(clips_output),
-            "generatedAt": now,
-            "lastUsedAt": now,
-            "reusedExisting": False,
+    return clips_output
+
+
+def _materialize_final_clips(workspace: RenderWorkspace, clips_output: list[dict]) -> list[dict]:
+    return [
+        {
+            **clip,
+            "outputPath": str(workspace.clips_dir / clip["outputFilename"]),
+            "subtitlePlanPath": str(workspace.diagnostics_dir / clip["subtitlePlanFilename"]) if clip.get("subtitlePlanFilename") else None,
+            "subtitlePreflightPath": str(workspace.diagnostics_dir / clip["subtitlePreflightFilename"]) if clip.get("subtitlePreflightFilename") else None,
         }
-        atomic_write_json(_result_manifest_path(output_dir), result_payload)
-        render_completed = True
-        return result_payload
-    finally:
-        if clip_final is not None:
-            clip_final.close()
-        if source_video is not None:
-            source_video.close()
-        if clip_vertical is not None:
-            clip_vertical.close()
-        if clip is not None:
-            clip.close()
-        if remove_source_video_at_end and video_path and os.path.exists(video_path):
-            os.remove(video_path)
-        if not render_completed and output_dir.exists():
-            shutil.rmtree(output_dir, ignore_errors=True)
+        for clip in clips_output
+    ]
+
+
+def create_short_from_url(
+    video_url: str,
+    api_key: str,
+    output_filename: str = "short_con_subs.mp4",
+    base_dir: str | Path = OUTPUT_JOBS_DIR,
+    job_id: str | None = None,
+    progress_callback: ProgressCallback | None = None,
+    subtitle_style: dict | None = None,
+    clip_count: int = DEFAULT_CLIP_COUNT,
+    render_profile: str = DEFAULT_RENDER_PROFILE,
+) -> dict:
+    video_url = validate_video_url(video_url)
+    output_filename = sanitize_output_filename(output_filename)
+    subtitle_style = normalize_requested_subtitle_style(subtitle_style)
+    render_profile = normalize_requested_render_profile(render_profile)
+    render_settings = _get_render_profile_settings(render_profile)
+    clip_count = max(1, min(5, int(clip_count)))
+    job_id = job_id or uuid.uuid4().hex[:10]
+    pipeline_fingerprint = job_fingerprint(
+        video_url=video_url,
+        output_filename=output_filename,
+        clip_count=clip_count,
+        render_profile=render_profile,
+        subtitle_style=subtitle_style,
+    )
+    _run_storage_maintenance_if_due()
+
+    output_dir = Path(base_dir) / pipeline_fingerprint
+    if REUSE_COMPLETED_RENDERS:
+        existing_result = load_existing_result(output_dir, pipeline_fingerprint)
+        if existing_result is not None:
+            _emit(progress_callback, "completed", "Existing clips already match this request. Reusing previous render output.")
+            existing_result["jobId"] = job_id
+            existing_result["reusedExisting"] = True
+            existing_result["jobFingerprint"] = pipeline_fingerprint
+            existing_result["outputDir"] = str(output_dir)
+            return existing_result
+
+    with acquire_fingerprint_lock(pipeline_fingerprint, progress_callback=progress_callback):
+        if REUSE_COMPLETED_RENDERS:
+            existing_result = load_existing_result(output_dir, pipeline_fingerprint)
+            if existing_result is not None:
+                _emit(progress_callback, "completed", "Another identical render already finished. Reusing its completed output.")
+                existing_result["jobId"] = job_id
+                existing_result["reusedExisting"] = True
+                existing_result["jobFingerprint"] = pipeline_fingerprint
+                existing_result["outputDir"] = str(output_dir)
+                return existing_result
+
+        ensure_dependencies()
+        _emit(progress_callback, "validating", "Checking subtitle rendering compatibility...")
+        subtitles.assert_subtitle_rendering_ready(subtitle_style)
+
+        workspace = RenderWorkspace.create(fingerprint=pipeline_fingerprint, job_id=job_id, base_dir=base_dir)
+        _emit(progress_callback, "validating", f"Using isolated temporary workspace: {workspace.workspace_dir}")
+        transcript_path = workspace.meta_dir / "full_transcript.txt"
+        source_meta_path = workspace.meta_dir / "source_download.json"
+        temp_base = workspace.source_dir / "source_video"
+        phase_metrics = {
+            "workspaceTempDir": str(workspace.workspace_dir),
+            "outputDir": str(workspace.final_output_dir),
+            "renderMode": "generate",
+        }
+        total_started_at = time.time()
+        video_path = None
+        download_info: dict = {}
+        remove_source_video_at_end = False
+        render_completed = False
+
+        try:
+            started_at = time.time()
+            video_path, download_info, remove_source_video_at_end = resolve_source_video(video_url, temp_base, progress_callback)
+            phase_metrics["downloadSeconds"] = round(time.time() - started_at, 2)
+            source_meta_path.write_text(json.dumps(download_info, ensure_ascii=True, indent=2), encoding="utf-8")
+
+            started_at = time.time()
+            transcript_result = resolve_transcript(video_url, video_path, progress_callback)
+            phase_metrics["transcriptionSeconds"] = round(time.time() - started_at, 2)
+            transcript_segments = transcript_result.get("segments") or []
+            transcript_path.write_text(f"URL: {video_url}\n{transcript_result.get('text') or ''}", encoding="utf-8")
+            del transcript_result
+            gc.collect()
+
+            started_at = time.time()
+            clip_candidates = select_clip_candidates(
+                video_url=video_url,
+                transcript_segments=transcript_segments,
+                api_key=api_key,
+                clip_count=clip_count,
+                progress_callback=progress_callback,
+            )
+            phase_metrics["analysisSeconds"] = round(time.time() - started_at, 2)
+
+            video_duration = probe_video_duration(video_path)
+            phase_metrics["sourceDurationSeconds"] = round(video_duration, 2)
+            emit_workload_warning(video_duration, clip_count, progress_callback)
+            free_bytes = ensure_disk_headroom(
+                workspace.root_dir,
+                video_path=video_path,
+                clip_count=clip_count,
+                video_duration=video_duration,
+            )
+            phase_metrics["freeDiskBytesBeforeRender"] = free_bytes
+
+            clip_candidates = validate_clip_candidates(clip_candidates, video_duration, warn_callback=_warn_note)
+            if not clip_candidates:
+                raise ValueError("No valid clips remain after timestamp validation against video duration.")
+
+            started_at = time.time()
+            temp_clips_output = _render_selected_clips(
+                video_path=video_path,
+                workspace=workspace,
+                clip_candidates=clip_candidates,
+                transcript_segments=transcript_segments,
+                output_filename=output_filename,
+                subtitle_style=subtitle_style,
+                render_settings=render_settings,
+                progress_callback=progress_callback,
+            )
+            phase_metrics["renderSeconds"] = round(time.time() - started_at, 2)
+            phase_metrics["renderedClipCount"] = len(temp_clips_output)
+            del transcript_segments
+            gc.collect()
+
+            _emit(progress_callback, "rendering", "Promoting finished artifacts into the final output folder...")
+            workspace.promote()
+            clips_output = _materialize_final_clips(workspace, temp_clips_output)
+
+            _emit(progress_callback, "completed", f"{len(clips_output)} high-quality clips are ready to download.")
+            first_clip = clips_output[0]
+            now = time.time()
+            phase_metrics["totalSeconds"] = round(now - total_started_at, 2)
+            phase_metrics["promotedFromTemp"] = True
+            result_payload = {
+                "jobId": job_id,
+                "jobFingerprint": pipeline_fingerprint,
+                "videoUrl": video_url,
+                "title": first_clip.get("title"),
+                "reason": first_clip.get("reason"),
+                "start": first_clip["start"],
+                "end": first_clip["end"],
+                "outputFilename": first_clip["outputFilename"],
+                "subtitleStyle": subtitle_style,
+                "outputPath": first_clip["outputPath"],
+                "transcriptPath": str(workspace.meta_dir / "full_transcript.txt"),
+                "sourceMetaPath": str(workspace.meta_dir / "source_download.json"),
+                "sourceDownload": download_info,
+                "outputDir": str(workspace.final_output_dir),
+                "renderProfile": render_settings["label"],
+                "renderProfileKey": render_profile,
+                "clips": clips_output,
+                "clipCount": len(clips_output),
+                "generatedAt": now,
+                "lastUsedAt": now,
+                "reusedExisting": False,
+                "metrics": phase_metrics,
+            }
+            write_result_manifest(workspace.final_output_dir, result_payload)
+            render_completed = True
+            return result_payload
+        finally:
+            if remove_source_video_at_end and video_path and os.path.exists(video_path):
+                os.remove(video_path)
+            if not render_completed:
+                workspace.cleanup()
 
 
 def build_clip_filename(output_filename: str, clip_index: int, total_clips: int) -> str:

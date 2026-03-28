@@ -80,12 +80,14 @@ If the folder already contains `frontend/dist`, the launcher can skip Node.js en
 The app is now more deliberate about disk usage:
 
 - repeated renders with the same source URL, clip count, render profile, output filename, and subtitle style reuse the same deterministic job fingerprint
+- each render now runs inside an isolated temporary workspace first and only promotes finished artifacts into the final output folder after success
 - if a completed render already exists for that fingerprint, the app reuses it instead of generating duplicate outputs again
+- identical concurrent renders wait on a fingerprint lock instead of writing into the same output folder at the same time
 - source downloads are reused from `outputs/cache/` instead of being copied into every new job folder
 - cached full transcripts are reused when the source URL matches
 - cached Gemini clip selection is reused per source URL + requested clip count
 - subtitle diagnostics are not saved by default anymore; set `KEEP_RENDER_DIAGNOSTICS=1` only when you are debugging subtitle issues
-- partial failed output folders are removed automatically at the end of failed renders
+- partial failed workspaces are removed automatically at the end of failed renders before anything is promoted into final outputs
 - stale runtime storage can be pruned with the commands below
 
 Default retention policy:

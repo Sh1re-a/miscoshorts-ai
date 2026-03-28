@@ -62,6 +62,18 @@ def explain_exception(error: Exception) -> FriendlyError:
             summary="The machine ran out of disk space during processing.",
             hint="Free up disk space, then rerun the setup or render.",
         )
+    if "insufficient free disk space for this render" in lowered:
+        return FriendlyError(
+            category="disk_space",
+            summary="There is not enough free disk space for this render workload.",
+            hint="Free up disk space or reduce the clip count, then try again.",
+        )
+    if "timed out while waiting for another identical render to finish" in lowered:
+        return FriendlyError(
+            category="concurrency",
+            summary="Another identical render held the output lock for too long.",
+            hint="Wait for the other render to finish or clear the stale lock, then try again.",
+        )
     if "only youtube video urls are supported" in lowered or "youtube url appears to be incomplete" in lowered:
         return FriendlyError(
             category="input",
