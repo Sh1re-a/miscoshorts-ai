@@ -2,7 +2,6 @@ import functools
 import os
 import platform
 import re
-from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 
 import numpy as np
@@ -643,12 +642,23 @@ def _opacity_at_time(local_t, duration, fade_in_duration, fade_out_duration):
 
 
 def _create_rgba_video_clip(frame_provider, size, duration, *, fade_in_duration=0.0, fade_out_duration=0.0):
+    cached_t = None
+    cached_frame = None
+
+    def get_frame(t):
+        nonlocal cached_t, cached_frame
+        current_t = round(float(t), 4)
+        if cached_frame is None or cached_t != current_t:
+            cached_frame = frame_provider(float(t))
+            cached_t = current_t
+        return cached_frame
+
     def rgb_frame(t):
-        frame = frame_provider(t)
+        frame = get_frame(t)
         return frame[:, :, :3]
 
     def mask_frame(t):
-        frame = frame_provider(t)
+        frame = get_frame(t)
         alpha = frame[:, :, 3].astype(np.float32) / 255.0
         return alpha * _opacity_at_time(float(t), duration, fade_in_duration, fade_out_duration)
 
@@ -1646,7 +1656,6 @@ def _blend_frames(frame_a, frame_b, factor):
 
 
 def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_style=None, clip_title=None, clip_reason=None):
-    print("📝 Building subtitle layers...")
     resolved_style = normalize_subtitle_style(subtitle_style)
     video_duration = _safe_duration(video_clip.duration)
     header_duration = _header_overlay_duration(video_duration)
@@ -1657,7 +1666,8 @@ def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_sty
     _allocated_clips: list = []
 
     try:
-        # --- Pre-build layouts for all cues ---
+        # Build layouts once, but render highlight bitmaps lazily per cue so long clips
+        # do not allocate every highlight state up front.
         cue_layouts = []
         for cue in subtitle_cues:
             locked_layout = _build_locked_text_layout(
@@ -1679,63 +1689,39 @@ def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_sty
                 candidate_indexes.update(range(len(cue["wordEntries"])))
             else:
                 candidate_indexes.add(cue.get("highlightIndex", -1))
-            cue_layouts.append((cue, locked_layout, candidate_indexes))
-
-        # --- Parallel pre-render all highlight states ---
-        def _render_state(args):
-            layout, style, active_index, shadow = args
-            return active_index, np.array(
-                _render_locked_text_image(
-                    layout,
-                    style,
-                    highlight_index=active_index,
-                    inactive_alpha=SUBTITLE_INACTIVE_ALPHA / 255,
-                    prebuilt_shadow=shadow,
-                )
-            )
-
-        all_render_jobs = []
-        for cue, locked_layout, candidate_indexes in cue_layouts:
-            for active_index in candidate_indexes:
-                all_render_jobs.append((cue, locked_layout, candidate_indexes, active_index))
-
-        layout_shadows: dict[int, object] = {}
-        for _, locked_layout, _ in cue_layouts:
-            lid = id(locked_layout)
-            if lid not in layout_shadows:
-                layout_shadows[lid] = _render_shadow_for_layout(locked_layout)
-
-        render_tasks = [(layout, resolved_style, idx, layout_shadows[id(layout)]) for (_, layout, _, idx) in all_render_jobs]
-        with ThreadPoolExecutor(max_workers=min(8, len(render_tasks) or 1)) as executor:
-            results = list(executor.map(_render_state, render_tasks))
-
-        job_index = 0
-        cue_rendered_states = []
-        for cue, locked_layout, candidate_indexes in cue_layouts:
-            rendered_states = {}
-            for active_index in candidate_indexes:
-                _, frame = results[job_index]
-                rendered_states[active_index] = frame
-                job_index += 1
-            cue_rendered_states.append(rendered_states)
+            cue_layouts.append((cue, locked_layout, candidate_indexes, _render_shadow_for_layout(locked_layout)))
 
         # --- Build subtitle video clips with smooth crossfade ---
         subtitle_layers = []
-        for cue_idx, (cue, locked_layout, candidate_indexes) in enumerate(cue_layouts):
-            rendered_states = cue_rendered_states[cue_idx]
+        for cue, locked_layout, candidate_indexes, shadow in cue_layouts:
+            rendered_states: dict[int, np.ndarray] = {}
             word_boundaries = _build_word_boundaries(cue)
 
             cue_start = float(cue["start"])
             cue_end = float(cue["end"])
             cue_duration = _safe_duration(cue_end - cue_start)
 
-            def cue_frame_provider(local_t, *, current_cue=cue, states=rendered_states, duration=cue_duration, boundaries=word_boundaries):
+            def _get_rendered_state(active_index, *, layout=locked_layout, states=rendered_states, prebuilt_shadow=shadow):
+                resolved_index = active_index if active_index in candidate_indexes else -1
+                if resolved_index not in states:
+                    states[resolved_index] = np.array(
+                        _render_locked_text_image(
+                            layout,
+                            resolved_style,
+                            highlight_index=resolved_index,
+                            inactive_alpha=SUBTITLE_INACTIVE_ALPHA / 255,
+                            prebuilt_shadow=prebuilt_shadow,
+                        )
+                    )
+                return states[resolved_index]
+
+            def cue_frame_provider(local_t, *, current_cue=cue, duration=cue_duration, boundaries=word_boundaries):
                 timestamp = min(max(float(local_t), 0.0), max(0.0, duration - 1e-6))
                 idx_a, idx_b, blend = _resolve_highlight_blend(current_cue, timestamp, HIGHLIGHT_TRANSITION_DURATION, boundaries)
-                frame_a = states.get(idx_a, states.get(-1))
+                frame_a = _get_rendered_state(idx_a)
                 if blend <= 0.01 or idx_a == idx_b:
                     return frame_a
-                frame_b = states.get(idx_b, states.get(-1))
+                frame_b = _get_rendered_state(idx_b)
                 return _blend_frames(frame_a, frame_b, blend)
 
             subtitle_clip = _create_rgba_video_clip(

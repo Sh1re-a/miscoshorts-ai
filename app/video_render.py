@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from moviepy import VideoFileClip
@@ -33,7 +34,7 @@ def write_high_quality_video(
     audio_path: Path | None = None,
     render_settings: dict[str, str] | None = None,
     render_threads: int | None = None,
-) -> None:
+) -> dict[str, int | float | bool]:
     """Write a finished clip to disk with an FFmpeg-safe two-pass audio path."""
     fps = get_render_fps(clip)
     keyint = str(fps * 1)
@@ -62,10 +63,14 @@ def write_high_quality_video(
         "-sws_flags", "lanczos+accurate_rnd+full_chroma_int",
         "-x264-params", settings.get("x264_params", DEFAULT_RENDER_SETTINGS["x264_params"]),
     ]
+    metrics: dict[str, int | float | bool] = {
+        "usedExternalAudioMux": bool(audio_path is not None and Path(audio_path).exists()),
+    }
 
     if audio_path is not None and Path(audio_path).exists():
         video_only_path = output_path.with_suffix(".videoonly.mp4")
         try:
+            encode_started_at = time.time()
             clip.write_videofile(
                 str(video_only_path),
                 codec="libx264",
@@ -76,7 +81,11 @@ def write_high_quality_video(
                 ffmpeg_params=base_ffmpeg_params,
                 logger=None,
             )
+            metrics["videoEncodeSeconds"] = round(time.time() - encode_started_at, 2)
+            if video_only_path.exists():
+                metrics["videoOnlyBytes"] = video_only_path.stat().st_size
             ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+            mux_started_at = time.time()
             mux_proc = subprocess.run(
                 [
                     ffmpeg_bin, "-y",
@@ -100,10 +109,12 @@ def write_high_quality_video(
                 raise RuntimeError(
                     f"FFmpeg audio mux failed (rc={mux_proc.returncode}): {mux_proc.stderr[:500]}"
                 )
+            metrics["audioMuxSeconds"] = round(time.time() - mux_started_at, 2)
         finally:
             if video_only_path.exists():
                 video_only_path.unlink(missing_ok=True)
     else:
+        encode_started_at = time.time()
         clip.write_videofile(
             str(output_path),
             codec="libx264",
@@ -115,6 +126,11 @@ def write_high_quality_video(
             ffmpeg_params=base_ffmpeg_params,
             logger=None,
         )
+        metrics["videoEncodeSeconds"] = round(time.time() - encode_started_at, 2)
+
+    if output_path.exists():
+        metrics["outputBytes"] = output_path.stat().st_size
+    return metrics
 
 
 def extract_audio_segment(

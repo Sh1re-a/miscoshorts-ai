@@ -164,7 +164,7 @@ from app.source_pipeline import (
     select_clip_candidates,
     validate_clip_candidates,
 )
-from app.storage import prune_runtime_storage
+from app.storage import path_size, prune_runtime_storage
 from app.transcription import (
     analyze_audio_speakers,
     speaker_analysis_backend_label,
@@ -2047,6 +2047,11 @@ def _render_selected_clips(
         end = clip_data["end"]
         current_filename = build_clip_filename(output_filename, index, len(clip_candidates))
         temp_output_path = workspace.clips_dir / current_filename
+        clip_metrics: dict[str, int | float | bool] = {
+            "sourceStartSeconds": start,
+            "sourceEndSeconds": end,
+            "durationSeconds": round(max(0.0, end - start), 2),
+        }
         clip_source = None
         clip = None
         clip_vertical = None
@@ -2057,19 +2062,28 @@ def _render_selected_clips(
 
         try:
             _emit(progress_callback, "rendering", f"Rendering clip {index} of {len(clip_candidates)} with a fresh source handle to reduce memory pressure...")
+            clip_started_at = time.time()
             clip_source = VideoFileClip(str(video_path))
             clip = clip_source.subclipped(start, end)
 
             if clip.audio is not None:
+                audio_started_at = time.time()
                 audio_temp_path = extract_audio_segment(video_path, start, end, workspace.audio_dir)
+                clip_metrics["audioExtractSeconds"] = round(time.time() - audio_started_at, 2)
 
             _emit(progress_callback, "rendering", f"Preparing subtitle timing for clip {index}...")
+            transcript_started_at = time.time()
             clip_transcript, requires_precise_fallback = extract_clip_transcript_from_segments(transcript_segments, start, end)
             if requires_precise_fallback:
                 _emit(progress_callback, "rendering", f"Refining subtitle timing for clip {index} from the pre-extracted audio track...")
+                fallback_started_at = time.time()
                 clip_transcript = transcribe_audio_path_for_subtitles(audio_temp_path)
+                clip_metrics["subtitleFallbackSeconds"] = round(time.time() - fallback_started_at, 2)
+            clip_metrics["subtitlePrepSeconds"] = round(time.time() - transcript_started_at, 2)
 
+            speaker_started_at = time.time()
             audio_speaker_meta = analyze_audio_speakers(audio_temp_path, clip_transcript)
+            clip_metrics["speakerAnalysisSeconds"] = round(time.time() - speaker_started_at, 2)
             _emit(
                 progress_callback,
                 "rendering",
@@ -2078,11 +2092,14 @@ def _render_selected_clips(
             )
 
             _emit(progress_callback, "rendering", f"Analysing visual content for clip {index}...")
+            layout_started_at = time.time()
             clip_vertical, content_type, clip_analytics = build_vertical_master_clip(clip, audio_speaker_meta=audio_speaker_meta)
+            clip_metrics["layoutBuildSeconds"] = round(time.time() - layout_started_at, 2)
             clip_analytics.update(audio_speaker_meta)
             ct_label = _CONTENT_LABELS.get(content_type, content_type)
             _emit(progress_callback, "rendering", f"Clip {index} detected as {ct_label} — composing vertical frame...")
 
+            subtitle_started_at = time.time()
             subtitle_plan = subtitles.build_subtitle_plan(
                 clip_transcript.get("segments") or [],
                 0,
@@ -2114,12 +2131,25 @@ def _render_selected_clips(
                 clip_title=clip_data.get("title"),
                 clip_reason=clip_data.get("reason"),
             )
-            write_high_quality_video(
+            clip_metrics["subtitleComposeSeconds"] = round(time.time() - subtitle_started_at, 2)
+            encode_metrics = write_high_quality_video(
                 clip_final,
                 temp_output_path,
                 audio_path=audio_temp_path,
                 render_settings=render_settings,
                 render_threads=RENDER_THREADS,
+            )
+            clip_metrics.update(encode_metrics)
+            clip_metrics["totalClipSeconds"] = round(time.time() - clip_started_at, 2)
+            output_bytes = int(clip_metrics.get("outputBytes") or 0)
+            _emit(
+                progress_callback,
+                "rendering",
+                f"Clip {index} profile: layout {clip_metrics.get('layoutBuildSeconds', 0)}s, "
+                f"subtitles {clip_metrics.get('subtitleComposeSeconds', 0)}s, "
+                f"encode {clip_metrics.get('videoEncodeSeconds', 0)}s, "
+                f"mux {clip_metrics.get('audioMuxSeconds', 0)}s, "
+                f"output {round(output_bytes / (1024 * 1024), 1)} MB.",
             )
 
             clips_output.append(
@@ -2136,6 +2166,7 @@ def _render_selected_clips(
                     "subtitlePreflightFilename": subtitle_preflight_path.name if subtitle_preflight_path else None,
                     "subtitleCueCount": len(subtitle_plan),
                     "subtitlePreflightWarnings": len(subtitle_preflight.get("warnings") or []),
+                    "renderMetrics": clip_metrics,
                 }
             )
         finally:
@@ -2287,6 +2318,7 @@ def create_short_from_url(
             )
             phase_metrics["renderSeconds"] = round(time.time() - started_at, 2)
             phase_metrics["renderedClipCount"] = len(temp_clips_output)
+            phase_metrics["workspaceBytesBeforePromotion"] = path_size(workspace.workspace_dir)
             del transcript_segments
             gc.collect()
 
@@ -2299,6 +2331,16 @@ def create_short_from_url(
             now = time.time()
             phase_metrics["totalSeconds"] = round(now - total_started_at, 2)
             phase_metrics["promotedFromTemp"] = True
+            phase_metrics["finalOutputBytes"] = path_size(workspace.final_output_dir)
+            _emit(
+                progress_callback,
+                "completed",
+                f"Profile summary: download {phase_metrics.get('downloadSeconds', 0)}s, "
+                f"transcription {phase_metrics.get('transcriptionSeconds', 0)}s, "
+                f"analysis {phase_metrics.get('analysisSeconds', 0)}s, "
+                f"render {phase_metrics.get('renderSeconds', 0)}s, "
+                f"final size {round(int(phase_metrics.get('finalOutputBytes', 0)) / (1024 * 1024), 1)} MB.",
+            )
             result_payload = {
                 "jobId": job_id,
                 "jobFingerprint": pipeline_fingerprint,
