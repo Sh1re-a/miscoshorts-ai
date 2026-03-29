@@ -122,6 +122,11 @@ export type JobPayload = {
   etaSeconds?: number | null
   createdAt?: number
   updatedAt?: number
+  jobFingerprint?: string
+  queueState?: 'queued' | 'waiting_for_worker' | 'waiting_for_identical_render' | 'running' | 'completed' | 'failed'
+  waitingOnJobId?: string | null
+  waitingOnFingerprint?: string | null
+  runtimeSessionId?: string
 }
 
 export type BootstrapPayload = {
@@ -129,12 +134,17 @@ export type BootstrapPayload = {
   frontendBuilt: boolean
   defaultRenderProfile: string
   renderProfiles: Record<string, string>
+  runtimeSessionId: string
+  serverStartedAt: number
   speakerDiarizationMode: string
   hasPyannoteToken: boolean
   doctorStatus: string
   runtime: Record<string, string>
   logPath: string
   doctorReportPath?: string
+  queue?: RuntimeQueueSnapshot
+  recovery?: RuntimeRecoveryPayload
+  consistency?: RuntimeConsistencyPayload
 }
 
 export type ProcessErrorPayload = {
@@ -149,6 +159,10 @@ export type ProcessErrorPayload = {
   clipCount?: number
   queuePosition?: number
   renderProfile?: string
+  jobFingerprint?: string
+  queueState?: JobPayload['queueState']
+  waitingOnJobId?: string | null
+  runtimeSessionId?: string
 }
 
 export type DoctorCheck = {
@@ -171,4 +185,56 @@ export type DoctorReport = {
     configuredValue: string
     cacheSizeBytes: number
   }
+}
+
+export type RuntimeConsistencyPayload = {
+  status: 'ok' | 'degraded'
+  issues: string[]
+}
+
+export type RuntimeJobSummary = JobPayload & {
+  jobId: string
+}
+
+export type RuntimeLockPayload = {
+  path: string
+  fingerprint: string
+  jobId?: string | null
+  pid?: number | null
+  createdAt?: number | null
+  ageSeconds: number
+  alive: boolean
+  payloadValid: boolean
+  reason?: string
+}
+
+export type RuntimeRecoveryPayload = {
+  recoveredAt?: number
+  recoveredJobIds?: string[]
+  clearedLocks?: RuntimeLockPayload[]
+  activeLocks?: RuntimeLockPayload[]
+  clearedTempWorkspacePaths?: string[]
+}
+
+export type RuntimeQueueSnapshot = {
+  activeCount: number
+  queuedCount: number
+  waitingForWorkerCount: number
+  waitingForIdenticalRenderCount: number
+  activeJobs: RuntimeJobSummary[]
+  queuedJobs: RuntimeJobSummary[]
+}
+
+export type RuntimePayload = {
+  runtimeSessionId: string
+  serverPid: number
+  serverStartedAt: number
+  backendSignature: string
+  logPath: string
+  runtime: Record<string, string>
+  queue: RuntimeQueueSnapshot
+  locks: RuntimeLockPayload[]
+  recovery: RuntimeRecoveryPayload
+  recentJobs: RuntimeJobSummary[]
+  consistency: RuntimeConsistencyPayload
 }

@@ -9,7 +9,7 @@ import { Input } from './components/ui/input'
 import { Label } from './components/ui/label'
 import { Progress } from './components/ui/progress'
 import { feedbackTags, progressByStatus, stageDescriptions, statusTitles } from './features/jobs/config'
-import type { AnalyticsInsights, BootstrapPayload, ClipFeedback, DoctorReport, JobPayload, JobStatus, ProcessErrorPayload } from './features/jobs/types'
+import type { AnalyticsInsights, BootstrapPayload, ClipFeedback, DoctorReport, JobPayload, JobStatus, ProcessErrorPayload, RuntimePayload } from './features/jobs/types'
 import { apiKeyStorageKey, formatBytes, formatEta, formatLogTime, getEtaWindow, loadSavedApiKey, readJsonResponse } from './features/jobs/utils'
 
 const fallbackRenderProfile = 'studio'
@@ -40,6 +40,8 @@ function App() {
   const [showAnalytics, setShowAnalytics] = useState(false)
   const [selectedClipCount, setSelectedClipCount] = useState(3)
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null)
+  const [runtimeState, setRuntimeState] = useState<RuntimePayload | null>(null)
+  const [knownRuntimeSessionId, setKnownRuntimeSessionId] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -58,6 +60,7 @@ function App() {
           setSelectedRenderProfile(payload.defaultRenderProfile || fallbackRenderProfile)
           setSpeakerMode(payload.speakerDiarizationMode ?? 'auto')
           setHasPyannoteToken(Boolean(payload.hasPyannoteToken))
+          setKnownRuntimeSessionId(payload.runtimeSessionId)
         }
       } catch {
         // Keep the app usable even if the bootstrap request fails.
@@ -87,19 +90,73 @@ function App() {
     }
   }, [])
 
+  const loadRuntimeSnapshot = useEffectEvent(async () => {
+    try {
+      const response = await fetch('/api/runtime')
+      if (!response.ok) {
+        return
+      }
+
+      const payload = await readJsonResponse<RuntimePayload>(response)
+      setRuntimeState(payload)
+      setKnownRuntimeSessionId(payload.runtimeSessionId)
+    } catch {
+      // Keep rendering usable even if live runtime telemetry is temporarily unavailable.
+    }
+  })
+
+  useEffect(() => {
+    void loadRuntimeSnapshot()
+
+    const intervalId = window.setInterval(() => {
+      void loadRuntimeSnapshot()
+    }, 2000)
+
+    return () => window.clearInterval(intervalId)
+  }, [loadRuntimeSnapshot])
+
   const pollJob = useEffectEvent(async () => {
     if (!jobId) {
       return
     }
 
-    const response = await fetch(`/api/jobs/${jobId}`)
-    const payload = await readJsonResponse<JobPayload>(response)
+    try {
+      const response = await fetch(`/api/jobs/${jobId}`)
+      const payload = await readJsonResponse<JobPayload>(response)
 
-    if (!response.ok) {
-      throw new Error(payload.error ?? 'Could not load job status.')
+      if (response.status === 404) {
+        const latestRuntimeSessionId = runtimeState?.runtimeSessionId ?? knownRuntimeSessionId
+        const runtimeChanged = Boolean(job.runtimeSessionId && latestRuntimeSessionId && job.runtimeSessionId !== latestRuntimeSessionId)
+        setJob({
+          status: 'failed',
+          error: runtimeChanged
+            ? 'The local backend restarted and cleared the old live queue state.'
+            : payload.error ?? 'This job is no longer present in the local backend.',
+          errorHelp: 'Start the render again from this page. The backend queue state is now the source of truth.',
+          runtimeSessionId: latestRuntimeSessionId ?? job.runtimeSessionId,
+        })
+        setJobId(null)
+        return
+      }
+
+      if (!response.ok) {
+        throw new Error(payload.error ?? 'Could not load job status.')
+      }
+
+      setJob(payload)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not refresh the live job status.'
+      setJob((previous) =>
+        previous.status === 'completed'
+          ? previous
+          : {
+              ...previous,
+              status: 'failed',
+              error: message,
+              errorHelp: 'The app lost contact with the backend queue state. Check the runtime status below, then start the render again if needed.',
+            },
+      )
     }
-
-    setJob(payload)
   })
 
   useEffect(() => {
@@ -168,6 +225,15 @@ function App() {
     () => doctorReport?.storage ? Object.entries(doctorReport.storage).slice(0, 4) : [],
     [doctorReport],
   )
+  const runtimeIssues = runtimeState?.consistency.issues ?? []
+  const runtimeRecoverySummary = useMemo(() => {
+    if (!runtimeState?.recovery) return null
+    const recoveredJobs = runtimeState.recovery.recoveredJobIds?.length ?? 0
+    const clearedLocks = runtimeState.recovery.clearedLocks?.length ?? 0
+    const clearedTempWorkspaces = runtimeState.recovery.clearedTempWorkspacePaths?.length ?? 0
+    if (!recoveredJobs && !clearedLocks && !clearedTempWorkspaces) return null
+    return { recoveredJobs, clearedLocks, clearedTempWorkspaces }
+  }, [runtimeState])
 
   function resetFlow() {
     setJobId(null)
@@ -294,8 +360,14 @@ function App() {
         status: payload.status ?? 'queued',
         queuePosition: payload.queuePosition ?? 0,
         renderProfile: payload.renderProfile ?? selectedRenderProfile,
+        jobFingerprint: payload.jobFingerprint,
+        queueState: payload.queueState,
+        waitingOnJobId: payload.waitingOnJobId,
+        runtimeSessionId: payload.runtimeSessionId,
         message:
-          (payload.queuePosition ?? 0) > 0
+          payload.queueState === 'waiting_for_identical_render'
+            ? `This request is waiting for the identical live render${payload.waitingOnJobId ? ` (${payload.waitingOnJobId})` : ''} so the backend can safely reuse the finished output.`
+            : (payload.queuePosition ?? 0) > 0
             ? `The job is in queue position ${payload.queuePosition} and will render ${payload.clipCount ?? selectedClipCount} clip(s).`
             : `The job is running locally and will render ${payload.clipCount ?? selectedClipCount} clip(s).`,
       })
@@ -427,6 +499,37 @@ function App() {
                   </div>
                 ) : null}
 
+                {runtimeState ? (
+                  <div className={`rounded-[24px] border px-4 py-4 text-sm leading-6 ${
+                    runtimeState.consistency.status === 'degraded'
+                      ? 'border-rose-200 bg-rose-50 text-rose-900'
+                      : 'border-sky-100 bg-sky-50/80 text-slate-700'
+                  }`}>
+                    <p className="font-semibold">
+                      Backend runtime: {runtimeState.consistency.status === 'degraded' ? 'Needs attention' : 'Consistent'}
+                    </p>
+                    <p className="mt-1">Session: {runtimeState.runtimeSessionId}</p>
+                    <p className="mt-1">Active jobs: {runtimeState.queue.activeCount}. Queued jobs: {runtimeState.queue.queuedCount}.</p>
+                    <p className="mt-1">
+                      Waiting for worker: {runtimeState.queue.waitingForWorkerCount}. Waiting on identical render: {runtimeState.queue.waitingForIdenticalRenderCount}.
+                    </p>
+                    {runtimeRecoverySummary ? (
+                      <p className="mt-2 text-xs">
+                        Startup recovery cleared {runtimeRecoverySummary.clearedLocks} orphan lock(s), {runtimeRecoverySummary.clearedTempWorkspaces} stale temp workspace(s), and marked {runtimeRecoverySummary.recoveredJobs} interrupted job(s) as failed.
+                      </p>
+                    ) : null}
+                    {runtimeIssues.length > 0 ? (
+                      <div className="mt-2 space-y-1 text-xs">
+                        {runtimeIssues.map((issue) => (
+                          <p key={issue}>{issue}</p>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="mt-2 text-xs">The queue snapshot and live lock state currently agree.</p>
+                    )}
+                  </div>
+                ) : null}
+
                 <div className="space-y-2">
                   <Label>Number of clips</Label>
                   <div className="flex gap-2">
@@ -529,6 +632,12 @@ function App() {
                   </div>
                 ) : null}
 
+                {job.status === 'queued' && job.queueState === 'waiting_for_identical_render' ? (
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+                    Waiting on identical render{job.waitingOnJobId ? `: ${job.waitingOnJobId}` : ''}. No duplicate render will start unless the existing one fully clears.
+                  </div>
+                ) : null}
+
                 <div className="grid gap-3 sm:grid-cols-2">
                   {Object.entries(statusTitles)
                     .filter(([status]) => status !== 'idle' && status !== 'failed')
@@ -551,6 +660,8 @@ function App() {
                   <p className="font-semibold text-slate-900">What happens now</p>
                   <p className="mt-2">{stageDescriptions[job.status]}</p>
                   <p className="mt-3 text-slate-500">Requested clips: {effectiveClipCount}. Output profile: {job.result?.renderProfile ?? currentRenderProfileLabel}. Finished files are saved locally in the outputs folder and will appear below when ready.</p>
+                  {job.jobFingerprint ? <p className="mt-2 text-slate-500">Request fingerprint: {job.jobFingerprint}</p> : null}
+                  {job.runtimeSessionId ? <p className="mt-2 text-slate-500">Backend session: {job.runtimeSessionId}</p> : null}
                   {job.result?.reusedExisting ? <p className="mt-2 text-emerald-700">This run reused an existing finished render instead of generating duplicate files again.</p> : null}
                   {job.result?.runReportPath ? <p className="mt-2 text-slate-500">Run report: {job.result.runReportPath}</p> : null}
                   {doctorReport ? <p className="mt-2 text-slate-500">Support log: {doctorReport.logPath}</p> : null}

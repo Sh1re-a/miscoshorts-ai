@@ -25,7 +25,7 @@ export const progressByStatus: Record<JobStatus, number> = {
 
 export const statusTitles: Record<JobStatus, string> = {
   idle: 'Ready to start',
-  queued: 'Queued in local backend',
+  queued: 'Waiting in the local queue',
   validating: 'Validating subtitle compatibility',
   downloading: 'Downloading source video',
   transcribing: 'Transcribing audio',
@@ -37,7 +37,7 @@ export const statusTitles: Record<JobStatus, string> = {
 
 export const stageDescriptions: Record<JobStatus, string> = {
   idle: 'Paste a YouTube link, add your Gemini key, and start the default Shorts render flow.',
-  queued: 'Your request reached the local app and is waiting to begin.',
+  queued: 'The backend accepted the request and is waiting either for a worker slot or for an identical active render to finish first.',
   validating: 'Checking subtitle rendering compatibility and local requirements before the heavy work starts.',
   downloading: 'Downloading the source video and preparing local files.',
   transcribing: 'Whisper is transcribing the video. This is usually the longest step.',
