@@ -75,6 +75,8 @@ export type JobResult = {
   generatedAt?: number
   lastUsedAt?: number
   reusedExisting?: boolean
+  sourceMediaPresent?: boolean
+  sourceMediaDeletedAt?: number
   metrics?: Record<string, unknown>
   runReportPath?: string
   runSummary?: RunSummary
@@ -237,4 +239,68 @@ export type RuntimePayload = {
   recovery: RuntimeRecoveryPayload
   recentJobs: RuntimeJobSummary[]
   consistency: RuntimeConsistencyPayload
+}
+
+export type StorageBucketSummary = {
+  path: string
+  bytes: number
+  sourceMediaBytes?: number
+  sourceMediaFiles?: number
+  transcriptBytes?: number
+  transcriptFiles?: number
+  clipAnalysisBytes?: number
+  clipAnalysisFiles?: number
+  otherBytes?: number
+}
+
+export type StorageManageableJob = {
+  jobId: string
+  status: 'completed' | 'failed'
+  updatedAt?: number
+  videoUrl?: string | null
+  jobFingerprint?: string | null
+  outputDir?: string | null
+  outputExists: boolean
+  sharedOutputRefs: number
+  canDeleteJob: boolean
+  canDeleteSourceMedia: boolean
+  canDeleteStateOnly: boolean
+  storage: {
+    clipsBytes: number
+    sourceMediaBytes: number
+    diagnosticsBytes: number
+    metadataBytes: number
+    outputBytes: number
+    sourceCacheBytes: number
+  }
+}
+
+export type StorageReportPayload = {
+  summary: Record<string, StorageBucketSummary>
+  jobStateCounts: {
+    active: number
+    queued: number
+    completed: number
+    failed: number
+  }
+  manageableJobs: StorageManageableJob[]
+  recommendations: {
+    canPruneTemp: boolean
+    canPruneCache: boolean
+    canCleanFinishedJobs: boolean
+    canDeleteJobSourceMedia: boolean
+  }
+}
+
+export type StorageActionResponse = {
+  storage: StorageReportPayload
+  jobId?: string
+  mode?: string
+  removedItems?: number
+  removedBytes?: number
+  failedJobs?: {
+    removedItems: number
+    removedBytes: number
+    removedJobIds: string[]
+  }
 }
