@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -38,6 +39,22 @@ DOWNLOAD_FORMAT_SORT = [
 GEMINI_FIELD_PATTERN = re.compile(r"^(TITLE|START|END|REASON)\s*:\s*(.+?)\s*$", re.IGNORECASE)
 GEMINI_CLIP_PATTERN = re.compile(r"^CLIP\s+\d+\s*:?\s*$", re.IGNORECASE)
 MIN_CLIP_SECONDS = 20.0
+YTDLP_CONCURRENT_FRAGMENT_DOWNLOADS = max(1, int(os.getenv("YTDLP_CONCURRENT_FRAGMENT_DOWNLOADS", "1")))
+YTDLP_SOCKET_TIMEOUT_SECONDS = max(10, int(os.getenv("YTDLP_SOCKET_TIMEOUT_SECONDS", "30")))
+YTDLP_RETRY_ATTEMPTS = max(1, int(os.getenv("YTDLP_RETRY_ATTEMPTS", "3")))
+YTDLP_PROGRESSIVE_FALLBACK_FORMAT = os.getenv(
+    "YTDLP_PROGRESSIVE_FALLBACK_FORMAT",
+    f"best[ext=mp4][height<={YTDLP_MAX_HEIGHT}]/best[height<={YTDLP_MAX_HEIGHT}]/best",
+)
+_TRANSIENT_DOWNLOAD_ERROR_MARKERS = (
+    "can't assign requested address",
+    "failed to establish a new connection",
+    "connection reset by peer",
+    "temporary failure in name resolution",
+    "timed out",
+    "network is unreachable",
+    "connection aborted",
+)
 
 
 def _emit(progress_callback: ProgressCallback | None, stage: str, message: str) -> None:
@@ -105,6 +122,35 @@ def _format_download_quality_label(download_info: dict) -> str:
     return f"Source download complete: {' / '.join(parts)}."
 
 
+def _is_transient_download_error(error: Exception) -> bool:
+    lowered = str(error).lower()
+    return any(marker in lowered for marker in _TRANSIENT_DOWNLOAD_ERROR_MARKERS)
+
+
+def _retry_sleep_seconds(attempt: int) -> float:
+    return min(8.0, float(2 ** max(0, attempt - 1)))
+
+
+def _download_attempt_profiles() -> list[dict]:
+    return [
+        {
+            "label": "primary",
+            "format": DOWNLOAD_FORMAT,
+            "source_address": None,
+        },
+        {
+            "label": "ipv4-fallback",
+            "format": DOWNLOAD_FORMAT,
+            "source_address": "0.0.0.0",
+        },
+        {
+            "label": "progressive-fallback",
+            "format": YTDLP_PROGRESSIVE_FALLBACK_FORMAT,
+            "source_address": "0.0.0.0",
+        },
+    ]
+
+
 def download_video(url: str, destination_base: Path, progress_callback: ProgressCallback | None = None) -> tuple[Path, dict]:
     last_reported: dict[str, int] = {"pct": -1}
 
@@ -131,26 +177,79 @@ def download_video(url: str, destination_base: Path, progress_callback: Progress
             last_reported["pct"] = 0
             _emit(progress_callback, "downloading", "SOURCE | Downloading video... (size unknown)")
 
-    ydl_opts = {
-        "format": DOWNLOAD_FORMAT,
-        "format_sort": DOWNLOAD_FORMAT_SORT,
-        "outtmpl": str(destination_base.with_suffix(".%(ext)s")),
-        "merge_output_format": "mp4",
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "check_formats": True,
-        "concurrent_fragment_downloads": 4,
-        "retries": 10,
-        "fragment_retries": 10,
-        "file_access_retries": 3,
-        "progress_hooks": [_ydl_progress],
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-    download_info = _summarize_download_info(info)
-    _emit(progress_callback, "downloading", f"SOURCE | {_format_download_quality_label(download_info)}")
-    return _resolve_downloaded_video_path(destination_base), download_info
+    attempt_profiles = _download_attempt_profiles()
+    last_error: Exception | None = None
+
+    for attempt_index, profile in enumerate(attempt_profiles, start=1):
+        if attempt_index > YTDLP_RETRY_ATTEMPTS:
+            break
+
+        last_reported["pct"] = -1
+        source_address = profile["source_address"]
+        ydl_opts = {
+            "format": profile["format"],
+            "format_sort": DOWNLOAD_FORMAT_SORT,
+            "outtmpl": str(destination_base.with_suffix(".%(ext)s")),
+            "merge_output_format": "mp4",
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+            "check_formats": False,
+            "concurrent_fragment_downloads": YTDLP_CONCURRENT_FRAGMENT_DOWNLOADS,
+            "retries": 3,
+            "fragment_retries": 3,
+            "file_access_retries": 3,
+            "socket_timeout": YTDLP_SOCKET_TIMEOUT_SECONDS,
+            "progress_hooks": [_ydl_progress],
+        }
+        if source_address:
+            ydl_opts["source_address"] = source_address
+
+        try:
+            logger.info(
+                "Starting yt-dlp download attempt %s/%s (profile=%s, source_address=%s, concurrent_fragments=%s)",
+                attempt_index,
+                min(YTDLP_RETRY_ATTEMPTS, len(attempt_profiles)),
+                profile["label"],
+                source_address or "default",
+                YTDLP_CONCURRENT_FRAGMENT_DOWNLOADS,
+            )
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+            download_info = _summarize_download_info(info)
+            _emit(progress_callback, "downloading", f"SOURCE | {_format_download_quality_label(download_info)}")
+            return _resolve_downloaded_video_path(destination_base), download_info
+        except Exception as error:
+            last_error = error
+            if not _is_transient_download_error(error):
+                logger.exception("yt-dlp download failed with a non-transient error on attempt %s", attempt_index)
+                raise
+
+            if attempt_index >= min(YTDLP_RETRY_ATTEMPTS, len(attempt_profiles)):
+                logger.exception("yt-dlp download exhausted all transient-network recovery attempts")
+                break
+
+            sleep_seconds = _retry_sleep_seconds(attempt_index)
+            _emit(
+                progress_callback,
+                "downloading",
+                "SOURCE | Download connection failed locally. Retrying with a safer network profile...",
+            )
+            logger.warning(
+                "Transient yt-dlp download failure on attempt %s/%s (profile=%s): %s. Retrying in %.1fs",
+                attempt_index,
+                min(YTDLP_RETRY_ATTEMPTS, len(attempt_profiles)),
+                profile["label"],
+                error,
+                sleep_seconds,
+            )
+            for partial_path in destination_base.parent.glob(f"{destination_base.name}.*"):
+                partial_path.unlink(missing_ok=True)
+            time.sleep(sleep_seconds)
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("The source video download did not start.")
 
 
 def resolve_source_video(video_url: str, destination_base: Path, progress_callback: ProgressCallback | None = None) -> tuple[Path, dict, bool, bool]:

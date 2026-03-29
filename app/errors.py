@@ -86,6 +86,12 @@ def explain_exception(error: Exception) -> FriendlyError:
             summary="The source video could not be downloaded successfully.",
             hint="Check that the YouTube video is available, public, and not blocked in your region, then try again.",
         )
+    if "can't assign requested address" in lowered or "failed to establish a new connection" in lowered:
+        return FriendlyError(
+            category="download_network",
+            summary="The local app could not keep a stable network connection to YouTube during the source download.",
+            hint="Retry once. If it keeps happening, restart the app to clear old network state and check VPN/proxy/firewall settings. The app now retries with safer download settings automatically before it gives up.",
+        )
     if "frontend build finished without creating" in lowered or "frontend not built" in lowered:
         return FriendlyError(
             category="frontend",
