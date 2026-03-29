@@ -1576,9 +1576,7 @@ def _resolve_active_index_for_time(cue, local_time):
         if word_start <= timestamp < word_end:
             return word_index
 
-    if timestamp < float(word_entries[0]["start"]):
-        return 0
-    return len(word_entries) - 1
+    return -1
 
 
 def _position_subtitle_clip(clip, video_clip):
@@ -1753,13 +1751,20 @@ def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_sty
                     )
                 return states[resolved_index]
 
-            def cue_frame_provider(local_t, *, current_cue=cue, duration=cue_duration, boundaries=word_boundaries):
+            def cue_frame_provider(
+                local_t,
+                *,
+                current_cue=cue,
+                duration=cue_duration,
+                boundaries=word_boundaries,
+                render_state_getter=_get_rendered_state,
+            ):
                 timestamp = min(max(float(local_t), 0.0), max(0.0, duration - 1e-6))
                 idx_a, idx_b, blend = _resolve_highlight_blend(current_cue, timestamp, HIGHLIGHT_TRANSITION_DURATION, boundaries)
-                frame_a = _get_rendered_state(idx_a)
+                frame_a = render_state_getter(idx_a)
                 if blend <= 0.01 or idx_a == idx_b:
                     return frame_a
-                frame_b = _get_rendered_state(idx_b)
+                frame_b = render_state_getter(idx_b)
                 return _blend_frames(frame_a, frame_b, blend)
 
             subtitle_clip = _create_rgba_video_clip(
