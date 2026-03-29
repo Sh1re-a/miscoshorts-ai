@@ -157,6 +157,16 @@ py -m app.storage --prune --dry-run
 py -m app.storage --prune
 ```
 
+Dashboard cleanup behavior:
+
+- `Delete source media` removes the saved downloaded source from a finished job folder but keeps generated clips and metadata
+- `Delete saved job` removes the finished job folder and saved job metadata when no other saved job points to the same output
+- `Prune temp files` removes stale temporary workspaces only
+- `Prune source cache` removes reusable downloaded/transcript cache files based on the existing retention rules
+- `Remove failed job records` clears failed saved job metadata that is no longer needed
+
+The dashboard blocks cleanup for active or queued jobs and refuses to delete finished outputs that are still shared by another saved job.
+
 If you are sending this to another person, send the full project folder, not only the launcher file.
 
 ## Thanks
