@@ -103,22 +103,34 @@ def _prune_children(root: Path, *, max_age_seconds: float, dry_run: bool, last_u
     return {"removedItems": removed_items, "removedBytes": removed_bytes}
 
 
-def prune_runtime_storage(*, dry_run: bool = False) -> dict:
-    temp_stats = _prune_children(
-        OUTPUT_TEMP_DIR,
-        max_age_seconds=TEMP_RETENTION_HOURS * 3600,
-        dry_run=dry_run,
+def prune_runtime_storage(*, dry_run: bool = False, prune_temp: bool = True, prune_cache: bool = True, prune_jobs: bool = True) -> dict:
+    temp_stats = (
+        _prune_children(
+            OUTPUT_TEMP_DIR,
+            max_age_seconds=TEMP_RETENTION_HOURS * 3600,
+            dry_run=dry_run,
+        )
+        if prune_temp
+        else {"removedItems": 0, "removedBytes": 0}
     )
-    cache_stats = _prune_children(
-        OUTPUT_CACHE_DIR,
-        max_age_seconds=CACHE_RETENTION_DAYS * 86400,
-        dry_run=dry_run,
+    cache_stats = (
+        _prune_children(
+            OUTPUT_CACHE_DIR,
+            max_age_seconds=CACHE_RETENTION_DAYS * 86400,
+            dry_run=dry_run,
+        )
+        if prune_cache
+        else {"removedItems": 0, "removedBytes": 0}
     )
-    job_stats = _prune_children(
-        OUTPUT_JOBS_DIR,
-        max_age_seconds=JOB_OUTPUT_RETENTION_DAYS * 86400,
-        dry_run=dry_run,
-        last_used_reader=_result_last_used,
+    job_stats = (
+        _prune_children(
+            OUTPUT_JOBS_DIR,
+            max_age_seconds=JOB_OUTPUT_RETENTION_DAYS * 86400,
+            dry_run=dry_run,
+            last_used_reader=_result_last_used,
+        )
+        if prune_jobs
+        else {"removedItems": 0, "removedBytes": 0}
     )
     return {
         "dryRun": dry_run,

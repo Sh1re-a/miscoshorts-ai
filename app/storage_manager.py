@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from app.media_cache import cache_dir_for_url
-from app.paths import OUTPUT_CACHE_DIR, OUTPUT_JOBS_DIR
-from app.storage import path_size, storage_summary
+from app.paths import OUTPUT_CACHE_DIR, OUTPUTS_DIR
+from app.storage import atomic_write_json, path_size, prune_runtime_storage, storage_summary
 
 TERMINAL_JOB_STATUSES = {"completed", "failed"}
 ACTIVE_JOB_STATUSES = {"queued", "validating", "downloading", "transcribing", "analyzing", "rendering"}
+JOB_STATE_DIR = OUTPUTS_DIR / "_job_state"
 
 
 def _cache_breakdown() -> dict[str, int | str]:
@@ -161,3 +163,110 @@ def build_storage_report(jobs_by_id: dict[str, dict]) -> dict[str, object]:
             "canDeleteJobSourceMedia": any(job["canDeleteSourceMedia"] for job in manageable_jobs),
         },
     }
+
+
+def _job_state_path(job_id: str) -> Path:
+    return JOB_STATE_DIR / f"{job_id}.json"
+
+
+def _job_output_dir(job: dict) -> Path | None:
+    output_dir = str((job.get("result") or {}).get("outputDir") or "").strip()
+    return Path(output_dir) if output_dir else None
+
+
+def _remove_path(path: Path, *, dry_run: bool) -> dict[str, int]:
+    existed = path.exists()
+    removed_bytes = path_size(path)
+    if not dry_run:
+        if path.is_dir():
+            import shutil
+
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
+    return {"removedItems": 1 if existed else 0, "removedBytes": removed_bytes}
+
+
+def delete_job_storage(jobs_by_id: dict[str, dict], job_id: str, *, mode: str, dry_run: bool = False) -> dict[str, object]:
+    job = jobs_by_id.get(job_id)
+    if job is None:
+        raise ValueError("Job not found.")
+
+    status = str(job.get("status") or "")
+    if status in ACTIVE_JOB_STATUSES:
+        raise ValueError("Cannot delete storage for a job that is still queued or rendering.")
+    if status not in TERMINAL_JOB_STATUSES:
+        raise ValueError("Only completed or failed jobs can be cleaned up.")
+
+    output_dir_reference_counts = _output_dir_reference_counts(jobs_by_id)
+    output_dir = _job_output_dir(job)
+    result = job.get("result") or {}
+
+    if mode == "source_media":
+        if output_dir is None:
+            raise ValueError("This job has no finished output folder to clean.")
+        source_dir = output_dir / "source"
+        if not source_dir.exists():
+            return {"jobId": job_id, "mode": mode, "removedItems": 0, "removedBytes": 0}
+        stats = _remove_path(source_dir, dry_run=dry_run)
+        manifest_path = output_dir / "meta" / "result.json"
+        if not dry_run and manifest_path.exists():
+            try:
+                payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, dict):
+                payload["sourceMediaPresent"] = False
+                payload["sourceMediaDeletedAt"] = payload.get("sourceMediaDeletedAt") or time.time()
+                atomic_write_json(manifest_path, payload)
+        return {"jobId": job_id, "mode": mode, **stats}
+
+    if mode == "job":
+        output_dir_key = str(output_dir) if output_dir is not None else ""
+        if output_dir_key and output_dir_reference_counts.get(output_dir_key, 0) > 1:
+            raise ValueError("Cannot delete this finished render because another saved job still points to the same output.")
+
+        removed_items = 0
+        removed_bytes = 0
+        if output_dir is not None and output_dir.exists():
+            output_stats = _remove_path(output_dir, dry_run=dry_run)
+            removed_items += output_stats["removedItems"]
+            removed_bytes += output_stats["removedBytes"]
+        job_state = _job_state_path(job_id)
+        if job_state.exists():
+            state_stats = _remove_path(job_state, dry_run=dry_run)
+            removed_items += state_stats["removedItems"]
+            removed_bytes += state_stats["removedBytes"]
+        return {"jobId": job_id, "mode": mode, "removedItems": removed_items, "removedBytes": removed_bytes}
+
+    raise ValueError("Unknown cleanup mode.")
+
+
+def prune_storage(jobs_by_id: dict[str, dict], *, prune_temp: bool, prune_cache: bool, prune_jobs: bool, prune_failed_jobs: bool, dry_run: bool = False) -> dict[str, object]:
+    report = prune_runtime_storage(
+        dry_run=dry_run,
+        prune_temp=prune_temp,
+        prune_cache=prune_cache,
+        prune_jobs=prune_jobs,
+    )
+
+    removed_failed_job_ids: list[str] = []
+    removed_failed_job_bytes = 0
+    if prune_failed_jobs:
+        for job_id, job in jobs_by_id.items():
+            if str(job.get("status") or "") != "failed":
+                continue
+            job_state = _job_state_path(job_id)
+            if not job_state.exists():
+                continue
+            removed_failed_job_ids.append(job_id)
+            removed_failed_job_bytes += path_size(job_state)
+            if not dry_run:
+                job_state.unlink(missing_ok=True)
+
+    report["failedJobs"] = {
+        "removedItems": len(removed_failed_job_ids),
+        "removedBytes": removed_failed_job_bytes,
+        "removedJobIds": removed_failed_job_ids,
+    }
+    return report
