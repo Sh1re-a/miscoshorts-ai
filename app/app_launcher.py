@@ -189,6 +189,21 @@ def main() -> None:
     print(f"Support log: {LOG_PATH}")
     print(f"Doctor report: {DOCTOR_REPORT_PATH}")
     print(f"Outputs: {runtime_paths['outputsDir']}")
+    bootstrap_payload = load_bootstrap_payload(BOOTSTRAP_URL) or {}
+    runtime_session_id = bootstrap_payload.get("runtimeSessionId")
+    recovery = bootstrap_payload.get("recovery") if isinstance(bootstrap_payload.get("recovery"), dict) else {}
+    recovered_jobs = len(recovery.get("recoveredJobIds") or [])
+    cleared_locks = len(recovery.get("clearedLocks") or [])
+    cleared_workspaces = len(recovery.get("clearedTempWorkspacePaths") or [])
+    if runtime_session_id:
+        print(f"Backend session: {runtime_session_id}")
+    if recovered_jobs or cleared_locks or cleared_workspaces:
+        print(
+            "Startup recovery: "
+            f"{recovered_jobs} interrupted job(s), "
+            f"{cleared_locks} orphan lock(s), "
+            f"{cleared_workspaces} temp workspace(s) cleared."
+        )
     print(f"Run diagnostics later with: {sys.executable} -m app.doctor")
     print("Opening browser...")
     webbrowser.open(APP_URL)

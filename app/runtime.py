@@ -16,6 +16,7 @@ _BACKEND_SIGNATURE_FILES = (
     "app/doctor.py",
     "app/server.py",
     "app/shorts_service.py",
+    "app/runtime_recovery.py",
     "app/run_report.py",
     "app/subtitles.py",
     "app/source_pipeline.py",

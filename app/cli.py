@@ -7,6 +7,7 @@ from app.doctor import run_doctor
 from app.errors import explain_exception
 from app.run_report import format_run_report_summary, load_run_report
 from app.runtime import configure_logging, load_local_env
+from app.runtime_recovery import recover_runtime_state
 from app.shorts_service import create_short_from_url
 from app.storage import prune_runtime_storage, storage_summary
 
@@ -38,6 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--doctor", action="store_true", help="Run environment checks and exit.")
     parser.add_argument("--storage", action="store_true", help="Show current cache/output/model storage usage and exit.")
     parser.add_argument("--prune-storage", action="store_true", help="Delete stale temp/cache/output folders and exit.")
+    parser.add_argument("--recover-runtime-state", action="store_true", help="Mark interrupted jobs as failed, clear orphan locks, and remove stale temp workspaces.")
     parser.add_argument("--dry-run", action="store_true", help="With --prune-storage, show what would be removed without deleting it.")
     parser.add_argument("--run-report", help="Print a human-friendly summary of a saved run_report.json file and exit.")
     parser.add_argument("--video-url", help="YouTube URL to process.")
@@ -74,6 +76,21 @@ def main(argv: list[str] | None = None) -> int:
             stats = report[bucket]
             action = "would remove" if args.dry_run else "removed"
             print(f"{bucket}: {action} {stats['removedItems']} item(s), reclaimed {stats['removedBytes']} bytes")
+        return 0
+
+    if args.recover_runtime_state:
+        report = recover_runtime_state()
+        print("MicroShorts AI Runtime Recovery")
+        print("==============================")
+        print(f"Recovered interrupted jobs: {len(report['recoveredJobIds'])}")
+        for job_id in report["recoveredJobIds"]:
+            print(f"  - {job_id}")
+        print(f"Cleared orphan locks: {len(report['clearedLocks'])}")
+        for lock in report["clearedLocks"]:
+            print(f"  - {lock.get('fingerprint')} ({lock.get('path')})")
+        print(f"Cleared temp workspaces: {len(report['clearedTempWorkspacePaths'])}")
+        for path in report["clearedTempWorkspacePaths"]:
+            print(f"  - {path}")
         return 0
 
     if args.run_report:

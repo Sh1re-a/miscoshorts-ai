@@ -21,12 +21,26 @@ If the app feels broken or blocked, use this exact recovery path:
 
 ```bash
 cd /Users/shirre/ws/miscoshorts-ai
+python3 -m app.cli --recover-runtime-state
 zsh launch_app.command
 ```
 
 ### Windows
 
 Double-click [launch_app.bat](/Users/shirre/ws/miscoshorts-ai/launch_app.bat)
+
+Or from PowerShell in the project folder:
+
+```powershell
+py -m app.cli --recover-runtime-state
+.\launch_app.bat
+```
+
+The runtime recovery command now:
+
+- marks interrupted queued/running jobs as failed so they do not block the next session
+- clears orphan fingerprint locks left behind by dead processes
+- removes stale temp workspaces from interrupted renders
 
 What “render-ready” means now:
 

@@ -2348,7 +2348,7 @@ def create_short_from_url(
             existing_result["outputDir"] = str(output_dir)
             return existing_result
 
-    with acquire_fingerprint_lock(pipeline_fingerprint, progress_callback=progress_callback):
+    with acquire_fingerprint_lock(pipeline_fingerprint, job_id=job_id, progress_callback=progress_callback):
         if REUSE_COMPLETED_RENDERS:
             existing_result = load_existing_result(output_dir, pipeline_fingerprint)
             if existing_result is not None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -127,9 +128,20 @@ class RenderWorkspace:
 
     def promote(self) -> Path:
         self.final_output_dir.parent.mkdir(parents=True, exist_ok=True)
+        backup_dir: Path | None = None
         if self.final_output_dir.exists():
-            shutil.rmtree(self.final_output_dir, ignore_errors=True)
-        shutil.move(str(self.workspace_dir), str(self.final_output_dir))
+            backup_dir = self.final_output_dir.parent / f".{self.final_output_dir.name}.backup-{uuid.uuid4().hex[:6]}"
+            shutil.move(str(self.final_output_dir), str(backup_dir))
+        try:
+            shutil.move(str(self.workspace_dir), str(self.final_output_dir))
+        except Exception:
+            if self.final_output_dir.exists():
+                shutil.rmtree(self.final_output_dir, ignore_errors=True)
+            if backup_dir is not None and backup_dir.exists():
+                shutil.move(str(backup_dir), str(self.final_output_dir))
+            raise
+        if backup_dir is not None and backup_dir.exists():
+            shutil.rmtree(backup_dir, ignore_errors=True)
         self.promoted = True
         self._bind(self.final_output_dir)
         return self.final_output_dir
@@ -145,35 +157,139 @@ def _lock_path(fingerprint: str) -> Path:
     return OUTPUT_LOCKS_DIR / f"{fingerprint}.lock"
 
 
+def _pid_is_alive(pid: int | None) -> bool:
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError as error:
+        return error.errno == errno.EPERM
+    return True
+
+
+def _read_lock_payload(lock_path: Path) -> dict | None:
+    try:
+        return json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def describe_fingerprint_lock(lock_path: Path) -> dict[str, object]:
+    payload = _read_lock_payload(lock_path)
+    try:
+        age_seconds = max(0.0, time.time() - lock_path.stat().st_mtime)
+    except OSError:
+        age_seconds = 0.0
+    pid_raw = payload.get("pid") if isinstance(payload, dict) else None
+    try:
+        pid = int(pid_raw) if pid_raw is not None else None
+    except (TypeError, ValueError):
+        pid = None
+    return {
+        "path": str(lock_path),
+        "fingerprint": (payload.get("fingerprint") if isinstance(payload, dict) else None) or lock_path.stem,
+        "jobId": payload.get("jobId") if isinstance(payload, dict) else None,
+        "pid": pid,
+        "createdAt": payload.get("createdAt") if isinstance(payload, dict) else None,
+        "ownerToken": payload.get("ownerToken") if isinstance(payload, dict) else None,
+        "alive": _pid_is_alive(pid),
+        "ageSeconds": round(age_seconds, 1),
+        "payloadValid": isinstance(payload, dict),
+    }
+
+
+def list_active_fingerprint_locks() -> list[dict[str, object]]:
+    if not OUTPUT_LOCKS_DIR.exists():
+        return []
+    return [describe_fingerprint_lock(path) for path in sorted(OUTPUT_LOCKS_DIR.glob("*.lock"))]
+
+
+def cleanup_stale_fingerprint_locks() -> dict[str, list[dict[str, object]]]:
+    removed_locks: list[dict[str, object]] = []
+    active_locks: list[dict[str, object]] = []
+    if not OUTPUT_LOCKS_DIR.exists():
+        return {"removedLocks": removed_locks, "activeLocks": active_locks}
+
+    for lock_path in sorted(OUTPUT_LOCKS_DIR.glob("*.lock")):
+        details = describe_fingerprint_lock(lock_path)
+        should_remove = False
+        reason = None
+        if not details["payloadValid"] and float(details["ageSeconds"]) >= LOCK_STALE_SECONDS:
+            should_remove = True
+            reason = "invalid-payload"
+        elif not details["alive"]:
+            should_remove = True
+            reason = "dead-owner"
+
+        if should_remove:
+            lock_path.unlink(missing_ok=True)
+            details["reason"] = reason
+            removed_locks.append(details)
+            logger.warning(
+                "Removed orphan fingerprint lock %s (fingerprint=%s, jobId=%s, pid=%s, reason=%s)",
+                details["path"],
+                details["fingerprint"],
+                details["jobId"],
+                details["pid"],
+                reason,
+            )
+        else:
+            active_locks.append(details)
+
+    return {"removedLocks": removed_locks, "activeLocks": active_locks}
+
+
 @contextlib.contextmanager
 def acquire_fingerprint_lock(
     fingerprint: str,
     *,
+    job_id: str | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> Iterator[None]:
     lock_path = _lock_path(fingerprint)
     wait_started_at = time.time()
     fd: int | None = None
     wait_message_sent = False
+    owner_token = uuid.uuid4().hex
 
     while fd is None:
         try:
             fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, json.dumps({"fingerprint": fingerprint, "pid": os.getpid(), "createdAt": time.time()}).encode("utf-8"))
+            os.write(
+                fd,
+                json.dumps(
+                    {
+                        "fingerprint": fingerprint,
+                        "jobId": job_id,
+                        "pid": os.getpid(),
+                        "createdAt": time.time(),
+                        "ownerToken": owner_token,
+                    }
+                ).encode("utf-8"),
+            )
         except FileExistsError:
-            try:
-                age_seconds = max(0.0, time.time() - lock_path.stat().st_mtime)
-            except OSError:
-                age_seconds = 0.0
-            if age_seconds > LOCK_STALE_SECONDS:
-                logger.warning("Removing stale fingerprint lock %s after %.1fs", lock_path, age_seconds)
+            details = describe_fingerprint_lock(lock_path)
+            if not details["alive"]:
+                logger.warning(
+                    "Removing orphan fingerprint lock %s (fingerprint=%s, jobId=%s, pid=%s)",
+                    lock_path,
+                    details["fingerprint"],
+                    details["jobId"],
+                    details["pid"],
+                )
+                lock_path.unlink(missing_ok=True)
+                continue
+            if not details["payloadValid"] and float(details["ageSeconds"]) > LOCK_STALE_SECONDS:
+                logger.warning("Removing stale unreadable fingerprint lock %s after %.1fs", lock_path, float(details["ageSeconds"]))
                 lock_path.unlink(missing_ok=True)
                 continue
             if not wait_message_sent:
+                owner_job_id = details["jobId"] or "unknown"
+                owner_pid = details["pid"] if details["pid"] is not None else "unknown"
                 _emit(
                     progress_callback,
                     "queued",
-                    "Another identical render is already running. Waiting so this request can safely reuse the finished result instead of generating duplicate clips...",
+                    f"LOCK_WAIT | fingerprint={fingerprint} | ownerJobId={owner_job_id} | ownerPid={owner_pid} | Another identical render is already running. Waiting so this request can safely reuse the finished result instead of generating duplicate clips.",
                 )
                 wait_message_sent = True
             if time.time() - wait_started_at > LOCK_WAIT_TIMEOUT_SECONDS:
@@ -185,4 +301,13 @@ def acquire_fingerprint_lock(
     finally:
         if fd is not None:
             os.close(fd)
-        lock_path.unlink(missing_ok=True)
+        current_details = describe_fingerprint_lock(lock_path) if lock_path.exists() else None
+        if current_details and current_details.get("ownerToken") != owner_token:
+            logger.warning(
+                "Lock release skipped because ownership changed for %s (expected token=%s, current token=%s)",
+                lock_path,
+                owner_token,
+                current_details.get("ownerToken"),
+            )
+        else:
+            lock_path.unlink(missing_ok=True)

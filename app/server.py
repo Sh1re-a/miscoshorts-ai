@@ -15,7 +15,9 @@ from app import analytics, subtitle_preview
 from app.doctor import run_doctor
 from app.errors import explain_exception
 from app.paths import FRONTEND_DIST_DIR, OUTPUTS_DIR
+from app.render_session import cleanup_stale_fingerprint_locks, job_fingerprint, list_active_fingerprint_locks
 from app.runtime import backend_code_signature, configure_logging, is_debug_enabled, load_local_env, runtime_identity, runtime_summary
+from app.runtime_recovery import recover_runtime_state
 from app.storage import prune_runtime_storage
 from app.shorts_service import (
     create_short_from_url,
@@ -38,10 +40,19 @@ JOB_STATE_DIR = OUTPUTS_DIR / "_job_state"
 MAX_CONCURRENT_JOBS = max(1, int(os.getenv("MAX_CONCURRENT_JOBS", "1")))
 MAX_QUEUED_JOBS = max(0, int(os.getenv("MAX_QUEUED_JOBS", "2")))
 JOB_RETENTION_HOURS = max(1, int(os.getenv("JOB_RETENTION_HOURS", "24")))
+ACTIVE_JOB_STATUSES = {"validating", "downloading", "transcribing", "analyzing", "rendering"}
+TERMINAL_JOB_STATUSES = {"completed", "failed"}
+RUNTIME_SESSION_ID = secrets.token_hex(8)
+SERVER_STARTED_AT = time.time()
 _active_jobs = 0
 _job_slots = threading.Semaphore(MAX_CONCURRENT_JOBS)
 _DOWNLOAD_PCT_PATTERN = re.compile(r"Downloading\.\.\.\s+(\d+)%")
 _RENDER_CLIP_PATTERN = re.compile(r"clip\s+(\d+)\s+of\s+(\d+)", re.IGNORECASE)
+_LOCK_WAIT_PATTERN = re.compile(
+    r"^LOCK_WAIT \| fingerprint=(?P<fingerprint>[0-9a-f]+) \| ownerJobId=(?P<owner_job_id>[a-zA-Z0-9_-]+) \| ownerPid=(?P<owner_pid>[0-9]+|unknown) \| ",
+    re.IGNORECASE,
+)
+STARTUP_RECOVERY = recover_runtime_state()
 
 
 def _job_state_path(job_id: str) -> Path:
@@ -61,24 +72,12 @@ def _load_jobs_from_disk() -> None:
         return
 
     loaded_jobs: dict[str, dict] = {}
-    recovered_job_ids: list[str] = []
-    recoverable_statuses = {"queued", "validating", "downloading", "transcribing", "analyzing", "rendering"}
-    recovered_at = time.time()
     for path in JOB_STATE_DIR.glob("*.json"):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if payload.get("status") in recoverable_statuses:
-            payload["status"] = "failed"
-            payload["queuePosition"] = 0
-            payload["error"] = "This older job was interrupted by an app restart before it finished."
-            payload["errorHelp"] = "Start the render again. The recovered job state was cleared so the queue can continue."
-            payload["errorCategory"] = "recovered"
-            payload["message"] = "Recovered interrupted job state after restart."
-            payload["updatedAt"] = recovered_at
-            payload["etaSeconds"] = None
-            recovered_job_ids.append(path.stem)
+        payload.setdefault("runtimeSessionId", "previous-session")
         loaded_jobs[path.stem] = payload
 
     with jobs_lock:
@@ -86,9 +85,6 @@ def _load_jobs_from_disk() -> None:
         _refresh_queue_positions_locked()
         for job_id in loaded_jobs:
             _persist_job_locked(job_id)
-
-    if recovered_job_ids:
-        logger.warning("Recovered %s interrupted job(s) from disk after restart: %s", len(recovered_job_ids), ", ".join(recovered_job_ids))
 
 
 def _get_job(job_id: str) -> dict | None:
@@ -101,17 +97,46 @@ def _get_job(job_id: str) -> dict | None:
 
 def _count_jobs_by_status() -> dict[str, int]:
     counts = {"queued": 0, "active": 0}
-    active_statuses = {"validating", "downloading", "transcribing", "analyzing", "rendering"}
 
     with jobs_lock:
         for job in jobs.values():
             status = job.get("status")
             if status == "queued":
                 counts["queued"] += 1
-            elif status in active_statuses:
+            elif status in ACTIVE_JOB_STATUSES:
                 counts["active"] += 1
 
     return counts
+
+
+def _derive_queue_state(stage: str, message: str, job: dict) -> dict[str, object | None]:
+    queue_state: str | None = job.get("queueState") if isinstance(job, dict) else None
+    waiting_on_job_id = None
+    waiting_on_fingerprint = None
+    lock_match = _LOCK_WAIT_PATTERN.match(message or "")
+
+    if stage == "queued":
+        if lock_match:
+            queue_state = "waiting_for_identical_render"
+            owner_job_id = lock_match.group("owner_job_id")
+            waiting_on_job_id = None if owner_job_id == "unknown" else owner_job_id
+            waiting_on_fingerprint = lock_match.group("fingerprint")
+        elif "available render worker" in (message or "").lower():
+            queue_state = "waiting_for_worker"
+        else:
+            queue_state = "queued"
+    elif stage in ACTIVE_JOB_STATUSES:
+        queue_state = "running"
+    elif stage == "completed":
+        queue_state = "completed"
+    elif stage == "failed":
+        queue_state = "failed"
+
+    return {
+        "queueState": queue_state,
+        "waitingOnJobId": waiting_on_job_id,
+        "waitingOnFingerprint": waiting_on_fingerprint,
+    }
 
 
 def _refresh_queue_positions_locked() -> None:
@@ -204,8 +229,16 @@ def _derive_progress_fields(job: dict, stage: str, message: str) -> dict[str, fl
 
     if stage == "queued":
         queue_position = int(job.get("queuePosition") or 0)
-        stage_progress = 100.0 if queue_position == 0 else max(5.0, 100.0 - queue_position * 18.0)
-        eta_seconds = queue_position * max(75.0, clip_count * 95.0)
+        queue_state = str(job.get("queueState") or "")
+        if queue_state == "waiting_for_identical_render":
+            stage_progress = 22.0
+            eta_seconds = max(90.0, clip_count * 110.0)
+        elif queue_state == "waiting_for_worker":
+            stage_progress = 12.0 if queue_position == 0 else max(8.0, 48.0 - queue_position * 10.0)
+            eta_seconds = max(60.0, max(1, queue_position) * max(75.0, clip_count * 95.0))
+        else:
+            stage_progress = 100.0 if queue_position == 0 else max(5.0, 100.0 - queue_position * 18.0)
+            eta_seconds = queue_position * max(75.0, clip_count * 95.0)
     elif stage == "downloading":
         match = _DOWNLOAD_PCT_PATTERN.search(message)
         pct = float(match.group(1)) if match else 20.0
@@ -262,7 +295,90 @@ def _job_progress(job_id: str, stage: str, message: str) -> None:
     _append_job_log(job_id, stage, message)
     job = _get_job(job_id) or {}
     progress_fields = _derive_progress_fields(job, stage, message)
-    _set_job(job_id, status=stage, message=message, updatedAt=time.time(), **progress_fields)
+    state_fields = _derive_queue_state(stage, message, job)
+    _set_job(job_id, status=stage, message=message, updatedAt=time.time(), **progress_fields, **state_fields)
+
+
+def _matching_live_job_for_fingerprint(fingerprint: str, *, exclude_job_id: str | None = None) -> dict | None:
+    with jobs_lock:
+        ranked_jobs = sorted(
+            (
+                (job_id, job)
+                for job_id, job in jobs.items()
+                if job.get("jobFingerprint") == fingerprint and job_id != exclude_job_id and job.get("status") not in TERMINAL_JOB_STATUSES
+            ),
+            key=lambda item: (0 if item[1].get("status") in ACTIVE_JOB_STATUSES else 1, float(item[1].get("createdAt") or 0)),
+        )
+    if not ranked_jobs:
+        return None
+    job_id, job = ranked_jobs[0]
+    snapshot = dict(job)
+    snapshot["jobId"] = job_id
+    return snapshot
+
+
+def _queue_snapshot() -> dict[str, object]:
+    with jobs_lock:
+        job_snapshots = {job_id: dict(job) for job_id, job in jobs.items()}
+        active_jobs = [
+            {"jobId": job_id, **job}
+            for job_id, job in job_snapshots.items()
+            if job.get("status") in ACTIVE_JOB_STATUSES
+        ]
+        queued_jobs = [
+            {"jobId": job_id, **job}
+            for job_id, job in job_snapshots.items()
+            if job.get("status") == "queued"
+        ]
+        recent_jobs = sorted(
+            ({"jobId": job_id, **job} for job_id, job in job_snapshots.items()),
+            key=lambda item: (float(item.get("updatedAt") or item.get("createdAt") or 0), item["jobId"]),
+            reverse=True,
+        )[:12]
+
+    active_jobs.sort(key=lambda item: (float(item.get("createdAt") or 0), item["jobId"]))
+    queued_jobs.sort(
+        key=lambda item: (
+            float(item.get("queuePosition") or 0),
+            float(item.get("createdAt") or 0),
+            item["jobId"],
+        )
+    )
+    lock_details = list_active_fingerprint_locks()
+    issues: list[str] = []
+    if _active_jobs != len(active_jobs):
+        issues.append(f"Active worker count mismatch: semaphore tracks {_active_jobs}, jobs track {len(active_jobs)}.")
+    for lock in lock_details:
+        lock_job_id = lock.get("jobId")
+        if lock_job_id and job_snapshots.get(str(lock_job_id), {}).get("status") in TERMINAL_JOB_STATUSES:
+            issues.append(f"Lock for fingerprint {lock.get('fingerprint')} still points at terminal job {lock_job_id}.")
+    for queued_job in queued_jobs:
+        if queued_job.get("queueState") == "waiting_for_identical_render" and queued_job.get("waitingOnFingerprint"):
+            if not any(lock.get("fingerprint") == queued_job.get("waitingOnFingerprint") for lock in lock_details):
+                issues.append(
+                    f"Job {queued_job['jobId']} says it is waiting on fingerprint {queued_job.get('waitingOnFingerprint')} but no live lock exists."
+                )
+
+    return {
+        "runtimeSessionId": RUNTIME_SESSION_ID,
+        "serverPid": os.getpid(),
+        "serverStartedAt": SERVER_STARTED_AT,
+        "queue": {
+            "activeCount": len(active_jobs),
+            "queuedCount": len(queued_jobs),
+            "waitingForWorkerCount": sum(1 for job in queued_jobs if job.get("queueState") == "waiting_for_worker"),
+            "waitingForIdenticalRenderCount": sum(1 for job in queued_jobs if job.get("queueState") == "waiting_for_identical_render"),
+            "activeJobs": active_jobs,
+            "queuedJobs": queued_jobs,
+        },
+        "locks": lock_details,
+        "recovery": STARTUP_RECOVERY,
+        "recentJobs": recent_jobs,
+        "consistency": {
+            "status": "ok" if not issues else "degraded",
+            "issues": issues,
+        },
+    }
 
 
 def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, clip_count: int) -> None:
@@ -327,9 +443,10 @@ def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, cl
 @app.get("/api/health")
 def healthcheck():
     counts = _count_jobs_by_status()
+    runtime_snapshot = _queue_snapshot()
     return jsonify(
         {
-            "status": "ok",
+            "status": runtime_snapshot["consistency"]["status"],
             "limits": {
                 "maxConcurrentJobs": MAX_CONCURRENT_JOBS,
                 "maxQueuedJobs": MAX_QUEUED_JOBS,
@@ -337,6 +454,9 @@ def healthcheck():
             },
             "jobs": counts,
             "queueDepth": counts["queued"],
+            "runtimeSessionId": RUNTIME_SESSION_ID,
+            "serverStartedAt": SERVER_STARTED_AT,
+            "consistency": runtime_snapshot["consistency"],
         }
     )
 
@@ -344,6 +464,7 @@ def healthcheck():
 @app.get("/api/bootstrap")
 def bootstrap():
     doctor_report = run_doctor(prepare_whisper=False)
+    runtime_snapshot = _queue_snapshot()
     return jsonify(
         {
             "hasConfiguredApiKey": bool((os.getenv("GEMINI_API_KEY") or "").strip()),
@@ -351,7 +472,9 @@ def bootstrap():
             "defaultRenderProfile": normalize_requested_render_profile(None),
             "renderProfiles": {key: profile["label"] for key, profile in RENDER_PROFILES.items()},
             "backendSignature": backend_code_signature(),
+            "runtimeSessionId": RUNTIME_SESSION_ID,
             "serverPid": os.getpid(),
+            "serverStartedAt": SERVER_STARTED_AT,
             "speakerDiarizationMode": os.getenv("SPEAKER_DIARIZATION_MODE", "auto").strip().lower() or "auto",
             "hasPyannoteToken": bool(
                 (os.getenv("PYANNOTE_AUTH_TOKEN") or os.getenv("HUGGINGFACE_ACCESS_TOKEN") or os.getenv("HF_TOKEN") or "").strip()
@@ -362,6 +485,9 @@ def bootstrap():
             "python": runtime_identity(),
             "logPath": str(SERVER_LOG_PATH),
             "doctorReportPath": doctor_report.get("reportPath"),
+            "queue": runtime_snapshot["queue"],
+            "recovery": STARTUP_RECOVERY,
+            "consistency": runtime_snapshot["consistency"],
         }
     )
 
@@ -373,8 +499,31 @@ def doctor_report():
     return jsonify(report)
 
 
+@app.get("/api/runtime")
+def runtime_status():
+    global STARTUP_RECOVERY
+    lock_cleanup = cleanup_stale_fingerprint_locks()
+    if lock_cleanup["removedLocks"]:
+        STARTUP_RECOVERY = {
+            **STARTUP_RECOVERY,
+            "clearedLocks": list(STARTUP_RECOVERY.get("clearedLocks") or []) + lock_cleanup["removedLocks"],
+        }
+    snapshot = _queue_snapshot()
+    snapshot["backendSignature"] = backend_code_signature()
+    snapshot["logPath"] = str(SERVER_LOG_PATH)
+    snapshot["runtime"] = runtime_summary()
+    return jsonify(snapshot)
+
+
 @app.post("/api/process")
 def process_video():
+    global STARTUP_RECOVERY
+    lock_cleanup = cleanup_stale_fingerprint_locks()
+    if lock_cleanup["removedLocks"]:
+        STARTUP_RECOVERY = {
+            **STARTUP_RECOVERY,
+            "clearedLocks": list(STARTUP_RECOVERY.get("clearedLocks") or []) + lock_cleanup["removedLocks"],
+        }
     _cleanup_expired_jobs()
     doctor_report = run_doctor(prepare_whisper=False)
     blocking_checks = doctor_report.get("blockingChecks") or [
@@ -440,17 +589,30 @@ def process_video():
         )
 
     job_id = secrets.token_hex(12)
+    pipeline_fingerprint = job_fingerprint(
+        video_url=video_url,
+        output_filename=output_filename,
+        clip_count=clip_count,
+        render_profile=render_profile,
+        subtitle_style=subtitle_style,
+    )
+    matching_job = _matching_live_job_for_fingerprint(pipeline_fingerprint)
     _set_job(
         job_id,
         status="queued",
         subtitleStyle=subtitle_style,
         renderProfile=render_profile,
+        jobFingerprint=pipeline_fingerprint,
         clipCount=clip_count,
         createdAt=time.time(),
         updatedAt=time.time(),
         overallProgress=4.0,
         stageProgress=5.0,
-        )
+        runtimeSessionId=RUNTIME_SESSION_ID,
+        queueState="waiting_for_identical_render" if matching_job is not None else "waiting_for_worker",
+        waitingOnJobId=matching_job.get("jobId") if matching_job is not None else None,
+        waitingOnFingerprint=pipeline_fingerprint if matching_job is not None else None,
+    )
     _refresh_queue_positions()
     _append_job_log(job_id, "queued", "The job was created and is waiting for the worker thread.")
 
@@ -470,6 +632,10 @@ def process_video():
             "clipCount": clip_count,
             "queuePosition": job_snapshot.get("queuePosition", 0),
             "renderProfile": render_profile,
+            "jobFingerprint": pipeline_fingerprint,
+            "queueState": job_snapshot.get("queueState"),
+            "waitingOnJobId": job_snapshot.get("waitingOnJobId"),
+            "runtimeSessionId": RUNTIME_SESSION_ID,
         }
     ), 202
 
