@@ -19,6 +19,7 @@ from app.render_session import cleanup_stale_fingerprint_locks, job_fingerprint,
 from app.runtime import backend_code_signature, configure_logging, is_debug_enabled, load_local_env, runtime_identity, runtime_summary
 from app.runtime_recovery import recover_runtime_state
 from app.storage import prune_runtime_storage
+from app.storage_manager import build_storage_report
 from app.shorts_service import (
     create_short_from_url,
     normalize_requested_render_profile,
@@ -381,6 +382,11 @@ def _queue_snapshot() -> dict[str, object]:
     }
 
 
+def _jobs_snapshot() -> dict[str, dict]:
+    with jobs_lock:
+        return {job_id: dict(job) for job_id, job in jobs.items()}
+
+
 def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, clip_count: int) -> None:
     global _active_jobs
     _job_progress(job_id, "queued", "The job is queued.")
@@ -600,6 +606,8 @@ def process_video():
     _set_job(
         job_id,
         status="queued",
+        videoUrl=video_url,
+        outputFilename=output_filename,
         subtitleStyle=subtitle_style,
         renderProfile=render_profile,
         jobFingerprint=pipeline_fingerprint,
@@ -646,6 +654,11 @@ def get_job(job_id: str):
     if job is None:
         return jsonify({"error": "Job not found"}), 404
     return jsonify(job)
+
+
+@app.get("/api/storage")
+def storage_report():
+    return jsonify(build_storage_report(_jobs_snapshot()))
 
 
 @app.get("/api/jobs/<job_id>/download/video")
