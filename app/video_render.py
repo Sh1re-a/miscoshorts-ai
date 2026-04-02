@@ -10,15 +10,15 @@ from moviepy import VideoFileClip
 
 DEFAULT_RENDER_THREADS = max(4, min(12, os.cpu_count() or 4))
 DEFAULT_RENDER_SETTINGS = {
-    "video_crf": os.getenv("VIDEO_CRF", "13"),
+    "video_crf": os.getenv("VIDEO_CRF", "12"),
     "video_preset": os.getenv("VIDEO_PRESET", "slow"),
-    "video_bitrate": os.getenv("VIDEO_BITRATE", "12M"),
-    "video_maxrate": os.getenv("VIDEO_MAXRATE", "18M"),
-    "video_bufsize": os.getenv("VIDEO_BUFSIZE", "24M"),
+    "video_bitrate": os.getenv("VIDEO_BITRATE", "14M"),
+    "video_maxrate": os.getenv("VIDEO_MAXRATE", "20M"),
+    "video_bufsize": os.getenv("VIDEO_BUFSIZE", "28M"),
     "audio_bitrate": os.getenv("VIDEO_AUDIO_BITRATE", "320k"),
     "x264_params": os.getenv(
         "VIDEO_X264_PARAMS",
-        "aq-mode=3:aq-strength=0.9:deblock=-1,-1",
+        "aq-mode=3:aq-strength=0.85:deblock=-1,-1:rc-lookahead=60",
     ),
 }
 

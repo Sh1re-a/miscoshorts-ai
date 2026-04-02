@@ -71,21 +71,21 @@ FONT_PRESETS = {
 }
 
 COLOR_PRESETS = {
-    "editorial": {"base_color": "#f6f1e8", "active_color": "#d8c5a2", "stroke_color": "#111318"},
-    "sun": {"base_color": "#ffffff", "active_color": "#ffd700", "stroke_color": "#000000"},
-    "ivory": {"base_color": "#ffffff", "active_color": "#ffd700", "stroke_color": "#000000"},
-    "mint": {"base_color": "#ffffff", "active_color": "#ffd700", "stroke_color": "#000000"},
+    "editorial": {"base_color": "#f6f1e8", "active_color": "#e8b864", "stroke_color": "#111318"},
+    "sun": {"base_color": "#ffffff", "active_color": "#ffb800", "stroke_color": "#0a0a0a"},
+    "ivory": {"base_color": "#faf6ef", "active_color": "#e0c680", "stroke_color": "#111318"},
+    "mint": {"base_color": "#f0faf6", "active_color": "#3dd9a0", "stroke_color": "#0a1a14"},
 }
 
 HEADER_COLOR = "#f6f1e8"
 HEADER_REASON_COLOR = "#cec2b1"
-HEADER_PANEL_FILL = (10, 12, 16, 184)
-HEADER_PANEL_BORDER = (255, 255, 255, 35)
-SUBTITLE_SHADOW_ALPHA = 122
+HEADER_PANEL_FILL = (10, 12, 16, 194)
+HEADER_PANEL_BORDER = (255, 255, 255, 48)
+SUBTITLE_SHADOW_ALPHA = 148
 SUBTITLE_SHADOW_COLOR = (0, 0, 0, SUBTITLE_SHADOW_ALPHA)
-SUBTITLE_INACTIVE_ALPHA = 212
-GRADIENT_TOP_ALPHA = 62
-GRADIENT_BOTTOM_ALPHA = 88
+SUBTITLE_INACTIVE_ALPHA = 178
+GRADIENT_TOP_ALPHA = 72
+GRADIENT_BOTTOM_ALPHA = 100
 
 DEFAULT_STYLE = {
     "fontPreset": "soft",
@@ -140,14 +140,14 @@ TOP_OVERLAY_MIN_DURATION = 2.4
 TOP_OVERLAY_MAX_DURATION = 4.2
 WORD_HIGHLIGHT_LEAD = 0.05
 WORD_HIGHLIGHT_TAIL = 0.08
-SUBTITLE_Y_RATIO = 0.75
+SUBTITLE_Y_RATIO = 0.76
 SUBTITLE_SAFE_WIDTH_RATIO = 0.85
 SUBTITLE_MAX_HEIGHT_RATIO = 0.24
-SUBTITLE_BASE_FONT_RATIO = 76 / 1920
+SUBTITLE_BASE_FONT_RATIO = 80 / 1920
 SUBTITLE_MIN_FONT_SIZE = 60
-SUBTITLE_MAX_FONT_SIZE = 82
-ACTIVE_WORD_SCALE = 1.04
-ACTIVE_WORD_SETTLE_SCALE = 1.015
+SUBTITLE_MAX_FONT_SIZE = 88
+ACTIVE_WORD_SCALE = 1.06
+ACTIVE_WORD_SETTLE_SCALE = 1.02
 HIGHLIGHT_TRANSITION_DURATION = 0.06
 ENABLE_TOP_DESCRIPTION_OVERLAY = False
 SUBTITLE_HORIZONTAL_MARGIN_RATIO = 0.1
@@ -155,15 +155,15 @@ SUBTITLE_VERTICAL_MARGIN_RATIO = 0.1
 SUBTITLE_MAX_LINES = 2
 SUBTITLE_TEXT_PADDING_X = 5
 SUBTITLE_TEXT_PADDING_Y = 5
-SUBTITLE_MIN_FONT_RATIO = 0.026
-SUBTITLE_MAX_FONT_RATIO = 0.034
+SUBTITLE_MIN_FONT_RATIO = 0.028
+SUBTITLE_MAX_FONT_RATIO = 0.038
 HEADER_SAFE_WIDTH_RATIO = 0.9
 HEADER_TOP_RATIO = 0.1
 HEADER_PANEL_PADDING_X = 30
 HEADER_PANEL_PADDING_Y = 16
 HEADER_PANEL_GAP = 12
 HEADER_PANEL_RADIUS = 28
-HEADER_TITLE_FONT_RATIO = 0.036
+HEADER_TITLE_FONT_RATIO = 0.038
 HEADER_REASON_FONT_RATIO = 0.018
 HEADER_TITLE_MIN_RATIO = 0.030
 HEADER_TITLE_MAX_RATIO = 0.044
@@ -173,7 +173,7 @@ SUBTITLE_FADE_IN = 0.14
 SUBTITLE_FADE_OUT = 0.14
 HEADER_FADE_IN = 0.5
 HEADER_FADE_OUT = 0.5
-HEADER_DURATION = 2.6
+HEADER_DURATION = 2.2
 HEADER_PANEL_MIN_HEIGHT = 126
 
 TITLE_FONT_PRESETS = [
@@ -868,7 +868,7 @@ def _build_locked_text_layout(
     colors = COLOR_PRESETS[subtitle_style["colorPreset"]]
     max_width = int(video_clip.w * max_width_ratio)
     max_height = int(video_clip.h * max_height_ratio)
-    stroke_width = 0 if not (stroke_color or colors["stroke_color"]) else max(1, min(3, round(video_clip.h * 0.0012)))
+    stroke_width = 0 if not (stroke_color or colors["stroke_color"]) else max(2, min(4, round(video_clip.h * 0.0016)))
     shadow_offset_y = shadow_offset_y if shadow_offset_y is not None else max(2, round(video_clip.h * 0.0024))
     line_gap = max(6, round(video_clip.h * line_gap_ratio))
     padding_x = max(4, min(16, padding_x))
@@ -1018,7 +1018,7 @@ def _render_shadow_for_layout(layout):
             word.get("tracking", 0),
             anchor='ls',
         )
-    return shadow_layer.filter(ImageFilter.GaussianBlur(radius=8))
+    return shadow_layer.filter(ImageFilter.GaussianBlur(radius=10))
 
 
 def _render_locked_text_image(
@@ -1054,7 +1054,7 @@ def _render_locked_text_image(
                 word.get("tracking", 0),
                 anchor='ls',
             )
-        shadow_composite = shadow_layer.filter(ImageFilter.GaussianBlur(radius=8))
+        shadow_composite = shadow_layer.filter(ImageFilter.GaussianBlur(radius=10))
 
     # Glow only exists when a word is actively highlighted — skip entirely for inactive state
     if highlight_index >= 0:
@@ -1067,11 +1067,11 @@ def _render_locked_text_image(
                     (word["anchor_x"], word["baseline_y"]),
                     word["text"],
                     layout["font"],
-                    (*active_rgb, 100),
+                    (*active_rgb, 128),
                     word.get("tracking", 0),
                     anchor='ls',
                 )
-        base = Image.alpha_composite(shadow_composite, glow_layer.filter(ImageFilter.GaussianBlur(radius=12)))
+        base = Image.alpha_composite(shadow_composite, glow_layer.filter(ImageFilter.GaussianBlur(radius=16)))
     else:
         base = shadow_composite
 
@@ -1106,7 +1106,7 @@ def _render_subtitle_bitmap_image(cue, video_clip, subtitle_style):
         max_font_ratio=SUBTITLE_MAX_FONT_RATIO,
         padding_x=SUBTITLE_TEXT_PADDING_X,
         padding_y=SUBTITLE_TEXT_PADDING_Y,
-        line_gap_ratio=0.008,
+        line_gap_ratio=0.012,
         tracking=SUBTITLE_LETTER_SPACING,
     )
     highlight_index = cue.get("highlightIndex")
@@ -1347,7 +1347,7 @@ def _prepare_subtitle_runtime(video_clip, subtitle_cues, resolved_style):
             max_font_ratio=SUBTITLE_MAX_FONT_RATIO,
             padding_x=SUBTITLE_TEXT_PADDING_X,
             padding_y=SUBTITLE_TEXT_PADDING_Y,
-            line_gap_ratio=0.008,
+            line_gap_ratio=0.012,
             tracking=SUBTITLE_LETTER_SPACING,
         )
         candidate_indexes = {-1}
@@ -1415,14 +1415,14 @@ def create_subtitle_preview_frames(video_size, subtitle_cues, subtitle_style=Non
     top_gradient = _render_vertical_gradient_image(
         video_size[0],
         video_size[1],
-        height_ratio=0.2,
+        height_ratio=0.22,
         anchor='top',
         max_alpha=GRADIENT_TOP_ALPHA,
     )
     bottom_gradient = _render_vertical_gradient_image(
         video_size[0],
         video_size[1],
-        height_ratio=0.24,
+        height_ratio=0.28,
         anchor='bottom',
         max_alpha=GRADIENT_BOTTOM_ALPHA,
     )
@@ -1440,7 +1440,7 @@ def create_subtitle_preview_frames(video_size, subtitle_cues, subtitle_style=Non
             max_font_ratio=SUBTITLE_MAX_FONT_RATIO,
             padding_x=SUBTITLE_TEXT_PADDING_X,
             padding_y=SUBTITLE_TEXT_PADDING_Y,
-            line_gap_ratio=0.008,
+            line_gap_ratio=0.012,
         )
         subtitle_image = _render_locked_text_image(
             subtitle_layout,
@@ -1801,8 +1801,8 @@ def create_subtitles(video_clip, whisper_segments, clip_start_time, subtitle_sty
             _allocated_clips.append(timed_header)
 
         gradient_layers = [
-            _with_clip_timing(_render_vertical_gradient_clip(video_clip, height_ratio=0.2, anchor='top', max_alpha=GRADIENT_TOP_ALPHA), 0, video_duration),
-            _with_clip_timing(_render_vertical_gradient_clip(video_clip, height_ratio=0.24, anchor='bottom', max_alpha=GRADIENT_BOTTOM_ALPHA), 0, video_duration),
+            _with_clip_timing(_render_vertical_gradient_clip(video_clip, height_ratio=0.22, anchor='top', max_alpha=GRADIENT_TOP_ALPHA), 0, video_duration),
+            _with_clip_timing(_render_vertical_gradient_clip(video_clip, height_ratio=0.28, anchor='bottom', max_alpha=GRADIENT_BOTTOM_ALPHA), 0, video_duration),
         ]
         _allocated_clips.extend(gradient_layers)
 
