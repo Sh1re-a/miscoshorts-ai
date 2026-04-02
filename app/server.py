@@ -11,7 +11,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request, send_file, send_from_directory
 
-from app import analytics, subtitle_preview
+from app import analytics, storage_manager, subtitle_preview
 from app.doctor import run_doctor
 from app.errors import explain_exception
 from app.paths import FRONTEND_DIST_DIR, OUTPUTS_DIR
@@ -786,6 +786,43 @@ def serve_subtitle_preview_asset(preview_id: str, filename: str):
     if not asset_path.exists():
         return jsonify({"error": "Preview asset not found"}), 404
     return send_from_directory(preview_dir, filename)
+
+
+@app.post("/api/storage/jobs/<job_id>/cleanup")
+def cleanup_job_storage(job_id: str):
+    payload = request.get_json(silent=True) or {}
+    mode = str(payload.get("mode", "job"))
+    if mode not in ("job", "source_media"):
+        return jsonify({"error": "Invalid mode. Use 'job' or 'source_media'."}), 400
+    dry_run = bool(payload.get("dryRun", False))
+    with jobs_lock:
+        jobs_snapshot = dict(jobs)
+    try:
+        result = storage_manager.delete_job_storage(jobs_snapshot, job_id, mode=mode, dry_run=dry_run)
+    except ValueError as err:
+        return jsonify({"error": str(err)}), 400
+    if not dry_run and mode == "job":
+        with jobs_lock:
+            jobs.pop(job_id, None)
+        _job_state_path(job_id).unlink(missing_ok=True)
+    return jsonify(result)
+
+
+@app.post("/api/storage/prune")
+def prune_storage_endpoint():
+    payload = request.get_json(silent=True) or {}
+    dry_run = bool(payload.get("dryRun", False))
+    with jobs_lock:
+        jobs_snapshot = dict(jobs)
+    result = storage_manager.prune_storage(
+        jobs_snapshot,
+        prune_temp=bool(payload.get("pruneTemp", True)),
+        prune_cache=bool(payload.get("pruneCache", False)),
+        prune_jobs=bool(payload.get("pruneJobs", False)),
+        prune_failed_jobs=bool(payload.get("pruneFailedJobs", True)),
+        dry_run=dry_run,
+    )
+    return jsonify(result)
 
 
 @app.get("/")
