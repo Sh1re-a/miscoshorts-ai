@@ -291,7 +291,25 @@ function Invoke-Download($url, $destinationPath, $label) {
     else {
         Write-SetupAction "Downloading $label ..."
     }
-    Invoke-WebRequest -Uri $url -OutFile $destinationPath
+
+    $maxAttempts = 3
+    $delaySeconds = 3
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $destinationPath
+            return
+        }
+        catch {
+            if ($attempt -lt $maxAttempts) {
+                Write-SetupInfo "Download attempt $attempt failed: $($_.Exception.Message). Retrying in ${delaySeconds}s ..."
+                Start-Sleep -Seconds $delaySeconds
+                $delaySeconds *= 2
+            }
+            else {
+                throw "Could not download $label after $maxAttempts attempts. Check your internet connection and try running launch_app.bat again. Details: $($_.Exception.Message)"
+            }
+        }
+    }
 }
 
 function Install-WithWinget($packageId, $label) {
@@ -370,8 +388,13 @@ function Install-NodeDirectly {
 
     Write-SetupAction "Running Node.js installer ..."
     $process = Start-Process -FilePath "msiexec.exe" -ArgumentList @("/i", "`"$nodeInstallerPath`"", "/qn", "/norestart") -Wait -PassThru
-    if ($process.ExitCode -ne 0) {
-        throw "Node.js installer exited with code $($process.ExitCode)."
+    # 0 = success, 1641/3010 = success + reboot pending (non-critical for our use)
+    $successCodes = @(0, 1641, 3010)
+    if ($successCodes -notcontains $process.ExitCode) {
+        if ($process.ExitCode -eq 5) {
+            throw "Node.js installer was blocked (Access Denied). Right-click launch_app.bat and choose 'Run as administrator', then try again."
+        }
+        throw "Node.js installer exited with code $($process.ExitCode). If the problem persists, download and install Node.js manually from https://nodejs.org and run launch_app.bat again."
     }
 
     Refresh-SessionPath
@@ -771,7 +794,7 @@ function Invoke-Setup {
         Write-SetupAction "Installing Python core packages ..."
         Write-SetupInfo "This is the app runtime only. The speech model is downloaded on first transcription."
         Write-SetupInfo "Expected first-time app dependency download: usually under a few hundred MB, depending on Windows wheel selection."
-        Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "--prefer-binary", "--quiet", "-r", "requirements.txt") "Installing Python dependencies failed."
+        Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "--prefer-binary", "--no-input", "-r", "requirements.txt") "Installing Python dependencies failed. Read the output above for the specific package that caused the error."
         Write-StateValue $pythonCoreStamp $pythonCoreSignature
         Write-SetupDone "Python core packages are up to date."
     }
@@ -784,7 +807,7 @@ function Invoke-Setup {
         if (-not (Test-StateMatch $pythonOptionalStamp $pythonOptionalSignature)) {
             Write-SetupAction "Installing optional pro diarization add-ons ..."
             Write-SetupInfo "This optional bundle is much heavier than the default setup and is only needed for advanced diarization."
-            Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "--prefer-binary", "--quiet", "-r", "requirements-optional.txt") "Installing optional pro dependencies failed."
+            Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "--prefer-binary", "--no-input", "-r", "requirements-optional.txt") "Installing optional pro dependencies failed. Read the output above for details."
             Write-StateValue $pythonOptionalStamp $pythonOptionalSignature
             Write-SetupDone "Optional Python add-ons are up to date."
         }

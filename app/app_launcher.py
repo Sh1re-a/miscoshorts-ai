@@ -178,12 +178,12 @@ def main() -> None:
             stop_listener_on_port(5001)
             time.sleep(1)
             backend_process = subprocess.Popen([str(backend_python), "-m", "app.server"], cwd=PROJECT_ROOT, env=launch_env)
-            wait_for_url(HEALTH_URL, timeout=20, process=backend_process, name="local app")
+            wait_for_url(HEALTH_URL, timeout=60, process=backend_process, name="local app")
     else:
         print(f"Starting local app on {APP_URL} ...")
         logger.info("Starting local app at %s", APP_URL)
         backend_process = subprocess.Popen([str(backend_python), "-m", "app.server"], cwd=PROJECT_ROOT, env=launch_env)
-        wait_for_url(HEALTH_URL, timeout=20, process=backend_process, name="local app")
+        wait_for_url(HEALTH_URL, timeout=60, process=backend_process, name="local app")
 
     print(f"Private speech-model cache: {whisper_cache_dir}")
     print(f"Support log: {LOG_PATH}")
