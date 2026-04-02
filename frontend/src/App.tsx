@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { CheckCircle2, Download, HardDrive, LoaderCircle, PlaySquare, RefreshCw, RotateCcw, ThumbsUp, ThumbsDown, BarChart3, Trash2 } from 'lucide-react'
+import { CheckCircle2, Download, HardDrive, LoaderCircle, Play, PlaySquare, RefreshCw, RotateCcw, ThumbsUp, ThumbsDown, BarChart3, Trash2 } from 'lucide-react'
 
 import { Badge } from './components/ui/badge'
 import { Button } from './components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card'
 import { Input } from './components/ui/input'
 import { Label } from './components/ui/label'
 import { Progress } from './components/ui/progress'
@@ -27,7 +26,7 @@ function App() {
   const [renderProfiles, setRenderProfiles] = useState<Record<string, string>>(fallbackRenderProfiles)
   const [selectedRenderProfile, setSelectedRenderProfile] = useState(fallbackRenderProfile)
   const [speakerMode, setSpeakerMode] = useState('auto')
-  const [hasPyannoteToken, setHasPyannoteToken] = useState(false)
+  const [, setHasPyannoteToken] = useState(false)
   const [outputFilename, setOutputFilename] = useState('short_con_subs.mp4')
   const [jobId, setJobId] = useState<string | null>(null)
   const [job, setJob] = useState<JobPayload>({ status: 'idle' })
@@ -42,6 +41,7 @@ function App() {
   const [cleanupConfirm, setCleanupConfirm] = useState<null | 'source' | 'job'>(null)
   const [sourceMediaDeleted, setSourceMediaDeleted] = useState(false)
   const [cleanupActionError, setCleanupActionError] = useState<string | null>(null)
+  const [previewClipIndex, setPreviewClipIndex] = useState<number | null>(null)
   const [storageReport, setStorageReport] = useState<StorageReport | null>(null)
   const [storageLoading, setStorageLoading] = useState(false)
   const [showStorage, setShowStorage] = useState(false)
@@ -51,6 +51,11 @@ function App() {
   const [runtimeState, setRuntimeState] = useState<RuntimePayload | null>(null)
   const [knownRuntimeSessionId, setKnownRuntimeSessionId] = useState<string | null>(null)
   const pollErrorCountRef = useRef(0)
+  const jobIdRef = useRef<string | null>(null)
+  const pollAbortRef = useRef<AbortController | null>(null)
+
+  // Keep ref in sync so async callbacks can read the latest value
+  useEffect(() => { jobIdRef.current = jobId }, [jobId])
 
   useEffect(() => {
     let cancelled = false
@@ -129,8 +134,15 @@ function App() {
       return
     }
 
+    // Abort any previous in-flight poll before starting a new one
+    pollAbortRef.current?.abort()
+    const controller = new AbortController()
+    pollAbortRef.current = controller
+
     try {
-      const response = await fetch(`/api/jobs/${jobId}`)
+      const response = await fetch(`/api/jobs/${jobId}`, { signal: controller.signal })
+      // Guard: if jobId was cleared while the fetch was in-flight, discard the response
+      if (jobIdRef.current !== jobId) return
       const payload = await readJsonResponse<JobPayload>(response)
 
       if (response.status === 404) {
@@ -155,6 +167,7 @@ function App() {
       pollErrorCountRef.current = 0
       setJob(payload)
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return
       pollErrorCountRef.current += 1
       if (pollErrorCountRef.current >= 3) {
         const message = error instanceof Error ? error.message : 'Could not refresh the live job status.'
@@ -174,6 +187,9 @@ function App() {
 
   useEffect(() => {
     if (!jobId) {
+      // Abort any in-flight poll when jobId becomes null (e.g. resetFlow)
+      pollAbortRef.current?.abort()
+      pollAbortRef.current = null
       return
     }
 
@@ -183,7 +199,11 @@ function App() {
       void pollJob()
     }, 1200)
 
-    return () => window.clearInterval(intervalId)
+    return () => {
+      window.clearInterval(intervalId)
+      pollAbortRef.current?.abort()
+      pollAbortRef.current = null
+    }
   }, [jobId, pollJob])
 
   useEffect(() => {
@@ -219,7 +239,6 @@ function App() {
   const hasAvailableApiKey = Boolean(apiKey.trim()) || hasConfiguredApiKey
   const hasBlockingDoctorFailure = doctorReport?.status === 'FAIL'
   const canSubmit = Boolean(videoUrl.trim()) && hasAvailableApiKey && !hasBlockingDoctorFailure && !isSubmitting && !isWorking
-  const startButtonLabel = isSubmitting || isWorking ? 'Job running' : 'Start studio render'
   const etaWindow = useMemo(() => getEtaWindow(job, selectedClipCount, nowMs), [job, selectedClipCount, nowMs])
   const etaLabel = job.etaSeconds != null
     ? formatEta(job.etaSeconds)
@@ -231,8 +250,31 @@ function App() {
   const currentRenderProfileLabel = renderProfiles[selectedRenderProfile] ?? renderProfiles[fallbackRenderProfile] ?? 'Studio HQ 1080x1920 MP4'
   const progressValue = job.overallProgress ?? progressByStatus[job.status]
   const highlightedDoctorChecks = useMemo(
-    () => (doctorReport?.checks ?? []).filter((check) => check.status !== 'PASS').slice(0, 4),
-    [doctorReport],
+    () => {
+      const hasBrowserKey = Boolean(apiKey.trim())
+      return (doctorReport?.checks ?? [])
+        .filter((check) => check.status !== 'PASS')
+        .map((check) => {
+          // Gemini key: suppress the warning when user has entered a key in the browser
+          if (check.name === 'Gemini API key' && check.status === 'WARN' && hasBrowserKey) {
+            return { ...check, status: 'PASS' as const, message: 'Gemini key provided in this browser session.' }
+          }
+          // Pyannote: rewrite to human-readable language
+          if (check.name === 'Pyannote diarization') {
+            const friendlyName = 'Speaker separation (advanced)'
+            if (check.status === 'WARN') {
+              return { ...check, name: friendlyName, message: 'Advanced multi-speaker detection is off — not needed for most videos.' }
+            }
+            if (check.status === 'FAIL') {
+              return { ...check, name: friendlyName, message: 'Advanced speaker splitting is enabled but not fully set up.' }
+            }
+          }
+          return check
+        })
+        .filter((check) => check.status !== 'PASS')
+        .slice(0, 4)
+    },
+    [doctorReport, apiKey],
   )
   const highlightedStorage = useMemo(
     () => doctorReport?.storage ? Object.entries(doctorReport.storage).slice(0, 4) : [],
@@ -249,12 +291,25 @@ function App() {
   }, [runtimeState])
 
   function resetFlow() {
+    // Abort any in-flight job poll immediately so it can't overwrite the reset
+    pollAbortRef.current?.abort()
+    pollAbortRef.current = null
+    pollErrorCountRef.current = 0
+
     setJobId(null)
     setJob({ status: 'idle' })
     setRequestError(null)
     setIsSubmitting(false)
     setOutputFilename('short_con_subs.mp4')
+
+    // Clear per-job UI state
     setClipFeedback({})
+    setCleanupConfirm(null)
+    setSourceMediaDeleted(false)
+    setCleanupActionError(null)
+    setPreviewClipIndex(null)
+    setAnalyticsData(null)
+    setShowAnalytics(false)
   }
 
   const handleRating = useCallback(async (clipIndex: number, rating: 'good' | 'bad') => {
@@ -387,10 +442,7 @@ function App() {
       })
       if (res.ok) {
         // Wipe the panel immediately — a deleted job must not linger in the UI.
-        // Clearing jobId stops the poll interval via its useEffect dependency.
-        setJobId(null)
-        setJob({ status: 'idle' })
-        setClipFeedback({})
+        resetFlow()
         void loadStorageReport()
       } else {
         const data = await readJsonResponse<{ error?: string }>(res).catch(() => ({} as { error?: string }))
@@ -530,36 +582,206 @@ function App() {
     }
   }
 
-  return (
-    <main className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(180,220,255,0.35),_transparent_28%),linear-gradient(180deg,_#f6fbff_0%,_#eef7ff_42%,_#f7fbff_100%)] text-slate-900">
-      <div className="mx-auto flex min-h-screen max-w-3xl items-center justify-center px-4 py-8 sm:px-6 lg:px-8">
-        <Card className="w-full overflow-hidden rounded-[34px] border border-sky-100 bg-white shadow-[0_30px_80px_rgba(66,124,184,0.14)]">
-          <CardHeader className="border-b border-sky-100/90 bg-[linear-gradient(180deg,_rgba(247,251,255,0.98)_0%,_rgba(238,247,255,0.98)_100%)] p-6 sm:p-8">
-            <div className="flex items-start justify-between gap-4">
-              <div className="space-y-3">
-                <Badge variant="outline" className="border-sky-200 bg-sky-50 text-sky-700">
-                  Local Shorts Studio
-                </Badge>
-                <div className="space-y-2">
-                  <CardTitle className="app-heading text-3xl text-slate-950 sm:text-4xl">Create clean clips from one link</CardTitle>
-                  <CardDescription className="max-w-xl text-sm leading-6 text-slate-600 sm:text-base">
-                    Paste your YouTube link, add a Gemini key, and let the app handle the full Shorts workflow for you.
-                  </CardDescription>
+  /* ─── Sidebar module: System health ──────────────────────────────── */
+  const systemHealthModule = (
+    <section className="rounded-lg border border-border bg-white p-4">
+      <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">System</h3>
+      {doctorReport ? (
+        <div className="mt-2 space-y-1.5 text-xs">
+          <div className="flex items-center justify-between">
+            <span className="text-foreground font-medium">Status</span>
+            <span className={`font-semibold ${doctorReport.status === 'FAIL' ? 'text-destructive' : doctorReport.status === 'WARN' ? 'text-amber-600' : 'text-emerald-600'}`}>
+              {doctorReport.status}
+            </span>
+          </div>
+          {highlightedStorage.length > 0 ? (
+            <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-muted-foreground">
+              {highlightedStorage.map(([key, value]) => (
+                <span key={key}>{key}: {formatBytes(value.bytes)}</span>
+              ))}
+            </div>
+          ) : null}
+          {highlightedDoctorChecks.length > 0 ? (
+            <div className="space-y-0.5 text-muted-foreground">
+              {highlightedDoctorChecks.map((check) => (
+                <p key={check.name} className={check.status === 'FAIL' ? 'text-destructive' : 'text-amber-600'}>
+                  {check.name}: {check.message}
+                </p>
+              ))}
+            </div>
+          ) : (
+            <p className="text-muted-foreground">Ready for local renders.</p>
+          )}
+          {doctorReport.status === 'FAIL' ? (
+            <p className="mt-1 font-medium text-destructive">
+              Rendering is blocked. Fix the checks above.
+            </p>
+          ) : null}
+        </div>
+      ) : (
+        <p className="mt-2 text-xs text-muted-foreground">Loading checks…</p>
+      )}
+    </section>
+  )
+
+  /* ─── Sidebar module: Runtime ───────────────────────────────────── */
+  const runtimeModule = runtimeState ? (
+    <section className="rounded-lg border border-border bg-white p-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Runtime</h3>
+        {runtimeState.consistency.status === 'degraded' ? (
+          <span className="h-2 w-2 rounded-full bg-destructive" />
+        ) : (
+          <span className="h-2 w-2 rounded-full bg-emerald-500" />
+        )}
+      </div>
+      <div className="mt-2 space-y-1 text-xs text-muted-foreground">
+        <div className="flex justify-between"><span>Active</span><span className="text-foreground font-medium">{runtimeState.queue.activeCount}</span></div>
+        <div className="flex justify-between"><span>Queued</span><span className="text-foreground font-medium">{runtimeState.queue.queuedCount}</span></div>
+        <div className="flex justify-between"><span>Waiting</span><span className="text-foreground font-medium">{runtimeState.queue.waitingForWorkerCount + runtimeState.queue.waitingForIdenticalRenderCount}</span></div>
+        {runtimeRecoverySummary ? (
+          <p className="pt-1 text-[11px]">
+            Recovery: {runtimeRecoverySummary.clearedLocks} lock(s), {runtimeRecoverySummary.clearedTempWorkspaces} temp, {runtimeRecoverySummary.recoveredJobs} job(s)
+          </p>
+        ) : null}
+        {runtimeIssues.length > 0 ? (
+          <div className="pt-1 space-y-0.5 text-destructive">
+            {runtimeIssues.map((issue) => <p key={issue}>{issue}</p>)}
+          </div>
+        ) : null}
+      </div>
+    </section>
+  ) : null
+
+  /* ─── Sidebar module: Storage ───────────────────────────────────── */
+  const storageModule = (
+    <section className="rounded-lg border border-border bg-white p-4">
+      <button
+        type="button"
+        onClick={() => {
+          setShowStorage(prev => !prev)
+          if (!storageReport) void loadStorageReport()
+        }}
+        className="flex w-full items-center justify-between text-xs font-semibold uppercase tracking-wide text-muted-foreground hover:text-foreground transition-colors"
+      >
+        <span className="flex items-center gap-1.5">
+          <HardDrive className="h-3.5 w-3.5" />
+          Storage
+        </span>
+        <span className="flex items-center gap-1.5 font-normal normal-case">
+          {storageReport ? formatBytes(
+            (storageReport.summary.jobs.bytes ?? 0) +
+            (storageReport.summary.cache.bytes ?? 0) +
+            (storageReport.summary.temp.bytes ?? 0)
+          ) : null}
+          {storageLoading ? <RefreshCw className="h-3 w-3 animate-spin" /> : null}
+          <span>{showStorage ? '▲' : '▼'}</span>
+        </span>
+      </button>
+
+      {showStorage ? (
+        <div className="mt-3 space-y-2.5">
+          {storageReport ? (
+            <>
+              <div className="space-y-1.5 text-xs">
+                <div className="flex justify-between text-muted-foreground">
+                  <span>Renders</span>
+                  <span className="text-foreground font-medium">{formatBytes(storageReport.summary.jobs.bytes)}</span>
+                </div>
+                <div className="flex justify-between text-muted-foreground">
+                  <span>Cache</span>
+                  <span className="text-foreground font-medium">{formatBytes(storageReport.summary.cache.bytes)}</span>
+                </div>
+                <div className="flex justify-between text-muted-foreground">
+                  <span>Temp</span>
+                  <span className={`font-medium ${storageReport.summary.temp.bytes > 0 ? 'text-amber-600' : 'text-foreground'}`}>
+                    {formatBytes(storageReport.summary.temp.bytes)}
+                  </span>
+                </div>
+                <div className="flex justify-between text-muted-foreground pt-0.5 border-t border-border">
+                  <span>Jobs</span>
+                  <span className="text-foreground">{storageReport.jobStateCounts.completed} done · {storageReport.jobStateCounts.failed} failed</span>
                 </div>
               </div>
 
-              {hasStarted ? (
-                <Button type="button" variant="secondary" className="shrink-0 bg-white text-slate-700 hover:bg-sky-50" onClick={resetFlow}>
-                  <RotateCcw className="mr-2 h-4 w-4" /> New job
-                </Button>
-              ) : null}
-            </div>
-          </CardHeader>
+              <div className="flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  disabled={pruneWorking || !storageReport.recommendations.canPruneTemp}
+                  onClick={() => void handlePruneTemp()}
+                  className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground ring-1 ring-border hover:bg-muted disabled:opacity-40 transition-colors"
+                >
+                  {pruneWorking ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                  Prune temp
+                </button>
+                <button
+                  type="button"
+                  disabled={pruneWorking || storageReport.jobStateCounts.failed === 0}
+                  onClick={() => void handlePruneFailed()}
+                  className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground ring-1 ring-border hover:bg-muted disabled:opacity-40 transition-colors"
+                >
+                  {pruneWorking ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                  Clear failed ({storageReport.jobStateCounts.failed})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void loadStorageReport()}
+                  disabled={storageLoading}
+                  className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground ring-1 ring-border hover:bg-muted disabled:opacity-40 transition-colors"
+                >
+                  <RefreshCw className={`h-3 w-3 ${storageLoading ? 'animate-spin' : ''}`} />
+                </button>
+              </div>
 
-          <CardContent className="space-y-6 p-6 sm:p-8">
-            {!hasStarted ? (
-              <form className="space-y-5" onSubmit={handleSubmit}>
-                <div className="space-y-2">
+              {lastPruneResult ? (
+                <p className="text-[11px] text-emerald-600">{lastPruneResult}</p>
+              ) : null}
+            </>
+          ) : (
+            <p className="text-xs text-muted-foreground">{storageLoading ? 'Loading…' : 'Could not load storage usage.'}</p>
+          )}
+        </div>
+      ) : null}
+    </section>
+  )
+
+  return (
+    <div className="flex min-h-screen flex-col bg-background text-foreground">
+      {/* ─── App bar ──────────────────────────────────────────────── */}
+      <header className="sticky top-0 z-20 flex h-12 shrink-0 items-center justify-between border-b border-border bg-white/80 px-4 backdrop-blur-sm sm:px-6">
+        <div className="flex items-center gap-2.5">
+          <span className="text-sm font-semibold tracking-tight text-foreground">Shorts Studio</span>
+          <span className="text-xs text-muted-foreground">Local</span>
+        </div>
+        <div className="flex items-center gap-3">
+          {/* Health dot */}
+          {doctorReport ? (
+            <span className={`h-2 w-2 rounded-full ${doctorReport.status === 'FAIL' ? 'bg-destructive' : doctorReport.status === 'WARN' ? 'bg-amber-500' : 'bg-emerald-500'}`} title={`System: ${doctorReport.status}`} />
+          ) : null}
+          {hasStarted ? (
+            <button type="button" onClick={resetFlow} className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium text-muted-foreground ring-1 ring-border hover:bg-muted transition-colors">
+              <RotateCcw className="h-3 w-3" /> New job
+            </button>
+          ) : null}
+        </div>
+      </header>
+
+      {/* ─── Main workspace ───────────────────────────────────────── */}
+      <div className="mx-auto flex w-full max-w-6xl flex-1 gap-5 p-4 sm:p-6 lg:flex-row flex-col">
+
+        {/* ─── Main column ────────────────────────────────────────── */}
+        <main className="min-w-0 flex-1 space-y-4">
+          {!hasStarted ? (
+            /* ━━━━ IDLE / FORM STATE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+            <form className="space-y-3" onSubmit={handleSubmit}>
+              {/* Compose section */}
+              <section className="rounded-lg border border-border bg-white p-4 space-y-3.5">
+                <div>
+                  <h2 className="text-sm font-semibold text-foreground">New render</h2>
+                  <p className="mt-0.5 text-xs text-muted-foreground">Paste a YouTube link and configure the output.</p>
+                </div>
+
+                <div className="space-y-1.5">
                   <Label htmlFor="videoUrl">YouTube URL</Label>
                   <Input
                     id="videoUrl"
@@ -569,18 +791,13 @@ function App() {
                     autoComplete="off"
                     required
                   />
-                  <p className="text-xs text-slate-500">Paste the full YouTube video link you want to turn into Shorts. The app handles the rest.</p>
                 </div>
 
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-3">
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
                     <Label htmlFor="apiKey">Gemini API key</Label>
-                    <button
-                      type="button"
-                      onClick={clearSavedApiKey}
-                      className="text-xs font-medium text-slate-500 transition hover:text-slate-900"
-                    >
-                      Clear saved key
+                    <button type="button" onClick={clearSavedApiKey} className="text-[11px] text-muted-foreground hover:text-foreground transition-colors">
+                      Clear saved
                     </button>
                   </div>
                   <Input
@@ -588,505 +805,276 @@ function App() {
                     type="password"
                     value={apiKey}
                     onChange={(event) => setApiKey(event.target.value)}
-                    placeholder={hasConfiguredApiKey ? 'Optional if GEMINI_API_KEY is already set in .env' : 'Paste your Gemini key'}
+                    placeholder={hasConfiguredApiKey ? 'Using server .env key' : 'Paste your Gemini key'}
                     autoComplete="off"
                   />
-                  <p className="text-xs text-slate-500">
+                  <p className="text-[11px] text-muted-foreground">
                     {hasConfiguredApiKey
-                      ? 'A Gemini key is already configured on this machine. You can still paste another key here for this browser session.'
-                      : apiKeyNotice}
+                      ? 'Server key detected. Paste another to override for this session.'
+                      : apiKey.trim()
+                        ? 'Key stored in this browser session.'
+                        : apiKeyNotice}
+                  </p>
+                </div>
+              </section>
+
+              {/* Render settings section */}
+              <section className="rounded-lg border border-border bg-white p-4 space-y-3.5">
+                <div>
+                  <h2 className="text-sm font-semibold text-foreground">Settings</h2>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    Speaker mode: {speakerMode === 'auto' ? 'auto' : speakerMode} · Subtitles: editorial
                   </p>
                 </div>
 
-                <div className="rounded-[24px] border border-sky-100 bg-sky-50/80 px-4 py-4 text-sm leading-6 text-slate-700">
-                  <p className="font-semibold text-slate-900">{currentRenderProfileLabel}</p>
-                  <p className="mt-2">The app runs a focused Shorts workflow: centered reframing, strong H.264 export settings, AAC audio, and a locked editorial subtitle system with a calmer premium finish.</p>
-                  <p className="mt-2">Keep the launcher window open while the job runs. Finished files appear here and in the local outputs folder.</p>
-                  <p className="mt-2 text-slate-500">
-                    Speaker engine: {hasPyannoteToken ? 'Pyannote when available, otherwise local heuristic' : 'Local heuristic speaker analysis'}.
-                    Current mode: {speakerMode}.
-                  </p>
-                  <p className="mt-2 text-slate-500">Subtitle style: fixed professional editorial preset. No manual tweaking in the dashboard.</p>
-                </div>
-
-                {doctorReport ? (
-                  <div className={`rounded-[24px] border px-4 py-4 text-sm leading-6 ${
-                    doctorReport.status === 'FAIL'
-                      ? 'border-rose-200 bg-rose-50 text-rose-900'
-                      : doctorReport.status === 'WARN'
-                        ? 'border-amber-200 bg-amber-50 text-amber-950'
-                        : 'border-emerald-200 bg-emerald-50 text-emerald-900'
-                  }`}>
-                    <p className="font-semibold">System check: {doctorReport.status}</p>
-                    <p className="mt-1">Log file: {doctorReport.logPath}</p>
-                    <p className="mt-1">Doctor report: {doctorReport.reportPath}</p>
-                    <p className="mt-1">Speech model cache: {doctorReport.paths.modelCacheDir}</p>
-                    {highlightedStorage.length > 0 ? (
-                      <div className="mt-2 grid gap-2 text-xs text-current sm:grid-cols-2">
-                        {highlightedStorage.map(([key, value]) => (
-                          <p key={key}>
-                            {key}: {formatBytes(value.bytes)}
-                          </p>
-                        ))}
-                      </div>
-                    ) : null}
-                    {highlightedDoctorChecks.length > 0 ? (
-                      <div className="mt-2 space-y-1 text-xs">
-                        {highlightedDoctorChecks.map((check) => (
-                          <p key={check.name}>
-                            {check.name}: {check.message}
-                          </p>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="mt-2 text-xs">The machine looks ready for local renders.</p>
-                    )}
-                    {doctorReport.status === 'FAIL' ? (
-                      <p className="mt-3 text-xs font-medium">
-                        Rendering is blocked until these setup issues are fixed. The most common fix on Windows is to move the project to a normal local folder and rerun `launch_app.bat`.
-                      </p>
-                    ) : null}
-                  </div>
-                ) : null}
-
-                {runtimeState ? (
-                  <div className={`rounded-[24px] border px-4 py-4 text-sm leading-6 ${
-                    runtimeState.consistency.status === 'degraded'
-                      ? 'border-rose-200 bg-rose-50 text-rose-900'
-                      : 'border-sky-100 bg-sky-50/80 text-slate-700'
-                  }`}>
-                    <p className="font-semibold">
-                      Backend runtime: {runtimeState.consistency.status === 'degraded' ? 'Needs attention' : 'Consistent'}
-                    </p>
-                    <p className="mt-1">Session: {runtimeState.runtimeSessionId}</p>
-                    <p className="mt-1">Active jobs: {runtimeState.queue.activeCount}. Queued jobs: {runtimeState.queue.queuedCount}.</p>
-                    <p className="mt-1">
-                      Waiting for worker: {runtimeState.queue.waitingForWorkerCount}. Waiting on identical render: {runtimeState.queue.waitingForIdenticalRenderCount}.
-                    </p>
-                    {runtimeRecoverySummary ? (
-                      <p className="mt-2 text-xs">
-                        Startup recovery cleared {runtimeRecoverySummary.clearedLocks} orphan lock(s), {runtimeRecoverySummary.clearedTempWorkspaces} stale temp workspace(s), and marked {runtimeRecoverySummary.recoveredJobs} interrupted job(s) as failed.
-                      </p>
-                    ) : null}
-                    {runtimeIssues.length > 0 ? (
-                      <div className="mt-2 space-y-1 text-xs">
-                        {runtimeIssues.map((issue) => (
-                          <p key={issue}>{issue}</p>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="mt-2 text-xs">The queue snapshot and live lock state currently agree.</p>
-                    )}
-                  </div>
-                ) : null}
-
-                {/* Storage summary panel */}
-                <div className="rounded-[24px] border border-slate-200 bg-slate-50/60 px-4 py-3">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowStorage(prev => !prev)
-                      if (!storageReport) void loadStorageReport()
-                    }}
-                    className="flex w-full items-center justify-between gap-3 text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors"
-                  >
-                    <span className="flex items-center gap-2">
-                      <HardDrive className="h-4 w-4" />
-                      Storage usage
-                    </span>
-                    <span className="flex items-center gap-2 text-xs font-normal">
-                      {storageReport ? formatBytes(
-                        (storageReport.summary.jobs.bytes ?? 0) +
-                        (storageReport.summary.cache.bytes ?? 0) +
-                        (storageReport.summary.temp.bytes ?? 0)
-                      ) : null}
-                      {storageLoading ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : null}
-                      <span className="text-slate-400">{showStorage ? '▲' : '▼'}</span>
-                    </span>
-                  </button>
-
-                  {showStorage ? (
-                    <div className="mt-3 space-y-3">
-                      {storageReport ? (
-                        <>
-                          <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
-                            <div className="rounded-lg bg-white border border-slate-200 px-3 py-2">
-                              <p className="font-medium text-slate-700">Finished renders</p>
-                              <p className="mt-0.5 text-base font-bold text-slate-900">{formatBytes(storageReport.summary.jobs.bytes)}</p>
-                              <p className="mt-0.5 text-slate-400">{storageReport.jobStateCounts.completed} completed, {storageReport.jobStateCounts.failed} failed</p>
-                            </div>
-                            <div className="rounded-lg bg-white border border-slate-200 px-3 py-2">
-                              <p className="font-medium text-slate-700">Cache</p>
-                              <p className="mt-0.5 text-base font-bold text-slate-900">{formatBytes(storageReport.summary.cache.bytes)}</p>
-                              {storageReport.summary.cache.sourceMediaBytes > 0 ? (
-                                <p className="mt-0.5 text-slate-400">{formatBytes(storageReport.summary.cache.sourceMediaBytes)} source media</p>
-                              ) : (
-                                <p className="mt-0.5 text-slate-400">transcripts &amp; analysis</p>
-                              )}
-                            </div>
-                            <div className="rounded-lg bg-white border border-slate-200 px-3 py-2">
-                              <p className="font-medium text-slate-700">Temp files</p>
-                              <p className={`mt-0.5 text-base font-bold ${storageReport.summary.temp.bytes > 0 ? 'text-amber-700' : 'text-slate-900'}`}>{formatBytes(storageReport.summary.temp.bytes)}</p>
-                              <p className="mt-0.5 text-slate-400">{storageReport.summary.temp.bytes > 0 ? 'stale render workspaces' : 'clean'}</p>
-                            </div>
-                          </div>
-
-                          <div className="flex flex-wrap gap-2">
-                            <button
-                              type="button"
-                              disabled={pruneWorking || !storageReport.recommendations.canPruneTemp}
-                              onClick={() => void handlePruneTemp()}
-                              className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100 disabled:opacity-40 transition-colors"
-                            >
-                              {pruneWorking ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
-                              Clean up stale temp files
-                            </button>
-                            <button
-                              type="button"
-                              disabled={pruneWorking || storageReport.jobStateCounts.failed === 0}
-                              onClick={() => void handlePruneFailed()}
-                              className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100 disabled:opacity-40 transition-colors"
-                            >
-                              {pruneWorking ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
-                              Clear failed-job records ({storageReport.jobStateCounts.failed})
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => void loadStorageReport()}
-                              disabled={storageLoading}
-                              className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-slate-500 ring-1 ring-slate-200 hover:bg-slate-100 disabled:opacity-40 transition-colors"
-                            >
-                              <RefreshCw className={`h-3 w-3 ${storageLoading ? 'animate-spin' : ''}`} /> Refresh
-                            </button>
-                          </div>
-
-                          {lastPruneResult ? (
-                            <p className="text-xs text-emerald-700">{lastPruneResult}</p>
-                          ) : null}
-                        </>
-                      ) : (
-                        <p className="text-xs text-slate-500">{storageLoading ? 'Loading…' : 'Could not load storage usage.'}</p>
-                      )}
-                    </div>
-                  ) : null}
-                </div>
-
-                <div className="space-y-2">
-                  <Label>Number of clips</Label>
-                  <div className="flex gap-2">
+                <div className="space-y-1.5">
+                  <Label>Clips</Label>
+                  <div className="flex gap-1.5">
                     {[1, 2, 3, 4, 5].map((n) => (
                       <button
                         key={n}
                         type="button"
                         onClick={() => setSelectedClipCount(n)}
-                        className={`flex h-10 w-10 items-center justify-center rounded-xl border text-sm font-medium transition-colors ${
+                        className={`flex h-8 w-8 items-center justify-center rounded-md text-xs font-medium transition-colors ${
                           selectedClipCount === n
-                            ? 'border-sky-500 bg-sky-500 text-white'
-                            : 'border-slate-200 bg-white text-slate-700 hover:border-sky-300 hover:bg-sky-50'
+                            ? 'bg-primary text-primary-foreground'
+                            : 'bg-muted text-muted-foreground hover:bg-muted/80'
                         }`}
                       >
                         {n}
                       </button>
                     ))}
                   </div>
-                  <p className="text-xs text-slate-500">How many Shorts clips to generate from this video.</p>
                 </div>
 
-                <div className="space-y-2">
-                  <Label>Render profile</Label>
-                  <div className="grid gap-2 sm:grid-cols-3">
+                <div className="space-y-1.5">
+                  <Label>Profile</Label>
+                  <div className="grid gap-1.5 sm:grid-cols-3">
                     {Object.entries(renderProfiles).map(([key, label]) => (
                       <button
                         key={key}
                         type="button"
                         onClick={() => setSelectedRenderProfile(key)}
-                        className={`rounded-2xl border px-3 py-3 text-left text-sm transition-colors ${
+                        className={`rounded-md border px-3 py-2 text-left text-xs transition-colors ${
                           selectedRenderProfile === key
-                            ? 'border-sky-500 bg-sky-500 text-white'
-                            : 'border-slate-200 bg-white text-slate-700 hover:border-sky-300 hover:bg-sky-50'
+                            ? 'border-primary bg-primary text-primary-foreground'
+                            : 'border-border bg-white text-foreground hover:border-primary/30 hover:bg-muted'
                         }`}
                       >
                         <span className="block font-medium">{label}</span>
-                        <span className={`mt-1 block text-xs ${selectedRenderProfile === key ? 'text-sky-100' : 'text-slate-500'}`}>
-                          {key === 'fast' ? 'Fast previews and iteration' : key === 'balanced' ? 'Daily default for local runs' : 'Highest finish quality'}
+                        <span className={`mt-0.5 block text-[10px] ${selectedRenderProfile === key ? 'text-primary-foreground/70' : 'text-muted-foreground'}`}>
+                          {key === 'fast' ? 'Quick iteration' : key === 'balanced' ? 'Daily default' : 'Highest quality'}
                         </span>
                       </button>
                     ))}
                   </div>
-                  <p className="text-xs text-slate-500">Fast for iteration, balanced for normal use, studio for final delivery.</p>
                 </div>
 
-                <Button className="h-12 w-full rounded-2xl bg-sky-600 text-white hover:bg-sky-700" type="submit" disabled={!canSubmit}>
+                <Button className="w-full" type="submit" disabled={!canSubmit}>
                   {isSubmitting || isWorking ? (
-                    <>
-                      <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> Job running
-                    </>
+                    <><LoaderCircle className="mr-2 h-3.5 w-3.5 animate-spin" /> Rendering…</>
                   ) : (
-                    <>
-                      <PlaySquare className="mr-2 h-4 w-4" /> {startButtonLabel}
-                    </>
+                    <><PlaySquare className="mr-2 h-3.5 w-3.5" /> Start render</>
                   )}
                 </Button>
 
                 {!hasAvailableApiKey ? (
-                  <p className="text-sm text-amber-700">Add a Gemini key here or place `GEMINI_API_KEY` in `.env` before starting the render.</p>
+                  <p className="text-xs text-amber-600">Add a Gemini key above or set GEMINI_API_KEY in .env.</p>
                 ) : null}
-
-                {requestError ? <p className="text-sm text-rose-600">{requestError}</p> : null}
+                {requestError ? <p className="text-xs text-destructive">{requestError}</p> : null}
                 {hasBlockingDoctorFailure ? (
-                  <p className="text-sm text-rose-700">Rendering is currently blocked by failed system checks shown above.</p>
+                  <p className="text-xs text-destructive">Rendering is blocked by system check failures.</p>
                 ) : null}
-              </form>
-            ) : (
-              <div className="space-y-6">
-                <div className="flex items-start justify-between gap-4 rounded-[26px] border border-sky-100 bg-sky-50/70 px-5 py-5">
-                  <div className="space-y-2">
-                    <p className="app-kicker text-sm font-medium text-sky-700">Current step</p>
-                    <p className="text-xl font-semibold text-slate-950">{statusTitles[job.status]}</p>
-                    <p className="app-copy text-sm leading-6 text-slate-600">{job.message ?? stageDescriptions[job.status]}</p>
+              </section>
+            </form>
+          ) : (
+            /* ━━━━ ACTIVE JOB / COMPLETED STATE ━━━━━━━━━━━━━━━━━━━━ */
+            <div className="space-y-4">
+              {/* Status header */}
+              <section className="rounded-lg border border-border bg-white p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <h2 className="text-sm font-semibold text-foreground">{statusTitles[job.status]}</h2>
+                      <Badge variant={job.status === 'failed' ? 'destructive' : 'secondary'}>{job.status}</Badge>
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">{job.message ?? stageDescriptions[job.status]}</p>
                     {job.stageProgress != null ? (
-                      <p className="text-xs text-slate-500">Step progress: {job.stageProgress}%</p>
+                      <p className="mt-0.5 text-[11px] text-muted-foreground">Stage progress: {job.stageProgress}%</p>
                     ) : null}
                   </div>
-                  <Badge variant={job.status === 'failed' ? 'destructive' : 'secondary'} className="shrink-0 border-sky-200 bg-white text-slate-700">
-                    {job.status}
-                  </Badge>
                 </div>
-
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between text-sm text-slate-500">
+                <div className="mt-3 space-y-1">
+                  <div className="flex items-center justify-between text-[11px] text-muted-foreground">
                     <span>Progress</span>
                     <span>{progressValue}%</span>
                   </div>
                   <Progress value={progressValue} />
                 </div>
-
                 {etaLabel ? (
-                  <div className="rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-950">
-                    Estimated time left: {etaLabel}
-                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">ETA: {etaLabel}</p>
                 ) : null}
+              </section>
 
-                {job.status === 'queued' && (job.queuePosition ?? 0) > 0 ? (
-                  <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
-                    Queue position: {job.queuePosition}. The current render finishes before this job starts.
-                  </div>
-                ) : null}
+              {/* Queue notices */}
+              {job.status === 'queued' && (job.queuePosition ?? 0) > 0 ? (
+                <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  Queue position: {job.queuePosition}
+                </div>
+              ) : null}
 
-                {job.status === 'queued' && job.queueState === 'waiting_for_identical_render' ? (
-                  <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
-                    Waiting on identical render{job.waitingOnJobId ? `: ${job.waitingOnJobId}` : ''}. No duplicate render will start unless the existing one fully clears.
-                  </div>
-                ) : null}
+              {job.status === 'queued' && job.queueState === 'waiting_for_identical_render' ? (
+                <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  Waiting on identical render{job.waitingOnJobId ? `: ${job.waitingOnJobId}` : ''}
+                </div>
+              ) : null}
 
-                <div className="grid gap-3 sm:grid-cols-2">
+              {/* Pipeline stages */}
+              <section className="rounded-lg border border-border bg-white p-4">
+                <div className="grid grid-cols-3 gap-1.5 sm:grid-cols-6">
                   {Object.entries(statusTitles)
                     .filter(([status]) => status !== 'idle' && status !== 'failed')
                     .map(([status, title]) => {
                       const active = progressByStatus[job.status] >= progressByStatus[status as JobStatus]
                       return (
-                        <div
-                          key={status}
-                          className={`rounded-2xl border px-4 py-3 text-sm ${
-                            active ? 'border-amber-200 bg-amber-50 text-slate-900' : 'border-slate-200 bg-slate-50 text-slate-500'
-                          }`}
-                        >
-                          {title}
+                        <div key={status} className={`rounded-md px-2 py-1.5 text-center text-[10px] font-medium ${active ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground'}`}>
+                          {title.replace('Under ', '').replace('Ready for ', '')}
                         </div>
                       )
                     })}
                 </div>
+              </section>
 
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm leading-6 text-slate-700">
-                  <p className="font-semibold text-slate-900">What happens now</p>
-                  <p className="mt-2">{stageDescriptions[job.status]}</p>
-                  <p className="mt-3 text-slate-500">Requested clips: {effectiveClipCount}. Output profile: {job.result?.renderProfile ?? currentRenderProfileLabel}. Finished files are saved locally in the outputs folder and will appear below when ready.</p>
-                  {job.jobFingerprint ? <p className="mt-2 text-slate-500">Request fingerprint: {job.jobFingerprint}</p> : null}
-                  {job.runtimeSessionId ? <p className="mt-2 text-slate-500">Backend session: {job.runtimeSessionId}</p> : null}
-                  {job.result?.reusedExisting ? <p className="mt-2 text-emerald-700">This run reused an existing finished render instead of generating duplicate files again.</p> : null}
-                  {job.result?.runReportPath ? <p className="mt-2 text-slate-500">Run report: {job.result.runReportPath}</p> : null}
-                  {doctorReport ? <p className="mt-2 text-slate-500">Support log: {doctorReport.logPath}</p> : null}
-                </div>
+              {/* Job detail */}
+              <section className="rounded-lg border border-border bg-white p-4 text-xs text-muted-foreground space-y-1">
+                <p>Clips: {effectiveClipCount} · Profile: {job.result?.renderProfile ?? currentRenderProfileLabel}</p>
+                {job.result?.reusedExisting ? <p className="text-emerald-600">Reused existing render.</p> : null}
+              </section>
 
-                {job.error ? (
-                  <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-                    <p>{job.error}</p>
-                    {job.errorHelp ? <p className="mt-2 text-rose-800">{job.errorHelp}</p> : null}
-                    {job.errorId ? <p className="mt-2 text-rose-800">Support ID: {job.errorId}</p> : null}
-                    {doctorReport ? <p className="mt-2 text-rose-800">Send this log bundle: {doctorReport.reportPath}</p> : null}
-                  </div>
-                ) : null}
+              {/* Error */}
+              {job.error ? (
+                <section className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-xs text-destructive space-y-1">
+                  <p className="font-medium">{job.error}</p>
+                  {job.errorHelp ? <p>{job.errorHelp}</p> : null}
+                  {job.errorId ? <p>Support ID: {job.errorId}</p> : null}
+                </section>
+              ) : null}
 
-                <div className="space-y-3">
-                  <div>
-                    <p className="app-heading text-lg text-slate-950">Live activity</p>
-                    <p className="mt-1 text-sm text-slate-500">The latest exact messages from the local process.</p>
-                  </div>
-
+              {/* Live log */}
+              <section className="rounded-lg border border-border bg-white p-4">
+                <h3 className="text-xs font-semibold text-foreground">Activity</h3>
                 {recentLogs.length > 0 ? (
-                  <div className="space-y-3">
+                  <div className="mt-2 space-y-1">
                     {recentLogs.map((entry, index) => (
-                      <div key={`${entry.time}-${index}`} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                        <div className="flex items-center justify-between gap-3 text-xs uppercase tracking-[0.12em] text-slate-500">
-                          <span>{entry.stage}</span>
-                          <span>{formatLogTime(entry.time)}</span>
-                        </div>
-                        <p className="mt-2 text-sm text-slate-700">{entry.message}</p>
+                      <div key={`${entry.time}-${index}`} className="flex items-start gap-2 text-[11px]">
+                        <span className="shrink-0 font-mono text-muted-foreground">{formatLogTime(entry.time)}</span>
+                        <span className="shrink-0 uppercase tracking-wider text-muted-foreground/60 text-[10px]">{entry.stage}</span>
+                        <span className="text-foreground">{entry.message}</span>
                       </div>
                     ))}
                   </div>
                 ) : (
-                  <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-sm text-slate-500">
-                    No backend activity yet.
-                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">Waiting for backend activity…</p>
                 )}
-                </div>
+              </section>
 
-                <div className="space-y-4 rounded-[26px] border border-slate-200 bg-white p-5 shadow-[0_12px_30px_rgba(66,124,184,0.08)]">
-                  <div>
-                    <p className="app-heading text-lg text-slate-950">Downloads</p>
-                    <p className="mt-1 text-sm text-slate-500">When the render finishes, your files appear here.</p>
-                  </div>
+              {/* ━━━ Output / Downloads ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
+              <section className="rounded-lg border border-border bg-white p-4 space-y-3">
+                <h3 className="text-sm font-semibold text-foreground">Output</h3>
 
                 {job.status === 'completed' && job.result && jobId ? (
                   <>
-                    <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
-                      <div className="mb-2 flex items-center gap-2 font-medium">
-                        <CheckCircle2 className="h-4 w-4" /> {job.result.clipCount} clip(s) ready
-                      </div>
-                      <p>{job.result.title ?? 'Your first clip is ready.'}</p>
-                      <p className="mt-2 text-emerald-900">Quality profile: {job.result.renderProfile ?? currentRenderProfileLabel}</p>
-                      {job.result.reusedExisting ? <p className="mt-2 text-emerald-900">Reuse mode: existing finished clips were reused for this exact request.</p> : null}
-                      <p className="mt-2 text-emerald-800/80">Saved locally in {job.result.outputDir}</p>
-                      {job.result.runReportPath ? <p className="mt-2 text-emerald-800/80">Run report saved in {job.result.runReportPath}</p> : null}
+                    {/* Completion banner */}
+                    <div className="flex items-center gap-2 rounded-md bg-emerald-50 border border-emerald-200 px-3 py-2 text-xs text-emerald-800">
+                      <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                      <span><strong>{job.result.clipCount} clip(s)</strong> ready · {job.result.renderProfile ?? currentRenderProfileLabel}</span>
+                      {job.result.reusedExisting ? <span className="text-emerald-600"> · reused</span> : null}
                     </div>
 
+                    {/* Run stats (compact) */}
                     {job.result.runSummary ? (
-                      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
-                        <p className="font-semibold text-slate-950">Run profile</p>
-                        <p className="mt-2">
-                          Total time: {job.result.runSummary.totalJobSeconds ?? 'unknown'}s.
-                          {' '}Generated: {job.result.runSummary.generatedClipCount ?? 0}.
-                          {' '}Reused: {job.result.runSummary.reusedClipCount ?? 0}.
-                        </p>
-                        {job.result.runSummary.slowestClip != null ? (
-                          <p className="mt-2 text-slate-500">
-                            Slowest clip: #{job.result.runSummary.slowestClip} ({job.result.runSummary.slowestClipSeconds ?? 0}s)
-                          </p>
-                        ) : null}
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs text-muted-foreground sm:grid-cols-4">
+                        <span>Time: {job.result.runSummary.totalJobSeconds ?? '?'}s</span>
+                        <span>Generated: {job.result.runSummary.generatedClipCount ?? 0}</span>
+                        {job.result.runSummary.finalOutputBytes ? <span>Size: {formatBytes(Number(job.result.runSummary.finalOutputBytes))}</span> : null}
                         {job.result.runSummary.peakRssBytes || job.result.runSummary.peakProcessRssBytes ? (
-                          <p className="mt-2 text-slate-500">
-                            Peak memory hint: {formatBytes(Number(job.result.runSummary.peakRssBytes ?? job.result.runSummary.peakProcessRssBytes ?? 0))}
-                          </p>
-                        ) : null}
-                        {job.result.runSummary.peakWorkspaceBytes ? (
-                          <p className="mt-2 text-slate-500">
-                            Peak workspace: {formatBytes(Number(job.result.runSummary.peakWorkspaceBytes))}
-                          </p>
-                        ) : null}
-                        {job.result.runSummary.finalOutputBytes ? (
-                          <p className="mt-2 text-slate-500">
-                            Final output size: {formatBytes(Number(job.result.runSummary.finalOutputBytes))}
-                          </p>
-                        ) : null}
-                        {(job.result.runSummary.slowestPhases?.length ?? 0) > 0 ? (
-                          <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
-                            {job.result.runSummary.slowestPhases?.slice(0, 4).map(([phase, seconds]) => (
-                              <span key={phase} className="rounded-full border border-slate-200 bg-white px-3 py-1">
-                                {phase}: {seconds}s
-                              </span>
-                            ))}
-                          </div>
+                          <span>Mem: {formatBytes(Number(job.result.runSummary.peakRssBytes ?? job.result.runSummary.peakProcessRssBytes ?? 0))}</span>
                         ) : null}
                       </div>
                     ) : null}
 
-                    <div className="space-y-3">
+                    {/* Clip list */}
+                    <div className="space-y-2.5">
                       {job.result.clips.map((clip) => {
                         const fb = clipFeedback[clip.index]
                         return (
-                        <div key={clip.index} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                            <div className="space-y-2">
-                              <p className="text-sm font-semibold text-slate-950">{clip.title ?? `Clip ${clip.index}`}</p>
-                              <p className="text-sm text-slate-600">{clip.reason ?? 'Gemini selected a strong moment from the source video.'}</p>
-                              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                                <span>{clip.start.toFixed(1)}s to {clip.end.toFixed(1)}s</span>
-                                {clip.contentType ? (
-                                  <Badge variant="outline" className="border-slate-300 text-xs">{clip.contentType}</Badge>
-                                ) : null}
-                                {clip.analytics?.confidence != null ? (
-                                  <span className="text-slate-400">conf {String(clip.analytics.confidence)}</span>
-                                ) : null}
-                                {clip.analytics?.speakerTrackingMode != null ? (
-                                  <span className="text-slate-400">focus {String(clip.analytics.speakerTrackingMode)}</span>
-                                ) : null}
-                                {clip.analytics?.speakerCountEstimate != null ? (
-                                  <span className="text-slate-400">{String(clip.analytics.speakerCountEstimate)} speaker(s)</span>
-                                ) : null}
-                                {clip.analytics?.speakerSwitches != null ? (
-                                  <span className="text-slate-400">{String(clip.analytics.speakerSwitches)} switches</span>
-                                ) : null}
-                                {clip.analytics?.speakerBalance != null ? (
-                                  <span className="text-slate-400">balance {String(clip.analytics.speakerBalance)}</span>
-                                ) : null}
-                                {clip.analytics?.speakerTrackingStability != null ? (
-                                  <span className="text-slate-400">tracking {String(clip.analytics.speakerTrackingStability)}</span>
-                                ) : null}
-                                {clip.analytics?.audioSpeakerCount != null ? (
-                                  <span className="text-slate-400">audio {String(clip.analytics.audioSpeakerCount)} speaker(s)</span>
-                                ) : null}
-                                {clip.analytics?.audioSpeakerSwitches != null ? (
-                                  <span className="text-slate-400">audio switches {String(clip.analytics.audioSpeakerSwitches)}</span>
-                                ) : null}
-                                {clip.analytics?.audioSpeakerConfidence != null ? (
-                                  <span className="text-slate-400">audio conf {String(clip.analytics.audioSpeakerConfidence)}</span>
-                                ) : null}
-                                {clip.analytics?.audioSpeakerProvider != null ? (
-                                  <span className="text-slate-400">audio engine {String(clip.analytics.audioSpeakerProvider)}</span>
-                                ) : null}
+                          <div key={clip.index} className="rounded-md border border-border p-3 space-y-2">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="text-xs font-semibold text-foreground">{clip.title ?? `Clip ${clip.index + 1}`}</p>
+                                <p className="mt-0.5 text-xs text-muted-foreground line-clamp-2">{clip.reason ?? 'Selected by Gemini.'}</p>
+                                <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+                                  <span>{clip.start.toFixed(1)}s – {clip.end.toFixed(1)}s</span>
+                                  {clip.contentType ? <Badge variant="outline" className="text-[11px] px-1.5 py-0">{clip.contentType}</Badge> : null}
+                                  {clip.analytics?.speakerCountEstimate != null ? <span>{String(clip.analytics.speakerCountEstimate)} speaker{clip.analytics.speakerCountEstimate === 1 ? '' : 's'}</span> : null}
+                                </div>
+                              </div>
+                              <div className="flex shrink-0 gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => setPreviewClipIndex(prev => prev === clip.index ? null : clip.index)}
+                                  className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition-colors ${
+                                    previewClipIndex === clip.index
+                                      ? 'bg-primary text-primary-foreground'
+                                      : 'text-muted-foreground ring-1 ring-border hover:bg-muted'
+                                  }`}
+                                >
+                                  <Play className="h-3 w-3" /> {previewClipIndex === clip.index ? 'Close' : 'Preview'}
+                                </button>
+                                <Button asChild size="sm" className="shrink-0">
+                                  <a href={`/api/jobs/${jobId}/download/video/${clip.index}`}>
+                                    <Download className="mr-1.5 h-3 w-3" /> Download
+                                  </a>
+                                </Button>
                               </div>
                             </div>
-                            <Button asChild className="bg-sky-600 text-white hover:bg-sky-700 sm:w-auto">
-                              <a href={`/api/jobs/${jobId}/download/video/${clip.index}`}>
-                                <Download className="mr-2 h-4 w-4" /> Download clip
-                              </a>
-                            </Button>
-                          </div>
 
-                          {/* Feedback section */}
-                          <div className="mt-3 border-t border-slate-200 pt-3">
-                            <div className="flex items-center gap-2">
-                              <span className="text-xs text-slate-500">Rate this clip:</span>
+                            {/* Inline video preview */}
+                            {previewClipIndex === clip.index ? (
+                              <div className="mt-2.5 overflow-hidden rounded-md border border-border bg-black">
+                                <video
+                                  key={`preview-${clip.index}`}
+                                  src={`/api/jobs/${jobId}/preview/video/${clip.index}`}
+                                  controls
+                                  autoPlay
+                                  playsInline
+                                  className="mx-auto max-h-[420px] w-auto"
+                                />
+                              </div>
+                            ) : null}
+
+                            {/* Feedback */}
+                            <div className="flex items-center gap-2 border-t border-border pt-2">
+                              <span className="text-xs text-muted-foreground">Rate:</span>
                               <button
                                 type="button"
                                 onClick={() => void handleRating(clip.index, 'good')}
-                                className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs font-medium transition-colors ${
-                                  fb?.rating === 'good'
-                                    ? 'bg-emerald-100 text-emerald-700 ring-1 ring-emerald-300'
-                                    : 'bg-slate-100 text-slate-500 hover:bg-emerald-50 hover:text-emerald-600'
+                                className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium transition-colors ${
+                                  fb?.rating === 'good' ? 'bg-emerald-100 text-emerald-700 ring-1 ring-emerald-200' : 'bg-muted text-muted-foreground hover:bg-emerald-50'
                                 }`}
-                              >
-                                <ThumbsUp className="h-3.5 w-3.5" /> Good
-                              </button>
+                              ><ThumbsUp className="h-3 w-3" /> Good</button>
                               <button
                                 type="button"
                                 onClick={() => void handleRating(clip.index, 'bad')}
-                                className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs font-medium transition-colors ${
-                                  fb?.rating === 'bad'
-                                    ? 'bg-red-100 text-red-700 ring-1 ring-red-300'
-                                    : 'bg-slate-100 text-slate-500 hover:bg-red-50 hover:text-red-600'
+                                className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium transition-colors ${
+                                  fb?.rating === 'bad' ? 'bg-red-100 text-red-700 ring-1 ring-red-200' : 'bg-muted text-muted-foreground hover:bg-red-50'
                                 }`}
-                              >
-                                <ThumbsDown className="h-3.5 w-3.5" /> Bad
-                              </button>
-                              {fb?.saved ? (
-                                <span className="text-xs text-emerald-600">Saved</span>
-                              ) : null}
+                              ><ThumbsDown className="h-3 w-3" /> Bad</button>
+                              {fb?.saved ? <span className="text-xs text-emerald-600">Saved</span> : null}
                             </div>
 
                             {fb?.rating ? (
-                              <div className="mt-2 flex flex-wrap gap-1.5">
+                              <div className="mt-1.5 flex flex-wrap gap-1.5">
                                 {feedbackTags
                                   .filter(t => fb.rating === 'good' ? t.positive : !t.positive)
                                   .map(tag => (
@@ -1094,12 +1082,12 @@ function App() {
                                       key={tag.id}
                                       type="button"
                                       onClick={() => void handleTagToggle(clip.index, tag.id)}
-                                      className={`rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors ${
+                                      className={`rounded-md px-2 py-0.5 text-xs font-medium transition-colors ${
                                         fb.tags.includes(tag.id)
                                           ? fb.rating === 'good'
                                             ? 'bg-emerald-100 text-emerald-700 ring-1 ring-emerald-200'
                                             : 'bg-red-100 text-red-700 ring-1 ring-red-200'
-                                          : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
+                                          : 'bg-muted text-muted-foreground hover:bg-muted/80'
                                       }`}
                                     >
                                       {tag.label}
@@ -1108,227 +1096,176 @@ function App() {
                               </div>
                             ) : null}
                           </div>
-                        </div>
                         )
                       })}
                     </div>
 
-                    <Button asChild variant="secondary" className="w-full">
+                    {/* Transcript download */}
+                    <Button asChild variant="outline" size="sm" className="w-full">
                       <a href={`/api/jobs/${jobId}/download/transcript`}>
-                        <Download className="mr-2 h-4 w-4" /> Download transcript
+                        <Download className="mr-1.5 h-3 w-3" /> Download transcript
                       </a>
                     </Button>
 
-                    {/* Disk-management section */}
-                    <div className="border-t border-slate-200 pt-4 space-y-3">
+                    {/* ─── Disk management ─────────────────────────── */}
+                    <div className="border-t border-border pt-3 space-y-2.5">
                       <div>
-                        <p className="text-xs font-medium text-slate-600">Free up disk space</p>
-                        {/* Compact per-job storage summary — answers "what's on disk right now?" */}
-                        <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                        <h4 className="text-xs font-semibold text-foreground">Disk</h4>
+                        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
                           {sourceMediaDeleted || job.result.sourceMediaPresent === false ? (
-                            <span className="flex items-center gap-1 text-emerald-600">
-                              <CheckCircle2 className="h-3 w-3" />
-                              Source video deleted
-                            </span>
+                            <span className="flex items-center gap-1 text-emerald-600"><CheckCircle2 className="h-3 w-3" /> Source deleted</span>
                           ) : (
-                            <span className="flex items-center gap-1">
-                              <HardDrive className="h-3 w-3 text-amber-500" />
-                              Source video on disk
-                            </span>
+                            <span className="flex items-center gap-1"><HardDrive className="h-3 w-3 text-amber-500" /> Source on disk</span>
                           )}
                           <span>
-                            {job.result.clipCount} clip(s) saved
-                            {job.result.runSummary?.finalOutputBytes
-                              ? ` · ${formatBytes(Number(job.result.runSummary.finalOutputBytes))}`
-                              : ''}
+                            {job.result.clipCount} clip(s)
+                            {job.result.runSummary?.finalOutputBytes ? ` · ${formatBytes(Number(job.result.runSummary.finalOutputBytes))}` : ''}
                           </span>
                         </div>
                       </div>
 
-                      {/* Action 1: delete downloaded source video, keep generated clips */}
+                      {/* Delete source */}
                       {sourceMediaDeleted || job.result?.sourceMediaPresent === false ? (
-                        <div className="flex items-center gap-2 text-xs text-slate-400">
-                          <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                          <span>Downloaded source video already deleted</span>
+                        <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                          <CheckCircle2 className="h-3 w-3 shrink-0 text-emerald-500" /> Source video already deleted
                         </div>
                       ) : cleanupConfirm === 'source' ? (
-                        <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 space-y-2">
-                          <p className="text-xs font-semibold text-amber-800">Delete downloaded source video?</p>
-                          <p className="text-xs text-amber-700">The original downloaded video file will be permanently removed. Your generated clips, transcript, and metadata are <span className="font-medium">kept</span>.</p>
-                          <div className="flex gap-2 pt-1">
-                            <button
-                              type="button"
-                              onClick={() => void handleDeleteSourceMedia()}
-                              className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700 transition-colors"
-                            >
-                              <Trash2 className="h-3 w-3" /> Yes, delete source video
+                        <div className="rounded-md border border-amber-200 bg-amber-50 p-2.5 space-y-1.5">
+                          <p className="text-[11px] font-semibold text-amber-800">Delete source video?</p>
+                          <p className="text-[11px] text-amber-700">Clips, transcript, and metadata are kept.</p>
+                          <div className="flex gap-1.5">
+                            <button type="button" onClick={() => void handleDeleteSourceMedia()} className="rounded-md bg-amber-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-amber-700 transition-colors">
+                              <Trash2 className="mr-1 inline h-3 w-3" /> Delete
                             </button>
-                            <button
-                              type="button"
-                              onClick={() => setCleanupConfirm(null)}
-                              className="rounded-lg px-3 py-1.5 text-xs font-medium text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100 transition-colors"
-                            >
+                            <button type="button" onClick={() => setCleanupConfirm(null)} className="rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground ring-1 ring-border hover:bg-muted transition-colors">
                               Cancel
                             </button>
                           </div>
                         </div>
                       ) : (
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <p className="text-xs font-medium text-slate-700">Delete downloaded source video</p>
-                            <p className="text-xs text-slate-500">Frees space · generated clips are kept</p>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => setCleanupConfirm('source')}
-                            className="shrink-0 inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-amber-700 ring-1 ring-amber-200 hover:bg-amber-50 hover:ring-amber-300 transition-colors"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" /> Delete source video
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] text-muted-foreground">Delete source video (keeps clips)</span>
+                          <button type="button" onClick={() => setCleanupConfirm('source')} className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-amber-700 ring-1 ring-amber-200 hover:bg-amber-50 transition-colors">
+                            <Trash2 className="h-3 w-3" /> Delete source
                           </button>
                         </div>
                       )}
 
-                      {/* Action 2: delete this render completely */}
+                      {/* Delete entire job */}
                       {cleanupConfirm === 'job' ? (
-                        <div className="rounded-lg border border-red-200 bg-red-50 p-3 space-y-2">
-                          <p className="text-xs font-semibold text-red-800">Delete this render completely?</p>
-                          <p className="text-xs text-red-700">All generated clips, transcript, and metadata will be permanently deleted. Make sure you have downloaded the clips you want to keep.</p>
-                          <div className="flex gap-2 pt-1">
-                            <button
-                              type="button"
-                              onClick={() => void handleDeleteJob()}
-                              className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-700 transition-colors"
-                            >
-                              <Trash2 className="h-3 w-3" /> Yes, delete everything
+                        <div className="rounded-md border border-red-200 bg-red-50 p-2.5 space-y-1.5">
+                          <p className="text-[11px] font-semibold text-red-800">Delete everything?</p>
+                          <p className="text-[11px] text-red-700">Download clips first — all files will be permanently removed.</p>
+                          <div className="flex gap-1.5">
+                            <button type="button" onClick={() => void handleDeleteJob()} className="rounded-md bg-red-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-red-700 transition-colors">
+                              <Trash2 className="mr-1 inline h-3 w-3" /> Delete all
                             </button>
-                            <button
-                              type="button"
-                              onClick={() => setCleanupConfirm(null)}
-                              className="rounded-lg px-3 py-1.5 text-xs font-medium text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100 transition-colors"
-                            >
+                            <button type="button" onClick={() => setCleanupConfirm(null)} className="rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground ring-1 ring-border hover:bg-muted transition-colors">
                               Cancel
                             </button>
                           </div>
                         </div>
                       ) : (
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <p className="text-xs font-medium text-slate-700">Delete this completed render</p>
-                            <p className="text-xs text-slate-500">Removes all generated clips, transcript, and metadata</p>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => setCleanupConfirm('job')}
-                            className="shrink-0 inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-red-600 ring-1 ring-red-200 hover:bg-red-50 hover:ring-red-300 transition-colors"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" /> Delete everything
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] text-muted-foreground">Delete entire render</span>
+                          <button type="button" onClick={() => setCleanupConfirm('job')} className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-red-600 ring-1 ring-red-200 hover:bg-red-50 transition-colors">
+                            <Trash2 className="h-3 w-3" /> Delete all
                           </button>
                         </div>
                       )}
+
+                      {cleanupActionError ? (
+                        <p className="rounded-md border border-destructive/20 bg-destructive/5 px-2 py-1.5 text-[11px] text-destructive">{cleanupActionError}</p>
+                      ) : null}
                     </div>
 
-                    {/* Cleanup error feedback */}
-                    {cleanupActionError ? (
-                      <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
-                        {cleanupActionError}
-                      </div>
-                    ) : null}
-
-                    {/* Analytics section */}
-                    <div className="border-t border-slate-200 pt-4">
+                    {/* Analytics */}
+                    <div className="border-t border-border pt-3">
                       <button
                         type="button"
                         onClick={() => {
                           setShowAnalytics(prev => !prev)
                           if (!analyticsData) void loadAnalytics()
                         }}
-                        className="flex items-center gap-2 text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors"
+                        className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
                       >
-                        <BarChart3 className="h-4 w-4" />
-                        {showAnalytics ? 'Hide' : 'Show'} performance insights
+                        <BarChart3 className="h-3.5 w-3.5" />
+                        {showAnalytics ? 'Hide' : 'Show'} insights
                       </button>
 
                       {showAnalytics && analyticsData ? (
-                        <div className="mt-3 space-y-3 rounded-xl border border-slate-200 bg-white p-4 text-sm">
-                          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                            <div className="rounded-lg bg-slate-50 p-3 text-center">
-                              <p className="text-lg font-bold text-slate-900">{analyticsData.totalClips}</p>
-                              <p className="text-xs text-slate-500">Total clips</p>
+                        <div className="mt-2 space-y-2">
+                          <div className="grid grid-cols-4 gap-1.5 text-center text-xs">
+                            <div className="rounded-md bg-muted p-2">
+                              <p className="text-base font-bold text-foreground">{analyticsData.totalClips}</p>
+                              <p className="text-[10px] text-muted-foreground">Total</p>
                             </div>
-                            <div className="rounded-lg bg-slate-50 p-3 text-center">
-                              <p className="text-lg font-bold text-slate-900">{analyticsData.totalRated}</p>
-                              <p className="text-xs text-slate-500">Rated</p>
+                            <div className="rounded-md bg-muted p-2">
+                              <p className="text-base font-bold text-foreground">{analyticsData.totalRated}</p>
+                              <p className="text-[10px] text-muted-foreground">Rated</p>
                             </div>
-                            <div className="rounded-lg bg-emerald-50 p-3 text-center">
-                              <p className="text-lg font-bold text-emerald-700">{analyticsData.totalGood}</p>
-                              <p className="text-xs text-emerald-600">Good</p>
+                            <div className="rounded-md bg-emerald-50 p-2">
+                              <p className="text-base font-bold text-emerald-700">{analyticsData.totalGood}</p>
+                              <p className="text-[10px] text-emerald-600">Good</p>
                             </div>
-                            <div className="rounded-lg bg-red-50 p-3 text-center">
-                              <p className="text-lg font-bold text-red-700">{analyticsData.totalBad}</p>
-                              <p className="text-xs text-red-600">Bad</p>
+                            <div className="rounded-md bg-red-50 p-2">
+                              <p className="text-base font-bold text-red-700">{analyticsData.totalBad}</p>
+                              <p className="text-[10px] text-red-600">Bad</p>
                             </div>
                           </div>
 
                           {analyticsData.overallApprovalRate != null ? (
-                            <div className="rounded-lg bg-sky-50 p-3">
-                              <p className="text-sm text-sky-800">
-                                Overall approval rate: <span className="font-bold">{(analyticsData.overallApprovalRate * 100).toFixed(0)}%</span>
-                                <span className="ml-1 text-xs text-sky-600">across {analyticsData.totalRated} rated clips</span>
-                              </p>
-                            </div>
+                            <p className="text-xs text-muted-foreground">
+                              Approval: <span className="font-semibold text-foreground">{(analyticsData.overallApprovalRate * 100).toFixed(0)}%</span> across {analyticsData.totalRated} rated
+                            </p>
                           ) : null}
 
                           {Object.keys(analyticsData.perContentType).length > 0 ? (
-                            <div>
-                              <p className="mb-2 text-xs font-medium text-slate-700">Per content type</p>
-                              <div className="space-y-1.5">
-                                {Object.entries(analyticsData.perContentType).map(([ct, stats]) => (
-                                  <div key={ct} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-xs">
-                                    <span className="font-medium text-slate-700">{ct}</span>
-                                    <div className="flex items-center gap-3 text-slate-500">
-                                      <span>{stats.clipCount} clips</span>
-                                      {stats.avgConfidence != null ? <span>conf {stats.avgConfidence}</span> : null}
-                                      {stats.approvalRate != null ? (
-                                        <span className={stats.approvalRate >= 0.7 ? 'text-emerald-600' : stats.approvalRate < 0.5 ? 'text-red-600' : 'text-amber-600'}>
-                                          {(stats.approvalRate * 100).toFixed(0)}% approved
-                                        </span>
-                                      ) : null}
-                                    </div>
+                            <div className="space-y-1">
+                              {Object.entries(analyticsData.perContentType).map(([ct, stats]) => (
+                                <div key={ct} className="flex items-center justify-between text-[11px] text-muted-foreground">
+                                  <span className="font-medium text-foreground">{ct}</span>
+                                  <div className="flex items-center gap-2">
+                                    <span>{stats.clipCount} clips</span>
+                                    {stats.approvalRate != null ? (
+                                      <span className={stats.approvalRate >= 0.7 ? 'text-emerald-600' : stats.approvalRate < 0.5 ? 'text-red-600' : 'text-amber-600'}>
+                                        {(stats.approvalRate * 100).toFixed(0)}%
+                                      </span>
+                                    ) : null}
                                   </div>
-                                ))}
-                              </div>
+                                </div>
+                              ))}
                             </div>
                           ) : null}
 
-                          <button
-                            type="button"
-                            onClick={() => void loadAnalytics()}
-                            className="text-xs text-sky-600 hover:text-sky-800 transition-colors"
-                          >
-                            Refresh insights
+                          <button type="button" onClick={() => void loadAnalytics()} className="text-[11px] text-primary hover:text-primary/80 transition-colors">
+                            Refresh
                           </button>
                         </div>
                       ) : showAnalytics ? (
-                        <p className="mt-2 text-xs text-slate-500">Loading insights...</p>
+                        <p className="mt-2 text-xs text-muted-foreground">Loading…</p>
                       ) : null}
                     </div>
                   </>
                 ) : (
-                  <div className="space-y-3 rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-5 text-sm text-slate-600">
-                    <p className="font-medium text-slate-900">What you get after each run</p>
-                    <p>- Up to five finished vertical clips ready to download</p>
-                    <p>- High-quality 1080x1920 MP4 exports optimized for sharing</p>
-                    <p>- A full transcript file for reference</p>
-                    <p>- A saved local folder inside outputs for the exact job</p>
+                  <div className="flex flex-col items-center justify-center py-6 text-center">
+                    <p className="text-sm font-medium text-foreground">Clips will appear here when ready</p>
+                    <p className="mt-1 text-xs text-muted-foreground">Up to {effectiveClipCount} clip(s) · 1080×1920 MP4 · transcript included</p>
                   </div>
                 )}
-                </div>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+              </section>
+            </div>
+          )}
+        </main>
+
+        {/* ─── Sidebar ────────────────────────────────────────────── */}
+        <aside className="w-full shrink-0 space-y-3 lg:w-64">
+          {systemHealthModule}
+          {runtimeModule}
+          {storageModule}
+        </aside>
       </div>
-    </main>
+    </div>
   )
 }
 
