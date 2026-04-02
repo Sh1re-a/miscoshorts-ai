@@ -283,31 +283,140 @@ function Invoke-Python($pythonSpec, $arguments) {
     & $pythonSpec.Command @($pythonSpec.Arguments + $arguments)
 }
 
-function Invoke-Download($url, $destinationPath, $label) {
-    $sizeLabel = Get-RemoteFileSizeLabel $url
-    if ($null -ne $sizeLabel) {
-        Write-SetupAction "Downloading $label ($sizeLabel) ..."
-    }
-    else {
-        Write-SetupAction "Downloading $label ..."
+# Run a console command (exe/cmd/bat) while showing an animated spinner.
+# On failure the last 25 lines of captured output are included in the error.
+function Invoke-WithSpinner {
+    param(
+        [string]$Label,
+        [string]$FilePath,
+        [string[]]$ArgList    = @(),
+        [string]$WorkDir      = "",
+        [int[]]$OkExitCodes   = @(0)
+    )
+
+    # .cmd / .bat files must be launched through cmd.exe
+    $actualExe  = $FilePath
+    $actualArgs = $ArgList
+    if ($FilePath.ToLower().EndsWith('.cmd') -or $FilePath.ToLower().EndsWith('.bat')) {
+        $actualExe  = 'cmd.exe'
+        $actualArgs = @('/c', $FilePath) + $ArgList
     }
 
-    $maxAttempts = 3
+    $outFile = [System.IO.Path]::GetTempFileName()
+    $errFile = [System.IO.Path]::GetTempFileName()
+
+    $procParams = @{
+        FilePath               = $actualExe
+        NoNewWindow            = $true
+        PassThru               = $true
+        RedirectStandardOutput = $outFile
+        RedirectStandardError  = $errFile
+    }
+    if ($WorkDir -and (Test-Path $WorkDir -ErrorAction SilentlyContinue)) {
+        $procParams.WorkingDirectory = $WorkDir
+    }
+    if ($actualArgs.Count -gt 0) {
+        $procParams.ArgumentList = $actualArgs
+    }
+
+    $proc   = Start-Process @procParams
+    $frames = @('|', '/', '-', '\')
+    $n      = 0
+    $t0     = [DateTime]::Now
+
+    while (-not $proc.HasExited) {
+        $sec = [math]::Floor(([DateTime]::Now - $t0).TotalSeconds)
+        [Console]::Write("`r  $($frames[$n % 4])  $Label  ($sec s)   ")
+        Start-Sleep -Milliseconds 150
+        $n++
+    }
+
+    $pad = ' ' * ([Math]::Max(60, $Label.Length + 24))
+    [Console]::Write("`r$pad`r")
+
+    $exitCode = $proc.ExitCode
+    $stdOut   = [string](Get-Content $outFile -Raw -ErrorAction SilentlyContinue)
+    $stdErr   = [string](Get-Content $errFile -Raw -ErrorAction SilentlyContinue)
+    Remove-Item $outFile, $errFile -Force -ErrorAction SilentlyContinue
+
+    if ($OkExitCodes -notcontains $exitCode) {
+        $combined = ($stdErr.Trim() + "`n" + $stdOut.Trim()).Trim()
+        $lines    = $combined -split "`r?`n"
+        $snip     = ($lines | Select-Object -Last 25) -join "`n"
+        throw "$Label failed (exit code $exitCode).`n$snip"
+    }
+}
+
+function Invoke-Download($url, $destinationPath, $label) {
+    # Probe remote file size once for the progress counter
+    $expectedBytes = 0
+    try {
+        $hr = [System.Net.HttpWebRequest]::Create($url)
+        $hr.Method = 'HEAD'
+        $hr.AllowAutoRedirect = $true
+        $hr.Timeout = 6000
+        $resp = $hr.GetResponse()
+        $expectedBytes = $resp.ContentLength
+        $resp.Dispose()
+    } catch {}
+
+    $sizeLabel = if ($expectedBytes -gt 0) { ' (' + (Format-ByteSize $expectedBytes) + ')' } else { '' }
+    Write-SetupAction "Downloading $label$sizeLabel"
+
+    $maxAttempts  = 3
     $delaySeconds = 3
+
     for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-        try {
-            Invoke-WebRequest -Uri $url -OutFile $destinationPath
+        if (Test-Path $destinationPath) {
+            Remove-Item $destinationPath -Force -ErrorAction SilentlyContinue
+        }
+
+        # Run download in a background job so the main thread can show progress
+        $dlJob = Start-Job -ScriptBlock {
+            param($u, $d)
+            $ProgressPreference = 'SilentlyContinue'
+            Invoke-WebRequest -Uri $u -OutFile $d -UseBasicParsing
+        } -ArgumentList $url, $destinationPath
+
+        $frames = @('|', '/', '-', '\')
+        $n  = 0
+        $t0 = [DateTime]::Now
+
+        while ($dlJob.State -eq 'Running') {
+            $sec = [math]::Floor(([DateTime]::Now - $t0).TotalSeconds)
+            $pctStr = ''
+            if ($expectedBytes -gt 0 -and (Test-Path $destinationPath)) {
+                $got  = (Get-Item $destinationPath -ErrorAction SilentlyContinue)
+                $got  = if ($null -ne $got) { $got.Length } else { 0 }
+                $pct  = [math]::Min(99, [int]($got / $expectedBytes * 100))
+                $gotM = [math]::Round($got / 1MB, 1)
+                $totM = [math]::Round($expectedBytes / 1MB, 1)
+                $pctStr = "  $pct%  ($gotM / $totM MB)"
+            }
+            [Console]::Write("`r  $($frames[$n % 4])  $label$pctStr  ($sec s)   ")
+            Start-Sleep -Milliseconds 300
+            $n++
+        }
+
+        $pad = ' ' * ([Math]::Max(80, $label.Length + 40))
+        [Console]::Write("`r$pad`r")
+
+        $jobErrors = Receive-Job $dlJob 2>&1
+        $jobState  = $dlJob.State
+        Remove-Job $dlJob
+
+        if ($jobState -eq 'Completed') {
+            Write-SetupDone "Downloaded $label."
             return
         }
-        catch {
-            if ($attempt -lt $maxAttempts) {
-                Write-SetupInfo "Download attempt $attempt failed: $($_.Exception.Message). Retrying in ${delaySeconds}s ..."
-                Start-Sleep -Seconds $delaySeconds
-                $delaySeconds *= 2
-            }
-            else {
-                throw "Could not download $label after $maxAttempts attempts. Check your internet connection and try running launch_app.bat again. Details: $($_.Exception.Message)"
-            }
+
+        $errMsg = if ($null -ne $jobErrors) { ($jobErrors | Out-String).Trim() } else { 'Unknown network error' }
+        if ($attempt -lt $maxAttempts) {
+            Write-SetupInfo "Download attempt $attempt failed: $errMsg. Retrying in ${delaySeconds}s ..."
+            Start-Sleep -Seconds $delaySeconds
+            $delaySeconds *= 2
+        } else {
+            throw "Could not download $label after $maxAttempts attempts. Check your internet connection and try running launch_app.bat again. Details: $errMsg"
         }
     }
 }
@@ -335,24 +444,20 @@ function Install-PythonDirectly {
 
     Invoke-Download $pythonInstallerUrl $pythonInstallerPath "Python installer from python.org"
 
-    Write-SetupAction "Running Python installer ..."
     $installerArgs = @(
-        "/quiet",
-        "InstallAllUsers=0",
+        '/quiet',
+        'InstallAllUsers=0',
         "TargetDir=`"$pythonCurrentDir`"",
-        "PrependPath=0",
-        "Include_launcher=0",
-        "InstallLauncherAllUsers=0",
-        "Include_pip=1",
-        "Include_venv=1",
-        "AssociateFiles=0",
-        "Shortcuts=0",
-        "Include_test=0"
+        'PrependPath=0',
+        'Include_launcher=0',
+        'InstallLauncherAllUsers=0',
+        'Include_pip=1',
+        'Include_venv=1',
+        'AssociateFiles=0',
+        'Shortcuts=0',
+        'Include_test=0'
     )
-    $process = Start-Process -FilePath $pythonInstallerPath -ArgumentList $installerArgs -Wait -PassThru
-    if ($process.ExitCode -ne 0) {
-        throw "Python installer exited with code $($process.ExitCode)."
-    }
+    Invoke-WithSpinner "Installing Python $pythonInstallerVersion" $pythonInstallerPath $installerArgs
 
     if (-not (Test-Path $pythonManagedExe)) {
         throw "Python installer completed but python.exe was not found in $pythonCurrentDir."
@@ -386,17 +491,8 @@ function Install-NodeDirectly {
     Ensure-StateDir
     Invoke-Download $nodeInstallerUrl $nodeInstallerPath "Node.js installer from nodejs.org"
 
-    Write-SetupAction "Running Node.js installer ..."
-    $process = Start-Process -FilePath "msiexec.exe" -ArgumentList @("/i", "`"$nodeInstallerPath`"", "/qn", "/norestart") -Wait -PassThru
     # 0 = success, 1641/3010 = success + reboot pending (non-critical for our use)
-    $successCodes = @(0, 1641, 3010)
-    if ($successCodes -notcontains $process.ExitCode) {
-        if ($process.ExitCode -eq 5) {
-            throw "Node.js installer was blocked (Access Denied). Right-click launch_app.bat and choose 'Run as administrator', then try again."
-        }
-        throw "Node.js installer exited with code $($process.ExitCode). If the problem persists, download and install Node.js manually from https://nodejs.org and run launch_app.bat again."
-    }
-
+    Invoke-WithSpinner "Installing Node.js $nodeInstallerVersion" 'msiexec.exe' @("/i", "`"$nodeInstallerPath`"", '/qn', '/norestart') -OkExitCodes @(0, 1641, 3010)
     Refresh-SessionPath
 }
 
@@ -791,10 +887,8 @@ function Invoke-Setup {
     }
 
     if (-not (Test-StateMatch $pythonCoreStamp $pythonCoreSignature)) {
-        Write-SetupAction "Installing Python core packages ..."
-        Write-SetupInfo "This is the app runtime only. The speech model is downloaded on first transcription."
-        Write-SetupInfo "Expected first-time app dependency download: usually under a few hundred MB, depending on Windows wheel selection."
-        Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "--prefer-binary", "--no-input", "-r", "requirements.txt") "Installing Python dependencies failed. Read the output above for the specific package that caused the error."
+        Write-SetupInfo "Installing Python runtime packages (first run: up to a few hundred MB)..."
+        Invoke-WithSpinner "Installing Python core packages" $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "--prefer-binary", "--no-input", "--progress-bar", "off", "--quiet", "-r", "requirements.txt")
         Write-StateValue $pythonCoreStamp $pythonCoreSignature
         Write-SetupDone "Python core packages are up to date."
     }
@@ -805,9 +899,8 @@ function Invoke-Setup {
     $shouldInstallOptional = Test-ShouldInstallOptionalPythonDeps
     if ($shouldInstallOptional) {
         if (-not (Test-StateMatch $pythonOptionalStamp $pythonOptionalSignature)) {
-            Write-SetupAction "Installing optional pro diarization add-ons ..."
-            Write-SetupInfo "This optional bundle is much heavier than the default setup and is only needed for advanced diarization."
-            Invoke-CheckedCommand $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "--prefer-binary", "--no-input", "-r", "requirements-optional.txt") "Installing optional pro dependencies failed. Read the output above for details."
+            Write-SetupInfo "Installing optional diarization add-ons (heavier bundle, only needed for advanced speaker detection)..."
+            Invoke-WithSpinner "Installing optional Python add-ons" $venvPython @("-m", "pip", "install", "--disable-pip-version-check", "--prefer-binary", "--no-input", "--progress-bar", "off", "--quiet", "-r", "requirements-optional.txt")
             Write-StateValue $pythonOptionalStamp $pythonOptionalSignature
             Write-SetupDone "Optional Python add-ons are up to date."
         }
@@ -822,12 +915,11 @@ function Invoke-Setup {
         Write-SetupReuse "Whisper model cache already prepared"
     }
     else {
-        Write-SetupAction "Preparing the configured Whisper model before the first render ..."
-        Write-SetupInfo "This avoids model-missing failures during transcription."
+        Write-SetupInfo "Downloading the speech model on first run (distil-large-v3 ~1.5 GB, large-v3 ~3 GB as fallback). This step is skipped on repeat runs."
         $env:HF_HOME = Join-Path $modelCacheDir "huggingface"
         $env:XDG_CACHE_HOME = Join-Path $modelCacheDir "xdg"
         $env:WHISPER_MODEL_CACHE_DIR = Join-Path $modelCacheDir "whisper"
-        Invoke-CheckedCommand $venvPython @("-m", "app.preflight") "Preparing the Whisper model failed."
+        Invoke-WithSpinner "Downloading and caching Whisper speech model" $venvPython @("-m", "app.preflight")
         Write-StateValue $whisperModelStamp $whisperModelSignature
         Write-SetupDone "Whisper model is ready."
     }
@@ -848,15 +940,8 @@ function Invoke-Setup {
         Write-SetupDone "Node.js is ready."
 
         if (-not (Test-StateMatch $frontendDepsStamp $frontendDepsSignature)) {
-            Write-SetupAction "Installing frontend packages ..."
-            Write-SetupInfo "This is only for the local dashboard build and is skipped when frontend/dist is already included."
-            Push-Location $frontendDir
-            try {
-                Invoke-CheckedCommand $nodeCommand @("ci") "Installing frontend packages failed."
-            }
-            finally {
-                Pop-Location
-            }
+            Write-SetupInfo "Installing frontend packages (only needed when building the dashboard locally)..."
+            Invoke-WithSpinner "Installing frontend packages" $nodeCommand @("ci", "--silent") -WorkDir $frontendDir
             Write-StateValue $frontendDepsStamp $frontendDepsSignature
             Write-SetupDone "Frontend packages are up to date."
         }
@@ -865,14 +950,7 @@ function Invoke-Setup {
         }
 
         if (-not (Test-StateMatch $frontendBuildStamp $frontendBuildSignature)) {
-            Write-SetupAction "Building frontend ..."
-            Push-Location $frontendDir
-            try {
-                Invoke-CheckedCommand $nodeCommand @("run", "build") "Building the frontend failed. Check the error output above and the setup log for the real npm or TypeScript error."
-            }
-            finally {
-                Pop-Location
-            }
+            Invoke-WithSpinner "Building app interface" $nodeCommand @("run", "build") -WorkDir $frontendDir -OkExitCodes @(0)
             Write-StateValue $frontendBuildStamp $frontendBuildSignature
             Write-SetupDone "Frontend build is ready."
         }

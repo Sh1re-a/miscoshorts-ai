@@ -19,7 +19,6 @@ from app.render_session import cleanup_stale_fingerprint_locks, job_fingerprint,
 from app.runtime import backend_code_signature, configure_logging, is_debug_enabled, load_local_env, runtime_identity, runtime_summary
 from app.runtime_recovery import recover_runtime_state
 from app.storage import prune_runtime_storage
-from app.storage_manager import build_storage_report, delete_job_storage, prune_storage
 from app.shorts_service import (
     create_short_from_url,
     normalize_requested_render_profile,
@@ -32,6 +31,13 @@ from app.shorts_service import (
 load_local_env()
 logger, SERVER_LOG_PATH = configure_logging("server")
 DEBUG_MODE = is_debug_enabled()
+
+# Suppress werkzeug's per-request HTTP logs — they spam the terminal during
+# normal polling (the frontend polls /api/jobs every 1.2 s and /api/runtime
+# every 2 s). Errors and warnings are still shown.
+if not DEBUG_MODE:
+    import logging as _logging
+    _logging.getLogger("werkzeug").setLevel(_logging.ERROR)
 
 
 app = Flask(__name__, static_folder=str(FRONTEND_DIST_DIR), static_url_path="/")
@@ -382,30 +388,6 @@ def _queue_snapshot() -> dict[str, object]:
     }
 
 
-def _jobs_snapshot() -> dict[str, dict]:
-    with jobs_lock:
-        return {job_id: dict(job) for job_id, job in jobs.items()}
-
-
-def _update_job_result_after_source_cleanup(job_id: str) -> None:
-    with jobs_lock:
-        job = jobs.get(job_id)
-        if job is None:
-            return
-        result = dict(job.get("result") or {})
-        if not result:
-            return
-        result["sourceMediaPresent"] = False
-        result["sourceMediaDeletedAt"] = time.time()
-        job["result"] = result
-        _persist_job_locked(job_id)
-
-
-def _remove_job_from_state(job_id: str) -> None:
-    with jobs_lock:
-        jobs.pop(job_id, None)
-
-
 def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, clip_count: int) -> None:
     global _active_jobs
     _job_progress(job_id, "queued", "The job is queued.")
@@ -625,8 +607,6 @@ def process_video():
     _set_job(
         job_id,
         status="queued",
-        videoUrl=video_url,
-        outputFilename=output_filename,
         subtitleStyle=subtitle_style,
         renderProfile=render_profile,
         jobFingerprint=pipeline_fingerprint,
@@ -673,69 +653,6 @@ def get_job(job_id: str):
     if job is None:
         return jsonify({"error": "Job not found"}), 404
     return jsonify(job)
-
-
-@app.get("/api/storage")
-def storage_report():
-    return jsonify(build_storage_report(_jobs_snapshot()))
-
-
-@app.post("/api/storage/jobs/<job_id>/cleanup")
-def cleanup_job_storage(job_id: str):
-    payload = request.get_json(silent=True) or {}
-    mode = str(payload.get("mode") or "").strip().lower()
-    dry_run = bool(payload.get("dryRun"))
-    if mode not in {"source_media", "job"}:
-        return jsonify({"error": "mode must be source_media or job"}), 400
-
-    try:
-        report = delete_job_storage(_jobs_snapshot(), job_id, mode=mode, dry_run=dry_run)
-    except ValueError as error:
-        return jsonify({"error": str(error)}), 409
-
-    if not dry_run:
-        if mode == "source_media":
-            _update_job_result_after_source_cleanup(job_id)
-        elif mode == "job":
-            _remove_job_from_state(job_id)
-
-    return jsonify(
-        {
-            **report,
-            "storage": build_storage_report(_jobs_snapshot()),
-        }
-    )
-
-
-@app.post("/api/storage/prune")
-def prune_storage_endpoint():
-    payload = request.get_json(silent=True) or {}
-    prune_temp = bool(payload.get("temp"))
-    prune_cache = bool(payload.get("cache"))
-    prune_jobs = bool(payload.get("jobs"))
-    prune_failed_jobs = bool(payload.get("failedJobs"))
-    dry_run = bool(payload.get("dryRun"))
-    if not any([prune_temp, prune_cache, prune_jobs, prune_failed_jobs]):
-        return jsonify({"error": "Select at least one storage category to prune."}), 400
-
-    report = prune_storage(
-        _jobs_snapshot(),
-        prune_temp=prune_temp,
-        prune_cache=prune_cache,
-        prune_jobs=prune_jobs,
-        prune_failed_jobs=prune_failed_jobs,
-        dry_run=dry_run,
-    )
-    if not dry_run and prune_failed_jobs and report.get("failedJobs", {}).get("removedJobIds"):
-        for job_id in report["failedJobs"]["removedJobIds"]:
-            _remove_job_from_state(job_id)
-
-    return jsonify(
-        {
-            **report,
-            "storage": build_storage_report(_jobs_snapshot()),
-        }
-    )
 
 
 @app.get("/api/jobs/<job_id>/download/video")
