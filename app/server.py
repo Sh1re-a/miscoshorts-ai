@@ -788,6 +788,13 @@ def serve_subtitle_preview_asset(preview_id: str, filename: str):
     return send_from_directory(preview_dir, filename)
 
 
+@app.get("/api/storage")
+def get_storage_report():
+    with jobs_lock:
+        jobs_snapshot = dict(jobs)
+    return jsonify(storage_manager.build_storage_report(jobs_snapshot))
+
+
 @app.post("/api/storage/jobs/<job_id>/cleanup")
 def cleanup_job_storage(job_id: str):
     payload = request.get_json(silent=True) or {}
@@ -800,7 +807,10 @@ def cleanup_job_storage(job_id: str):
     try:
         result = storage_manager.delete_job_storage(jobs_snapshot, job_id, mode=mode, dry_run=dry_run)
     except ValueError as err:
-        return jsonify({"error": str(err)}), 400
+        msg = str(err)
+        # Active/queued job conflicts are a known safe guard — surface as 409.
+        status_code = 409 if "still queued or rendering" in msg else 400
+        return jsonify({"error": msg}), status_code
     if not dry_run and mode == "job":
         with jobs_lock:
             jobs.pop(job_id, None)
@@ -812,14 +822,20 @@ def cleanup_job_storage(job_id: str):
 def prune_storage_endpoint():
     payload = request.get_json(silent=True) or {}
     dry_run = bool(payload.get("dryRun", False))
+    prune_temp = bool(payload.get("pruneTemp", False))
+    prune_cache = bool(payload.get("pruneCache", False))
+    prune_jobs = bool(payload.get("pruneJobs", False))
+    prune_failed_jobs = bool(payload.get("pruneFailedJobs", False))
+    if not any([prune_temp, prune_cache, prune_jobs, prune_failed_jobs]):
+        return jsonify({"error": "Select at least one category to prune."}), 400
     with jobs_lock:
         jobs_snapshot = dict(jobs)
     result = storage_manager.prune_storage(
         jobs_snapshot,
-        prune_temp=bool(payload.get("pruneTemp", True)),
-        prune_cache=bool(payload.get("pruneCache", False)),
-        prune_jobs=bool(payload.get("pruneJobs", False)),
-        prune_failed_jobs=bool(payload.get("pruneFailedJobs", True)),
+        prune_temp=prune_temp,
+        prune_cache=prune_cache,
+        prune_jobs=prune_jobs,
+        prune_failed_jobs=prune_failed_jobs,
         dry_run=dry_run,
     )
     return jsonify(result)
