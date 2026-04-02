@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useEffectEvent, useMemo, useState } from 'react'
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { CheckCircle2, Download, LoaderCircle, PlaySquare, RotateCcw, ThumbsUp, ThumbsDown, BarChart3, HardDrive, Trash2, FolderX } from 'lucide-react'
+import { CheckCircle2, Download, LoaderCircle, PlaySquare, RotateCcw, ThumbsUp, ThumbsDown, BarChart3 } from 'lucide-react'
 
 import { Badge } from './components/ui/badge'
 import { Button } from './components/ui/button'
@@ -9,7 +9,7 @@ import { Input } from './components/ui/input'
 import { Label } from './components/ui/label'
 import { Progress } from './components/ui/progress'
 import { feedbackTags, progressByStatus, stageDescriptions, statusTitles } from './features/jobs/config'
-import type { AnalyticsInsights, BootstrapPayload, ClipFeedback, DoctorReport, JobPayload, JobStatus, ProcessErrorPayload, RuntimePayload, StorageActionResponse, StorageManageableJob, StorageReportPayload } from './features/jobs/types'
+import type { AnalyticsInsights, BootstrapPayload, ClipFeedback, DoctorReport, JobPayload, JobStatus, ProcessErrorPayload, RuntimePayload } from './features/jobs/types'
 import { apiKeyStorageKey, formatBytes, formatEta, formatLogTime, getEtaWindow, loadSavedApiKey, readJsonResponse } from './features/jobs/utils'
 
 const fallbackRenderProfile = 'studio'
@@ -42,10 +42,7 @@ function App() {
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null)
   const [runtimeState, setRuntimeState] = useState<RuntimePayload | null>(null)
   const [knownRuntimeSessionId, setKnownRuntimeSessionId] = useState<string | null>(null)
-  const [storageReport, setStorageReport] = useState<StorageReportPayload | null>(null)
-  const [storageError, setStorageError] = useState<string | null>(null)
-  const [storageNotice, setStorageNotice] = useState<string | null>(null)
-  const [storageBusyKey, setStorageBusyKey] = useState<string | null>(null)
+  const pollErrorCountRef = useRef(0)
 
   useEffect(() => {
     let cancelled = false
@@ -109,22 +106,6 @@ function App() {
     }
   })
 
-  const loadStorageSnapshot = useEffectEvent(async () => {
-    try {
-      const response = await fetch('/api/storage')
-      if (!response.ok) {
-        throw new Error('Could not load storage usage.')
-      }
-
-      const payload = await readJsonResponse<StorageReportPayload>(response)
-      setStorageReport(payload)
-      setStorageError(null)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Could not load storage usage.'
-      setStorageError(message)
-    }
-  })
-
   useEffect(() => {
     void loadRuntimeSnapshot()
 
@@ -134,16 +115,6 @@ function App() {
 
     return () => window.clearInterval(intervalId)
   }, [loadRuntimeSnapshot])
-
-  useEffect(() => {
-    void loadStorageSnapshot()
-
-    const intervalId = window.setInterval(() => {
-      void loadStorageSnapshot()
-    }, 5000)
-
-    return () => window.clearInterval(intervalId)
-  }, [loadStorageSnapshot])
 
   const pollJob = useEffectEvent(async () => {
     if (!jobId) {
@@ -173,19 +144,23 @@ function App() {
         throw new Error(payload.error ?? 'Could not load job status.')
       }
 
+      pollErrorCountRef.current = 0
       setJob(payload)
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Could not refresh the live job status.'
-      setJob((previous) =>
-        previous.status === 'completed'
-          ? previous
-          : {
-              ...previous,
-              status: 'failed',
-              error: message,
-              errorHelp: 'The app lost contact with the backend queue state. Check the runtime status below, then start the render again if needed.',
-            },
-      )
+      pollErrorCountRef.current += 1
+      if (pollErrorCountRef.current >= 3) {
+        const message = error instanceof Error ? error.message : 'Could not refresh the live job status.'
+        setJob((previous) =>
+          previous.status === 'completed'
+            ? previous
+            : {
+                ...previous,
+                status: 'failed',
+                error: message,
+                errorHelp: 'The app lost contact with the backend queue state. Check the runtime status below, then start the render again if needed.',
+              },
+        )
+      }
     }
   })
 
@@ -256,16 +231,6 @@ function App() {
     [doctorReport],
   )
   const runtimeIssues = runtimeState?.consistency.issues ?? []
-  const manageableJobs = storageReport?.manageableJobs ?? []
-  const storageSummaryEntries = useMemo(() => {
-    if (!storageReport) return []
-    return [
-      ['Finished outputs', storageReport.summary.outputs.bytes],
-      ['Source cache', storageReport.summary.cache.bytes],
-      ['Temp workspaces', storageReport.summary.temp.bytes],
-      ['Logs', storageReport.summary.logs.bytes],
-    ] as const
-  }, [storageReport])
   const runtimeRecoverySummary = useMemo(() => {
     if (!runtimeState?.recovery) return null
     const recoveredJobs = runtimeState.recovery.recoveredJobIds?.length ?? 0
@@ -282,95 +247,6 @@ function App() {
     setIsSubmitting(false)
     setOutputFilename('short_con_subs.mp4')
     setClipFeedback({})
-  }
-
-  async function handleStorageCleanup(targetJobId: string, mode: 'source_media' | 'job') {
-    const busyKey = `${mode}:${targetJobId}`
-    setStorageBusyKey(busyKey)
-    setStorageError(null)
-    setStorageNotice(null)
-
-    try {
-      const response = await fetch(`/api/storage/jobs/${targetJobId}/cleanup`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode }),
-      })
-      const payload = await readJsonResponse<StorageActionResponse | { error?: string }>(response)
-      if (!response.ok) {
-        throw new Error(('error' in payload && payload.error) || 'Cleanup failed.')
-      }
-
-      const actionPayload = payload as StorageActionResponse
-      setStorageReport(actionPayload.storage)
-      setStorageNotice(
-        mode === 'source_media'
-          ? `Deleted ${formatBytes(actionPayload.removedBytes ?? 0)} of saved source media for ${targetJobId}. Generated clips were kept.`
-          : `Deleted saved files and metadata for ${targetJobId}.`,
-      )
-
-      if (mode === 'source_media' && jobId === targetJobId) {
-        setJob((previous) => {
-          if (!previous.result) return previous
-          return {
-            ...previous,
-            result: {
-              ...previous.result,
-              sourceMediaPresent: false,
-              sourceMediaDeletedAt: Date.now() / 1000,
-            },
-          }
-        })
-      }
-
-      if (mode === 'job' && jobId === targetJobId) {
-        resetFlow()
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Cleanup failed.'
-      setStorageError(message)
-    } finally {
-      setStorageBusyKey(null)
-    }
-  }
-
-  async function handleStoragePrune(options: { temp?: boolean; cache?: boolean; failedJobs?: boolean }) {
-    const labels = [
-      options.temp ? 'temporary files' : null,
-      options.cache ? 'cache' : null,
-      options.failedJobs ? 'failed job records' : null,
-    ].filter(Boolean)
-    const busyKey = `prune:${labels.join(',')}`
-    setStorageBusyKey(busyKey)
-    setStorageError(null)
-    setStorageNotice(null)
-
-    try {
-      const response = await fetch('/api/storage/prune', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(options),
-      })
-      const payload = await readJsonResponse<StorageActionResponse | { error?: string }>(response)
-      if (!response.ok) {
-        throw new Error(('error' in payload && payload.error) || 'Prune failed.')
-      }
-
-      const actionPayload = payload as StorageActionResponse
-      setStorageReport(actionPayload.storage)
-      const removedBytes = Number(actionPayload.removedBytes ?? 0) + Number(actionPayload.failedJobs?.removedBytes ?? 0)
-      const removedItems = Number(actionPayload.removedItems ?? 0) + Number(actionPayload.failedJobs?.removedItems ?? 0)
-      setStorageNotice(
-        removedItems > 0 || removedBytes > 0
-          ? `Pruned ${removedItems} item(s) and freed ${formatBytes(removedBytes)}.`
-          : 'Nothing needed pruning in the selected storage categories.',
-      )
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Prune failed.'
-      setStorageError(message)
-    } finally {
-      setStorageBusyKey(null)
-    }
   }
 
   const handleRating = useCallback(async (clipIndex: number, rating: 'good' | 'bad') => {
@@ -433,19 +309,6 @@ function App() {
     }
   }, [jobId, clipFeedback])
 
-  function describeManagedJob(jobEntry: StorageManageableJob) {
-    if (jobEntry.status === 'failed') {
-      return 'Failed run metadata. Safe to remove if you no longer need the logs or diagnostics.'
-    }
-    if (jobEntry.sharedOutputRefs > 1) {
-      return 'This finished output is shared by multiple saved jobs, so full deletion is blocked to protect reused clips.'
-    }
-    if (jobEntry.canDeleteSourceMedia) {
-      return 'You can remove the downloaded source media and keep the generated clips and metadata.'
-    }
-    return 'You can remove the full saved job if you no longer need its clips or metadata.'
-  }
-
   const loadAnalytics = useCallback(async () => {
     try {
       const res = await fetch('/api/analytics')
@@ -497,6 +360,7 @@ function App() {
         throw new Error((payload.error ?? 'Could not start the job.') + details)
       }
 
+      pollErrorCountRef.current = 0
       setJobId(payload.jobId)
       setJob({
         status: payload.status ?? 'queued',
@@ -669,133 +533,6 @@ function App() {
                     ) : (
                       <p className="mt-2 text-xs">The queue snapshot and live lock state currently agree.</p>
                     )}
-                  </div>
-                ) : null}
-
-                {storageReport ? (
-                  <div className="rounded-[24px] border border-slate-200 bg-white px-4 py-4 text-sm leading-6 text-slate-700 shadow-[0_12px_30px_rgba(66,124,184,0.06)]">
-                    <div className="flex items-start justify-between gap-4">
-                      <div>
-                        <p className="font-semibold text-slate-950">Storage and cleanup</p>
-                        <p className="mt-1 text-xs text-slate-500">Dashboard cleanup only uses backend-safe actions. Active or in-use jobs stay protected.</p>
-                      </div>
-                      <HardDrive className="h-5 w-5 text-slate-400" />
-                    </div>
-
-                    <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                      {storageSummaryEntries.map(([label, bytes]) => (
-                        <div key={label} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                          <p className="text-xs uppercase tracking-[0.12em] text-slate-500">{label}</p>
-                          <p className="mt-1 text-lg font-semibold text-slate-950">{formatBytes(bytes)}</p>
-                        </div>
-                      ))}
-                    </div>
-
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        className="bg-white text-slate-700 hover:bg-sky-50"
-                        disabled={!storageReport.recommendations.canPruneTemp || storageBusyKey !== null}
-                        onClick={() => void handleStoragePrune({ temp: true })}
-                      >
-                        <FolderX className="mr-2 h-4 w-4" /> Prune temp files
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        className="bg-white text-slate-700 hover:bg-sky-50"
-                        disabled={!storageReport.recommendations.canPruneCache || storageBusyKey !== null}
-                        onClick={() => void handleStoragePrune({ cache: true })}
-                      >
-                        <Trash2 className="mr-2 h-4 w-4" /> Prune source cache
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        className="bg-white text-slate-700 hover:bg-sky-50"
-                        disabled={storageReport.jobStateCounts.failed === 0 || storageBusyKey !== null}
-                        onClick={() => void handleStoragePrune({ failedJobs: true })}
-                      >
-                        <Trash2 className="mr-2 h-4 w-4" /> Remove failed job records
-                      </Button>
-                    </div>
-
-                    <div className="mt-3 flex flex-wrap gap-3 text-xs text-slate-500">
-                      <span>Saved finished jobs: {storageReport.jobStateCounts.completed}</span>
-                      <span>Saved failed jobs: {storageReport.jobStateCounts.failed}</span>
-                      <span>Active queue entries: {storageReport.jobStateCounts.active + storageReport.jobStateCounts.queued}</span>
-                    </div>
-
-                    {storageNotice ? (
-                      <p className="mt-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">{storageNotice}</p>
-                    ) : null}
-                    {storageError ? (
-                      <p className="mt-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{storageError}</p>
-                    ) : null}
-
-                    {manageableJobs.length > 0 ? (
-                      <div className="mt-4 space-y-3">
-                        {manageableJobs.slice(0, 8).map((entry) => {
-                          const isCurrentJob = entry.jobId === jobId
-                          const deleteSourceBusy = storageBusyKey === `source_media:${entry.jobId}`
-                          const deleteJobBusy = storageBusyKey === `job:${entry.jobId}`
-                          return (
-                            <div key={entry.jobId} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
-                              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                                <div className="space-y-2">
-                                  <div className="flex flex-wrap items-center gap-2">
-                                    <p className="text-sm font-semibold text-slate-950">{entry.jobId}</p>
-                                    <Badge variant="outline" className="border-slate-300 text-xs text-slate-600">{entry.status}</Badge>
-                                    {isCurrentJob ? (
-                                      <Badge variant="outline" className="border-sky-300 bg-sky-50 text-xs text-sky-700">Current result</Badge>
-                                    ) : null}
-                                  </div>
-                                  <p className="text-xs text-slate-500">{describeManagedJob(entry)}</p>
-                                  <div className="flex flex-wrap gap-3 text-xs text-slate-500">
-                                    <span>Outputs: {formatBytes(entry.storage.clipsBytes)}</span>
-                                    <span>Source media: {formatBytes(entry.storage.sourceMediaBytes)}</span>
-                                    <span>Metadata: {formatBytes(entry.storage.metadataBytes + entry.storage.diagnosticsBytes)}</span>
-                                    {entry.storage.sourceCacheBytes > 0 ? <span>Reusable cache: {formatBytes(entry.storage.sourceCacheBytes)}</span> : null}
-                                  </div>
-                                </div>
-
-                                <div className="flex flex-wrap gap-2 sm:justify-end">
-                                  <Button
-                                    type="button"
-                                    variant="secondary"
-                                    className="bg-white text-slate-700 hover:bg-sky-50"
-                                    disabled={!entry.canDeleteSourceMedia || storageBusyKey !== null}
-                                    onClick={() => void handleStorageCleanup(entry.jobId, 'source_media')}
-                                  >
-                                    {deleteSourceBusy ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : <Trash2 className="mr-2 h-4 w-4" />}
-                                    Delete source media
-                                  </Button>
-                                  <Button
-                                    type="button"
-                                    variant="secondary"
-                                    className="bg-white text-slate-700 hover:bg-rose-50"
-                                    disabled={!entry.canDeleteJob || storageBusyKey !== null}
-                                    onClick={() => void handleStorageCleanup(entry.jobId, 'job')}
-                                  >
-                                    {deleteJobBusy ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : <FolderX className="mr-2 h-4 w-4" />}
-                                    Delete saved job
-                                  </Button>
-                                </div>
-                              </div>
-                            </div>
-                          )
-                        })}
-                      </div>
-                    ) : (
-                      <p className="mt-4 rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-4 py-4 text-sm text-slate-500">
-                        No finished or failed jobs are currently available for dashboard cleanup.
-                      </p>
-                    )}
-                  </div>
-                ) : storageError ? (
-                  <div className="rounded-[24px] border border-rose-200 bg-rose-50 px-4 py-4 text-sm text-rose-700">
-                    {storageError}
                   </div>
                 ) : null}
 
@@ -985,7 +722,6 @@ function App() {
                       <p>{job.result.title ?? 'Your first clip is ready.'}</p>
                       <p className="mt-2 text-emerald-900">Quality profile: {job.result.renderProfile ?? currentRenderProfileLabel}</p>
                       {job.result.reusedExisting ? <p className="mt-2 text-emerald-900">Reuse mode: existing finished clips were reused for this exact request.</p> : null}
-                      {job.result.sourceMediaPresent === false ? <p className="mt-2 text-emerald-900">Saved source media was deleted. Generated clips and metadata were kept.</p> : null}
                       <p className="mt-2 text-emerald-800/80">Saved locally in {job.result.outputDir}</p>
                       {job.result.runReportPath ? <p className="mt-2 text-emerald-800/80">Run report saved in {job.result.runReportPath}</p> : null}
                     </div>
