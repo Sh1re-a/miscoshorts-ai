@@ -2484,6 +2484,23 @@ def create_short_from_url(
             )
             workspace.promote()
             observer.snapshot("after_promotion", final_output_dir=workspace.final_output_dir)
+
+            # Auto-delete the per-job source copy now that the render is done.
+            # The shared cache (outputs/cache/{hash}/source.*) is kept intact for
+            # re-runs.  The original flag only covered the old temp path which no
+            # longer exists after promotion; we use workspace.source_dir instead.
+            _auto_source_deleted = False
+            _auto_source_deleted_at: float | None = None
+            _auto_delete_enabled = os.getenv("AUTO_DELETE_SOURCE_MEDIA", "1").strip() == "1"
+            if remove_source_video_at_end and _auto_delete_enabled and workspace.source_dir.exists():
+                try:
+                    shutil.rmtree(workspace.source_dir, ignore_errors=True)
+                    _auto_source_deleted = True
+                    _auto_source_deleted_at = time.time()
+                    logger.info("Auto-deleted source media from %s after render", workspace.source_dir)
+                except Exception as _sdel_err:
+                    logger.warning("Auto-delete of source media failed: %s", _sdel_err)
+
             clips_output = _materialize_final_clips(workspace, temp_clips_output)
 
             _emit_labeled(
@@ -2518,6 +2535,8 @@ def create_short_from_url(
                 "videoUrl": video_url,
                 "title": first_clip.get("title"),
                 "reason": first_clip.get("reason"),
+                "sourceMediaPresent": not _auto_source_deleted,
+                "sourceMediaDeletedAt": _auto_source_deleted_at,
                 "start": first_clip["start"],
                 "end": first_clip["end"],
                 "outputFilename": first_clip["outputFilename"],
