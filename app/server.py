@@ -685,6 +685,24 @@ def download_video_clip(job_id: str, clip_index: int):
     return send_file(output_path, as_attachment=True)
 
 
+@app.get("/api/jobs/<job_id>/preview/video/<int:clip_index>")
+def preview_video_clip(job_id: str, clip_index: int):
+    """Serve a clip for inline playback (no Content-Disposition: attachment)."""
+    job = _get_job(job_id)
+    if not job or job.get("status") != "completed":
+        return jsonify({"error": "Video not ready"}), 404
+
+    clips = job.get("result", {}).get("clips") or []
+    if clip_index < 1 or clip_index > len(clips):
+        return jsonify({"error": "Clip not found"}), 404
+
+    output_path = _resolve_job_artifact_path(job_id, clips[clip_index - 1].get("outputPath"))
+    if output_path is None:
+        return jsonify({"error": "Clip file is unavailable"}), 404
+
+    return send_file(output_path, mimetype="video/mp4", conditional=True)
+
+
 @app.get("/api/jobs/<job_id>/download/transcript")
 def download_transcript(job_id: str):
     job = _get_job(job_id)
