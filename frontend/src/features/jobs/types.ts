@@ -198,6 +198,49 @@ export type RuntimeJobSummary = JobPayload & {
   jobId: string
 }
 
+export type StorageSummaryArea = {
+  path: string
+  bytes: number
+}
+
+export type StorageCacheSummary = StorageSummaryArea & {
+  sourceMediaBytes: number
+  sourceMediaFiles: number
+  transcriptBytes: number
+  transcriptFiles: number
+  clipAnalysisBytes: number
+  clipAnalysisFiles: number
+  otherBytes: number
+}
+
+export type StorageReport = {
+  summary: {
+    jobs: StorageSummaryArea
+    cache: StorageCacheSummary
+    temp: StorageSummaryArea
+  }
+  jobStateCounts: {
+    active: number
+    queued: number
+    completed: number
+    failed: number
+  }
+  recommendations: {
+    canPruneTemp: boolean
+    canPruneCache: boolean
+    canCleanFinishedJobs: boolean
+    canDeleteJobSourceMedia: boolean
+  }
+}
+
+export type PruneResult = {
+  dryRun?: boolean
+  temp?: { removedItems: number; removedBytes: number }
+  cache?: { removedItems: number; removedBytes: number }
+  jobs?: { removedItems: number; removedBytes: number }
+  failedJobs?: { removedItems: number; removedBytes: number; removedJobIds: string[] }
+}
+
 export type RuntimeLockPayload = {
   path: string
   fingerprint: string
