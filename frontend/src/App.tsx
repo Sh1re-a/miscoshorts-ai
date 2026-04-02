@@ -353,6 +353,13 @@ function App() {
       })
       if (res.ok) {
         setSourceMediaDeleted(true)
+        // Mirror deletion in local job state so the compact storage summary
+        // doesn't flicker back to "present" on the next poll (server memory
+        // is not updated until the next full re-read of result.json).
+        setJob(prev => ({
+          ...prev,
+          result: prev.result ? { ...prev.result, sourceMediaPresent: false } : prev.result,
+        }))
         void loadStorageReport()
       } else {
         const data = await readJsonResponse<{ error?: string }>(res).catch(() => ({} as { error?: string }))
@@ -1114,7 +1121,29 @@ function App() {
 
                     {/* Disk-management section */}
                     <div className="border-t border-slate-200 pt-4 space-y-3">
-                      <p className="text-xs font-medium text-slate-600">Free up disk space</p>
+                      <div>
+                        <p className="text-xs font-medium text-slate-600">Free up disk space</p>
+                        {/* Compact per-job storage summary — answers "what's on disk right now?" */}
+                        <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                          {sourceMediaDeleted || job.result.sourceMediaPresent === false ? (
+                            <span className="flex items-center gap-1 text-emerald-600">
+                              <CheckCircle2 className="h-3 w-3" />
+                              Source video deleted
+                            </span>
+                          ) : (
+                            <span className="flex items-center gap-1">
+                              <HardDrive className="h-3 w-3 text-amber-500" />
+                              Source video on disk
+                            </span>
+                          )}
+                          <span>
+                            {job.result.clipCount} clip(s) saved
+                            {job.result.runSummary?.finalOutputBytes
+                              ? ` · ${formatBytes(Number(job.result.runSummary.finalOutputBytes))}`
+                              : ''}
+                          </span>
+                        </div>
+                      </div>
 
                       {/* Action 1: delete downloaded source video, keep generated clips */}
                       {sourceMediaDeleted || job.result?.sourceMediaPresent === false ? (

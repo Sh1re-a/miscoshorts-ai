@@ -207,6 +207,61 @@ class StorageEndpointTests(unittest.TestCase):
             with server.jobs_lock:
                 server.jobs.pop("job-sm", None)
 
+    # ── polling contract after cleanup ────────────────────────────────────────
+
+    def test_job_still_accessible_after_source_media_cleanup(self) -> None:
+        """After source_media cleanup GET /api/jobs/{id} must still return 200."""
+        with server.jobs_lock:
+            server.jobs["job-poll-src"] = {
+                "status": "completed",
+                "result": {"outputDir": "", "sourceMediaPresent": True},
+            }
+        try:
+            fake_result = {"jobId": "job-poll-src", "mode": "source_media", "removedItems": 0, "removedBytes": 0}
+            with patch("app.storage_manager.delete_job_storage", return_value=fake_result):
+                self.client.post("/api/storage/jobs/job-poll-src/cleanup", json={"mode": "source_media"})
+            response = self.client.get("/api/jobs/job-poll-src")
+            self.assertEqual(response.status_code, 200)
+        finally:
+            with server.jobs_lock:
+                server.jobs.pop("job-poll-src", None)
+
+    def test_job_not_accessible_after_full_job_cleanup(self) -> None:
+        """After full-job cleanup GET /api/jobs/{id} must return 404."""
+        with server.jobs_lock:
+            server.jobs["job-poll-full"] = {"status": "completed", "result": {"outputDir": ""}}
+        fake_result = {"jobId": "job-poll-full", "mode": "job", "removedItems": 1, "removedBytes": 0}
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_state = Path(tmp) / "job-poll-full.json"
+            fake_state.write_text("{}", encoding="utf-8")
+            with patch("app.storage_manager.delete_job_storage", return_value=fake_result):
+                with patch("app.server._job_state_path", return_value=fake_state):
+                    self.client.post("/api/storage/jobs/job-poll-full/cleanup", json={"mode": "job"})
+        response = self.client.get("/api/jobs/job-poll-full")
+        self.assertEqual(response.status_code, 404)
+
+    def test_source_media_cleanup_updates_in_memory_sourceMediaPresent(self) -> None:
+        """After source_media cleanup server.jobs must reflect sourceMediaPresent=False."""
+        with server.jobs_lock:
+            server.jobs["job-smp"] = {
+                "status": "completed",
+                "result": {"outputDir": "", "sourceMediaPresent": True},
+            }
+        try:
+            fake_result = {"jobId": "job-smp", "mode": "source_media", "removedItems": 1, "removedBytes": 512}
+            with patch("app.storage_manager.delete_job_storage", return_value=fake_result):
+                response = self.client.post("/api/storage/jobs/job-smp/cleanup", json={"mode": "source_media"})
+            self.assertEqual(response.status_code, 200)
+            with server.jobs_lock:
+                job_result = server.jobs["job-smp"].get("result", {})
+            self.assertFalse(
+                job_result.get("sourceMediaPresent"),
+                "In-memory job must reflect sourceMediaPresent=False after source_media cleanup",
+            )
+        finally:
+            with server.jobs_lock:
+                server.jobs.pop("job-smp", None)
+
 
 if __name__ == "__main__":
     unittest.main()

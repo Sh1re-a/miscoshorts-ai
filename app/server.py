@@ -815,6 +815,13 @@ def cleanup_job_storage(job_id: str):
         with jobs_lock:
             jobs.pop(job_id, None)
         _job_state_path(job_id).unlink(missing_ok=True)
+    elif not dry_run and mode == "source_media":
+        # Keep the job in memory but reflect the deletion so subsequent polls
+        # return accurate sourceMediaPresent state without a disk re-read.
+        with jobs_lock:
+            job_state = jobs.get(job_id)
+            if job_state and isinstance(job_state.get("result"), dict):
+                job_state["result"]["sourceMediaPresent"] = False
     return jsonify(result)
 
 
