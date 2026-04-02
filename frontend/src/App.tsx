@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { CheckCircle2, Download, LoaderCircle, PlaySquare, RotateCcw, ThumbsUp, ThumbsDown, BarChart3 } from 'lucide-react'
+import { CheckCircle2, Download, LoaderCircle, PlaySquare, RotateCcw, ThumbsUp, ThumbsDown, BarChart3, Trash2 } from 'lucide-react'
 
 import { Badge } from './components/ui/badge'
 import { Button } from './components/ui/button'
@@ -39,6 +39,7 @@ function App() {
   const [analyticsData, setAnalyticsData] = useState<AnalyticsInsights | null>(null)
   const [showAnalytics, setShowAnalytics] = useState(false)
   const [selectedClipCount, setSelectedClipCount] = useState(3)
+  const [jobCleanedUp, setJobCleanedUp] = useState(false)
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null)
   const [runtimeState, setRuntimeState] = useState<RuntimePayload | null>(null)
   const [knownRuntimeSessionId, setKnownRuntimeSessionId] = useState<string | null>(null)
@@ -320,6 +321,22 @@ function App() {
     }
   }, [])
 
+  const handleDeleteJob = useCallback(async () => {
+    if (!jobId) return
+    try {
+      const res = await fetch(`/api/storage/jobs/${jobId}/cleanup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'job' }),
+      })
+      if (res.ok) {
+        setJobCleanedUp(true)
+      }
+    } catch {
+      // Silently ignore — user can try again
+    }
+  }, [jobId])
+
   function clearSavedApiKey() {
     try {
       window.localStorage.removeItem(apiKeyStorageKey)
@@ -361,6 +378,7 @@ function App() {
       }
 
       pollErrorCountRef.current = 0
+      setJobCleanedUp(false)
       setJobId(payload.jobId)
       setJob({
         status: payload.status ?? 'queued',
@@ -883,6 +901,24 @@ function App() {
                         <Download className="mr-2 h-4 w-4" /> Download transcript
                       </a>
                     </Button>
+
+                    {/* Cleanup section */}
+                    <div className="border-t border-slate-200 pt-4">
+                      {jobCleanedUp ? (
+                        <p className="text-center text-xs text-slate-400">Render files deleted from disk.</p>
+                      ) : (
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="text-xs text-slate-500">Downloaded everything you need?</p>
+                          <button
+                            type="button"
+                            onClick={() => void handleDeleteJob()}
+                            className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-red-600 ring-1 ring-red-200 hover:bg-red-50 hover:ring-red-300 transition-colors"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" /> Delete render files
+                          </button>
+                        </div>
+                      )}
+                    </div>
 
                     {/* Analytics section */}
                     <div className="border-t border-slate-200 pt-4">
