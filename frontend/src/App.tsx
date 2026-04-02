@@ -39,7 +39,8 @@ function App() {
   const [analyticsData, setAnalyticsData] = useState<AnalyticsInsights | null>(null)
   const [showAnalytics, setShowAnalytics] = useState(false)
   const [selectedClipCount, setSelectedClipCount] = useState(3)
-  const [jobCleanedUp, setJobCleanedUp] = useState(false)
+  const [cleanupConfirm, setCleanupConfirm] = useState<null | 'source' | 'job'>(null)
+  const [sourceMediaDeleted, setSourceMediaDeleted] = useState(false)
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null)
   const [runtimeState, setRuntimeState] = useState<RuntimePayload | null>(null)
   const [knownRuntimeSessionId, setKnownRuntimeSessionId] = useState<string | null>(null)
@@ -321,6 +322,24 @@ function App() {
     }
   }, [])
 
+  const handleDeleteSourceMedia = useCallback(async () => {
+    if (!jobId) return
+    try {
+      const res = await fetch(`/api/storage/jobs/${jobId}/cleanup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'source_media' }),
+      })
+      if (res.ok) {
+        setSourceMediaDeleted(true)
+      }
+    } catch {
+      // Silently ignore — user can try again
+    } finally {
+      setCleanupConfirm(null)
+    }
+  }, [jobId])
+
   const handleDeleteJob = useCallback(async () => {
     if (!jobId) return
     try {
@@ -330,10 +349,15 @@ function App() {
         body: JSON.stringify({ mode: 'job' }),
       })
       if (res.ok) {
-        setJobCleanedUp(true)
+        // Wipe the panel immediately — a deleted job must not linger in the UI
+        setJobId(null)
+        setJob({ status: 'idle' })
+        setClipFeedback({})
       }
     } catch {
       // Silently ignore — user can try again
+    } finally {
+      setCleanupConfirm(null)
     }
   }, [jobId])
 
@@ -378,7 +402,8 @@ function App() {
       }
 
       pollErrorCountRef.current = 0
-      setJobCleanedUp(false)
+      setCleanupConfirm(null)
+      setSourceMediaDeleted(false)
       setJobId(payload.jobId)
       setJob({
         status: payload.status ?? 'queued',
@@ -902,19 +927,87 @@ function App() {
                       </a>
                     </Button>
 
-                    {/* Cleanup section */}
-                    <div className="border-t border-slate-200 pt-4">
-                      {jobCleanedUp ? (
-                        <p className="text-center text-xs text-slate-400">Render files deleted from disk.</p>
+                    {/* Disk-management section */}
+                    <div className="border-t border-slate-200 pt-4 space-y-3">
+                      <p className="text-xs font-medium text-slate-600">Free up disk space</p>
+
+                      {/* Action 1: delete downloaded source video, keep generated clips */}
+                      {sourceMediaDeleted || job.result?.sourceMediaPresent === false ? (
+                        <div className="flex items-center gap-2 text-xs text-slate-400">
+                          <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                          <span>Downloaded source video already deleted</span>
+                        </div>
+                      ) : cleanupConfirm === 'source' ? (
+                        <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 space-y-2">
+                          <p className="text-xs font-semibold text-amber-800">Delete downloaded source video?</p>
+                          <p className="text-xs text-amber-700">The original downloaded video file will be permanently removed. Your generated clips, transcript, and metadata are <span className="font-medium">kept</span>.</p>
+                          <div className="flex gap-2 pt-1">
+                            <button
+                              type="button"
+                              onClick={() => void handleDeleteSourceMedia()}
+                              className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700 transition-colors"
+                            >
+                              <Trash2 className="h-3 w-3" /> Yes, delete source video
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setCleanupConfirm(null)}
+                              className="rounded-lg px-3 py-1.5 text-xs font-medium text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100 transition-colors"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
                       ) : (
-                        <div className="flex items-center justify-between gap-3">
-                          <p className="text-xs text-slate-500">Downloaded everything you need?</p>
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-xs font-medium text-slate-700">Delete downloaded source video</p>
+                            <p className="text-xs text-slate-500">Frees space · generated clips are kept</p>
+                          </div>
                           <button
                             type="button"
-                            onClick={() => void handleDeleteJob()}
-                            className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-red-600 ring-1 ring-red-200 hover:bg-red-50 hover:ring-red-300 transition-colors"
+                            onClick={() => setCleanupConfirm('source')}
+                            className="shrink-0 inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-amber-700 ring-1 ring-amber-200 hover:bg-amber-50 hover:ring-amber-300 transition-colors"
                           >
-                            <Trash2 className="h-3.5 w-3.5" /> Delete render files
+                            <Trash2 className="h-3.5 w-3.5" /> Delete source video
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Action 2: delete this render completely */}
+                      {cleanupConfirm === 'job' ? (
+                        <div className="rounded-lg border border-red-200 bg-red-50 p-3 space-y-2">
+                          <p className="text-xs font-semibold text-red-800">Delete this render completely?</p>
+                          <p className="text-xs text-red-700">All generated clips, transcript, and metadata will be permanently deleted. Make sure you have downloaded the clips you want to keep.</p>
+                          <div className="flex gap-2 pt-1">
+                            <button
+                              type="button"
+                              onClick={() => void handleDeleteJob()}
+                              className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-700 transition-colors"
+                            >
+                              <Trash2 className="h-3 w-3" /> Yes, delete everything
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setCleanupConfirm(null)}
+                              className="rounded-lg px-3 py-1.5 text-xs font-medium text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100 transition-colors"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-xs font-medium text-slate-700">Delete this completed render</p>
+                            <p className="text-xs text-slate-500">Removes all generated clips, transcript, and metadata</p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setCleanupConfirm('job')}
+                            className="shrink-0 inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-red-600 ring-1 ring-red-200 hover:bg-red-50 hover:ring-red-300 transition-colors"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" /> Delete everything
                           </button>
                         </div>
                       )}
