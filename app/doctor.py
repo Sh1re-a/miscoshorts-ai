@@ -118,9 +118,11 @@ def _check_writable(path: Path) -> bool:
 def _writable_fix_message(path: Path) -> str:
     base_message = "Move the project to a normal writable folder."
     if os.name == "nt":
+        home = Path.home()
+        suggestion = home / "Desktop" / "miscoshorts-ai"
         return (
             f"{base_message} Avoid network drives, shared drives, and protected folders. "
-            f"A good default is C:\\Users\\<your-name>\\Desktop\\miscoshorts-ai."
+            f"A good default is {suggestion}."
         )
     return base_message
 
@@ -204,6 +206,23 @@ def run_doctor(*, prepare_whisper: bool = False, render_smoke: bool = False) -> 
             _add_check(checks, "PASS", label, f"{path} is writable.")
         else:
             _add_check(checks, "FAIL", label, f"{path} is not writable.", _writable_fix_message(path))
+
+    # Windows long-path warning — the classic 260-char limit can surface when
+    # the project is nested deeply (e.g. inside OneDrive or deeply nested dev
+    # folders).  We check the longest base path we'll actually use.
+    if os.name == "nt":
+        longest_base = max(OUTPUTS_DIR, RUNTIME_DIR, key=lambda p: len(str(p)))
+        # A typical deep sub-path adds ~80 chars (jobs/<hash>/clips/<filename>).
+        if len(str(longest_base)) + 80 > 260:
+            _add_check(
+                checks,
+                "WARN",
+                "Path length",
+                f"The output path is {len(str(longest_base))} characters long, which may hit the Windows 260-char limit.",
+                "Move the project to a shorter path, or enable long paths in the Windows registry.",
+                requirement="optional",
+                blocks_rendering=False,
+            )
 
     if FRONTEND_DIST_DIR.exists():
         _add_check(checks, "PASS", "Frontend", f"Bundled dashboard found in {FRONTEND_DIST_DIR}.")
