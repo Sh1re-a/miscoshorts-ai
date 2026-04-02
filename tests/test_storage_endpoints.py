@@ -117,6 +117,96 @@ class StorageEndpointTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("failedJobs", response.get_json())
 
+    def test_prune_temp_returns_temp_key(self) -> None:
+        """Prune with pruneTemp=true must include a 'temp' key in the response."""
+        response = self.client.post("/api/storage/prune", json={"pruneTemp": True})
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertIn("temp", data)
+        self.assertIn("removedItems", data["temp"])
+        self.assertIn("removedBytes", data["temp"])
+
+    # ── Storage report shape ──────────────────────────────────────────────────
+
+    def test_storage_report_contains_required_keys(self) -> None:
+        """GET /api/storage must return all keys the frontend depends on."""
+        with server.jobs_lock:
+            server.jobs.clear()
+
+        response = self.client.get("/api/storage")
+        data = response.get_json()
+
+        self.assertIn("summary", data)
+        self.assertIn("jobs", data["summary"])
+        self.assertIn("cache", data["summary"])
+        self.assertIn("temp", data["summary"])
+        self.assertIn("bytes", data["summary"]["jobs"])
+        self.assertIn("bytes", data["summary"]["cache"])
+        self.assertIn("bytes", data["summary"]["temp"])
+
+        self.assertIn("jobStateCounts", data)
+        self.assertIn("completed", data["jobStateCounts"])
+        self.assertIn("failed", data["jobStateCounts"])
+        self.assertIn("active", data["jobStateCounts"])
+
+        self.assertIn("recommendations", data)
+        self.assertIn("canPruneTemp", data["recommendations"])
+        self.assertIn("canDeleteJobSourceMedia", data["recommendations"])
+
+    def test_storage_report_job_counts_reflect_injected_jobs(self) -> None:
+        """Job state counts in GET /api/storage must match injected server.jobs."""
+        with server.jobs_lock:
+            server.jobs.clear()
+            server.jobs["j-done"] = {"status": "completed", "result": {"outputDir": ""}}
+            server.jobs["j-fail"] = {"status": "failed"}
+        try:
+            response = self.client.get("/api/storage")
+            counts = response.get_json()["jobStateCounts"]
+            self.assertEqual(counts["completed"], 1)
+            self.assertEqual(counts["failed"], 1)
+        finally:
+            with server.jobs_lock:
+                server.jobs.pop("j-done", None)
+                server.jobs.pop("j-fail", None)
+
+    # ── 409 response body ─────────────────────────────────────────────────────
+
+    def test_active_job_409_has_error_field(self) -> None:
+        """409 response must include an 'error' field the frontend can display."""
+        with server.jobs_lock:
+            server.jobs["job-rendering"] = {"status": "rendering"}
+        try:
+            response = self.client.post("/api/storage/jobs/job-rendering/cleanup", json={"mode": "job"})
+            self.assertEqual(response.status_code, 409)
+            data = response.get_json()
+            self.assertIn("error", data)
+            self.assertIsInstance(data["error"], str)
+            self.assertGreater(len(data["error"]), 0)
+        finally:
+            with server.jobs_lock:
+                server.jobs.pop("job-rendering", None)
+
+    # ── source_media response shape ───────────────────────────────────────────
+
+    def test_source_media_response_includes_mode_and_counts(self) -> None:
+        """mode=source_media response must include mode, removedItems, removedBytes."""
+        with server.jobs_lock:
+            server.jobs["job-sm"] = {"status": "completed", "result": {"outputDir": ""}}
+        try:
+            fake_result = {"jobId": "job-sm", "mode": "source_media", "removedItems": 1, "removedBytes": 1024}
+            with patch("app.storage_manager.delete_job_storage", return_value=fake_result):
+                response = self.client.post(
+                    "/api/storage/jobs/job-sm/cleanup", json={"mode": "source_media"}
+                )
+            self.assertEqual(response.status_code, 200)
+            data = response.get_json()
+            self.assertEqual(data["mode"], "source_media")
+            self.assertIn("removedItems", data)
+            self.assertIn("removedBytes", data)
+        finally:
+            with server.jobs_lock:
+                server.jobs.pop("job-sm", None)
+
 
 if __name__ == "__main__":
     unittest.main()
