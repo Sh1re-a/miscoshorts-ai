@@ -25,24 +25,24 @@ export const progressByStatus: Record<JobStatus, number> = {
 
 export const statusTitles: Record<JobStatus, string> = {
   idle: 'Ready to start',
-  queued: 'Waiting in the local queue',
-  validating: 'Validating subtitle compatibility',
-  downloading: 'Downloading source video',
-  transcribing: 'Transcribing audio',
-  analyzing: 'Gemini is selecting clips',
-  rendering: 'Rendering video',
+  queued: 'Queued',
+  validating: 'Validating',
+  downloading: 'Downloading',
+  transcribing: 'Transcribing',
+  analyzing: 'Analyzing',
+  rendering: 'Rendering',
   completed: 'Render complete',
   failed: 'Render failed',
 }
 
 export const stageDescriptions: Record<JobStatus, string> = {
-  idle: 'Paste a YouTube link, add your Gemini key, and start the default Shorts render flow.',
-  queued: 'The backend accepted the request and is waiting either for a worker slot or for an identical active render to finish first.',
-  validating: 'Checking subtitle rendering compatibility and local requirements before the heavy work starts.',
-  downloading: 'Downloading the source video and preparing local files.',
-  transcribing: 'Whisper is transcribing the video. This is usually the longest step.',
+  idle: 'Paste a YouTube link, add your Gemini key, and start a render.',
+  queued: 'Waiting for a worker slot or for an identical active render to finish.',
+  validating: 'Checking subtitle compatibility and local requirements.',
+  downloading: 'Downloading the source video.',
+  transcribing: 'Transcribing audio with Whisper. This is usually the longest step.',
   analyzing: 'Gemini is selecting the strongest clip moments from the transcript.',
-  rendering: 'Rendering the final vertical video with dynamic subtitles and overlays.',
-  completed: 'Everything is finished. Your files are ready below as high-quality 1080x1920 exports.',
-  failed: 'The job stopped before finishing. Read the message below for the exact reason.',
+  rendering: 'Rendering the final vertical video with subtitles and overlays.',
+  completed: 'Your clips are ready below.',
+  failed: 'The job stopped before finishing. See the error details below.',
 }
