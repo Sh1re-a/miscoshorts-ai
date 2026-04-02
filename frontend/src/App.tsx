@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { CheckCircle2, Download, LoaderCircle, PlaySquare, RotateCcw, ThumbsUp, ThumbsDown, BarChart3, Trash2 } from 'lucide-react'
+import { CheckCircle2, Download, HardDrive, LoaderCircle, PlaySquare, RefreshCw, RotateCcw, ThumbsUp, ThumbsDown, BarChart3, Trash2 } from 'lucide-react'
 
 import { Badge } from './components/ui/badge'
 import { Button } from './components/ui/button'
@@ -9,7 +9,7 @@ import { Input } from './components/ui/input'
 import { Label } from './components/ui/label'
 import { Progress } from './components/ui/progress'
 import { feedbackTags, progressByStatus, stageDescriptions, statusTitles } from './features/jobs/config'
-import type { AnalyticsInsights, BootstrapPayload, ClipFeedback, DoctorReport, JobPayload, JobStatus, ProcessErrorPayload, RuntimePayload } from './features/jobs/types'
+import type { AnalyticsInsights, BootstrapPayload, ClipFeedback, DoctorReport, JobPayload, JobStatus, ProcessErrorPayload, PruneResult, RuntimePayload, StorageReport } from './features/jobs/types'
 import { apiKeyStorageKey, formatBytes, formatEta, formatLogTime, getEtaWindow, loadSavedApiKey, readJsonResponse } from './features/jobs/utils'
 
 const fallbackRenderProfile = 'studio'
@@ -41,6 +41,12 @@ function App() {
   const [selectedClipCount, setSelectedClipCount] = useState(3)
   const [cleanupConfirm, setCleanupConfirm] = useState<null | 'source' | 'job'>(null)
   const [sourceMediaDeleted, setSourceMediaDeleted] = useState(false)
+  const [cleanupActionError, setCleanupActionError] = useState<string | null>(null)
+  const [storageReport, setStorageReport] = useState<StorageReport | null>(null)
+  const [storageLoading, setStorageLoading] = useState(false)
+  const [showStorage, setShowStorage] = useState(false)
+  const [pruneWorking, setPruneWorking] = useState(false)
+  const [lastPruneResult, setLastPruneResult] = useState<string | null>(null)
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null)
   const [runtimeState, setRuntimeState] = useState<RuntimePayload | null>(null)
   const [knownRuntimeSessionId, setKnownRuntimeSessionId] = useState<string | null>(null)
@@ -322,8 +328,23 @@ function App() {
     }
   }, [])
 
+  const loadStorageReport = useCallback(async () => {
+    setStorageLoading(true)
+    try {
+      const res = await fetch('/api/storage')
+      if (res.ok) {
+        setStorageReport(await readJsonResponse<StorageReport>(res))
+      }
+    } catch {
+      // silently fail
+    } finally {
+      setStorageLoading(false)
+    }
+  }, [])
+
   const handleDeleteSourceMedia = useCallback(async () => {
     if (!jobId) return
+    setCleanupActionError(null)
     try {
       const res = await fetch(`/api/storage/jobs/${jobId}/cleanup`, {
         method: 'POST',
@@ -332,16 +353,25 @@ function App() {
       })
       if (res.ok) {
         setSourceMediaDeleted(true)
+        void loadStorageReport()
+      } else {
+        const data = await readJsonResponse<{ error?: string }>(res).catch(() => ({} as { error?: string }))
+        setCleanupActionError(
+          res.status === 409
+            ? 'Cannot delete: this job is still actively rendering.'
+            : (data.error ?? 'Could not delete source video. Try again.')
+        )
       }
     } catch {
-      // Silently ignore — user can try again
+      setCleanupActionError('Network error. Try again.')
     } finally {
       setCleanupConfirm(null)
     }
-  }, [jobId])
+  }, [jobId, loadStorageReport])
 
   const handleDeleteJob = useCallback(async () => {
     if (!jobId) return
+    setCleanupActionError(null)
     try {
       const res = await fetch(`/api/storage/jobs/${jobId}/cleanup`, {
         method: 'POST',
@@ -349,17 +379,79 @@ function App() {
         body: JSON.stringify({ mode: 'job' }),
       })
       if (res.ok) {
-        // Wipe the panel immediately — a deleted job must not linger in the UI
+        // Wipe the panel immediately — a deleted job must not linger in the UI.
+        // Clearing jobId stops the poll interval via its useEffect dependency.
         setJobId(null)
         setJob({ status: 'idle' })
         setClipFeedback({})
+        void loadStorageReport()
+      } else {
+        const data = await readJsonResponse<{ error?: string }>(res).catch(() => ({} as { error?: string }))
+        setCleanupActionError(
+          res.status === 409
+            ? 'Cannot delete: this job is still actively rendering. Wait for it to finish first.'
+            : (data.error ?? 'Could not delete this render. Try again.')
+        )
       }
     } catch {
-      // Silently ignore — user can try again
+      setCleanupActionError('Network error. Try again.')
     } finally {
       setCleanupConfirm(null)
     }
-  }, [jobId])
+  }, [jobId, loadStorageReport])
+
+  const handlePruneTemp = useCallback(async () => {
+    setPruneWorking(true)
+    setLastPruneResult(null)
+    try {
+      const res = await fetch('/api/storage/prune', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pruneTemp: true }),
+      })
+      if (res.ok) {
+        const data = await readJsonResponse<PruneResult>(res)
+        const items = data.temp?.removedItems ?? 0
+        const bytes = data.temp?.removedBytes ?? 0
+        setLastPruneResult(
+          items > 0
+            ? `Removed ${items} stale temp item(s), freed ${formatBytes(bytes)}.`
+            : 'No stale temp files found.'
+        )
+        void loadStorageReport()
+      }
+    } catch {
+      setLastPruneResult('Could not prune temp files.')
+    } finally {
+      setPruneWorking(false)
+    }
+  }, [loadStorageReport])
+
+  const handlePruneFailed = useCallback(async () => {
+    setPruneWorking(true)
+    setLastPruneResult(null)
+    try {
+      const res = await fetch('/api/storage/prune', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pruneFailedJobs: true }),
+      })
+      if (res.ok) {
+        const data = await readJsonResponse<PruneResult>(res)
+        const count = data.failedJobs?.removedItems ?? 0
+        setLastPruneResult(
+          count > 0
+            ? `Cleared ${count} failed-job record(s).`
+            : 'No failed job records found.'
+        )
+        void loadStorageReport()
+      }
+    } catch {
+      setLastPruneResult('Could not prune failed job records.')
+    } finally {
+      setPruneWorking(false)
+    }
+  }, [loadStorageReport])
 
   function clearSavedApiKey() {
     try {
@@ -404,6 +496,8 @@ function App() {
       pollErrorCountRef.current = 0
       setCleanupConfirm(null)
       setSourceMediaDeleted(false)
+      setCleanupActionError(null)
+      setLastPruneResult(null)
       setJobId(payload.jobId)
       setJob({
         status: payload.status ?? 'queued',
@@ -578,6 +672,97 @@ function App() {
                     )}
                   </div>
                 ) : null}
+
+                {/* Storage summary panel */}
+                <div className="rounded-[24px] border border-slate-200 bg-slate-50/60 px-4 py-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowStorage(prev => !prev)
+                      if (!storageReport) void loadStorageReport()
+                    }}
+                    className="flex w-full items-center justify-between gap-3 text-sm font-medium text-slate-600 hover:text-slate-900 transition-colors"
+                  >
+                    <span className="flex items-center gap-2">
+                      <HardDrive className="h-4 w-4" />
+                      Storage usage
+                    </span>
+                    <span className="flex items-center gap-2 text-xs font-normal">
+                      {storageReport ? formatBytes(
+                        (storageReport.summary.jobs.bytes ?? 0) +
+                        (storageReport.summary.cache.bytes ?? 0) +
+                        (storageReport.summary.temp.bytes ?? 0)
+                      ) : null}
+                      {storageLoading ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : null}
+                      <span className="text-slate-400">{showStorage ? '▲' : '▼'}</span>
+                    </span>
+                  </button>
+
+                  {showStorage ? (
+                    <div className="mt-3 space-y-3">
+                      {storageReport ? (
+                        <>
+                          <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
+                            <div className="rounded-lg bg-white border border-slate-200 px-3 py-2">
+                              <p className="font-medium text-slate-700">Finished renders</p>
+                              <p className="mt-0.5 text-base font-bold text-slate-900">{formatBytes(storageReport.summary.jobs.bytes)}</p>
+                              <p className="mt-0.5 text-slate-400">{storageReport.jobStateCounts.completed} completed, {storageReport.jobStateCounts.failed} failed</p>
+                            </div>
+                            <div className="rounded-lg bg-white border border-slate-200 px-3 py-2">
+                              <p className="font-medium text-slate-700">Cache</p>
+                              <p className="mt-0.5 text-base font-bold text-slate-900">{formatBytes(storageReport.summary.cache.bytes)}</p>
+                              {storageReport.summary.cache.sourceMediaBytes > 0 ? (
+                                <p className="mt-0.5 text-slate-400">{formatBytes(storageReport.summary.cache.sourceMediaBytes)} source media</p>
+                              ) : (
+                                <p className="mt-0.5 text-slate-400">transcripts &amp; analysis</p>
+                              )}
+                            </div>
+                            <div className="rounded-lg bg-white border border-slate-200 px-3 py-2">
+                              <p className="font-medium text-slate-700">Temp files</p>
+                              <p className={`mt-0.5 text-base font-bold ${storageReport.summary.temp.bytes > 0 ? 'text-amber-700' : 'text-slate-900'}`}>{formatBytes(storageReport.summary.temp.bytes)}</p>
+                              <p className="mt-0.5 text-slate-400">{storageReport.summary.temp.bytes > 0 ? 'stale render workspaces' : 'clean'}</p>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              disabled={pruneWorking || !storageReport.recommendations.canPruneTemp}
+                              onClick={() => void handlePruneTemp()}
+                              className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100 disabled:opacity-40 transition-colors"
+                            >
+                              {pruneWorking ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                              Clean up stale temp files
+                            </button>
+                            <button
+                              type="button"
+                              disabled={pruneWorking || storageReport.jobStateCounts.failed === 0}
+                              onClick={() => void handlePruneFailed()}
+                              className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100 disabled:opacity-40 transition-colors"
+                            >
+                              {pruneWorking ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                              Clear failed-job records ({storageReport.jobStateCounts.failed})
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void loadStorageReport()}
+                              disabled={storageLoading}
+                              className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-slate-500 ring-1 ring-slate-200 hover:bg-slate-100 disabled:opacity-40 transition-colors"
+                            >
+                              <RefreshCw className={`h-3 w-3 ${storageLoading ? 'animate-spin' : ''}`} /> Refresh
+                            </button>
+                          </div>
+
+                          {lastPruneResult ? (
+                            <p className="text-xs text-emerald-700">{lastPruneResult}</p>
+                          ) : null}
+                        </>
+                      ) : (
+                        <p className="text-xs text-slate-500">{storageLoading ? 'Loading…' : 'Could not load storage usage.'}</p>
+                      )}
+                    </div>
+                  ) : null}
+                </div>
 
                 <div className="space-y-2">
                   <Label>Number of clips</Label>
@@ -1012,6 +1197,13 @@ function App() {
                         </div>
                       )}
                     </div>
+
+                    {/* Cleanup error feedback */}
+                    {cleanupActionError ? (
+                      <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                        {cleanupActionError}
+                      </div>
+                    ) : null}
 
                     {/* Analytics section */}
                     <div className="border-t border-slate-200 pt-4">
