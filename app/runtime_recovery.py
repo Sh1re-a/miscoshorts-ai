@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import subprocess
 import time
 from pathlib import Path
 
-from app.paths import OUTPUTS_DIR, OUTPUT_TEMP_DIR
+from app.paths import OUTPUTS_DIR, OUTPUT_LOCKS_DIR, OUTPUT_TEMP_DIR
 from app.render_session import force_remove_all_locks
 from app.runtime import configure_logging
 from app.storage import atomic_write_json
@@ -87,9 +89,47 @@ def cleanup_temp_workspaces() -> dict[str, object]:
     return {"clearedTempWorkspacePaths": cleared_paths}
 
 
+def _kill_orphaned_lock_owners() -> list[int]:
+    """Kill processes listed in lock files.  At startup these are always orphans."""
+    killed_pids: list[int] = []
+    if not OUTPUT_LOCKS_DIR.exists():
+        return killed_pids
+
+    for lock_path in OUTPUT_LOCKS_DIR.glob("*.lock"):
+        try:
+            payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        pid = payload.get("pid") if isinstance(payload, dict) else None
+        if not isinstance(pid, int) or pid <= 0 or pid == os.getpid():
+            continue
+        try:
+            if os.name == "nt":
+                # /T = kill child tree, /F = force
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    capture_output=True, timeout=10,
+                )
+            else:
+                os.kill(pid, 9)
+            killed_pids.append(pid)
+            logger.warning("Killed orphaned render worker pid=%d from lock %s", pid, lock_path.name)
+        except (ProcessLookupError, PermissionError):
+            pass  # Already dead or not ours — fine.
+        except Exception as exc:
+            logger.debug("Could not kill pid=%d: %s", pid, exc)
+
+    if killed_pids:
+        # Give Windows a moment to release file handles after killing processes.
+        time.sleep(0.5)
+
+    return killed_pids
+
+
 def recover_runtime_state() -> dict[str, object]:
-    # At startup nothing is running — force-remove ALL lock files unconditionally.
-    # This is critical on Windows where PID recycling makes _pid_is_alive() lie.
+    # At startup nothing is running — kill any orphaned render workers from a
+    # previous session, then force-remove ALL lock files unconditionally.
+    killed_pids = _kill_orphaned_lock_owners()
     lock_report = force_remove_all_locks()
     jobs_report = recover_interrupted_job_states()
     temp_report = cleanup_temp_workspaces()
@@ -98,9 +138,10 @@ def recover_runtime_state() -> dict[str, object]:
         "recoveredJobIds": jobs_report["recoveredJobIds"],
         "clearedLocks": lock_report["removedLocks"],
         "activeLocks": lock_report["activeLocks"],
+        "killedOrphanPids": killed_pids,
         "clearedTempWorkspacePaths": temp_report["clearedTempWorkspacePaths"],
     }
-    if summary["recoveredJobIds"] or summary["clearedLocks"] or summary["clearedTempWorkspacePaths"]:
+    if summary["recoveredJobIds"] or summary["clearedLocks"] or summary["clearedTempWorkspacePaths"] or killed_pids:
         logger.warning("Startup runtime recovery summary: %s", summary)
     else:
         logger.info("Startup runtime recovery found no interrupted jobs, orphan locks, or stale temp workspaces.")
