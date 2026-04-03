@@ -20,8 +20,8 @@ logger, _LOG_PATH = configure_logging("render-session")
 
 ProgressCallback = Callable[[str, str], None]
 PIPELINE_FINGERPRINT_VERSION = "v3"
-LOCK_WAIT_TIMEOUT_SECONDS = max(60, int(os.getenv("FINGERPRINT_LOCK_WAIT_TIMEOUT_SECONDS", "7200")))
-LOCK_STALE_SECONDS = max(300, int(os.getenv("FINGERPRINT_LOCK_STALE_SECONDS", "7200")))
+LOCK_WAIT_TIMEOUT_SECONDS = max(60, int(os.getenv("FINGERPRINT_LOCK_WAIT_TIMEOUT_SECONDS", "1800")))
+LOCK_STALE_SECONDS = max(300, int(os.getenv("FINGERPRINT_LOCK_STALE_SECONDS", "900")))
 
 
 def _emit(progress_callback: ProgressCallback | None, stage: str, message: str) -> None:

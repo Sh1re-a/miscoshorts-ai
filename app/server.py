@@ -4,6 +4,10 @@ import json
 import os
 import re
 import secrets
+import shutil
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -14,13 +18,12 @@ from flask import Flask, jsonify, request, send_file, send_from_directory
 from app import analytics, storage_manager, subtitle_preview
 from app.doctor import run_doctor
 from app.errors import explain_exception
-from app.paths import FRONTEND_DIST_DIR, OUTPUTS_DIR
+from app.paths import FRONTEND_DIST_DIR, LOGS_DIR, OUTPUTS_DIR, PROJECT_ROOT
 from app.render_session import cleanup_stale_fingerprint_locks, job_fingerprint, list_active_fingerprint_locks
-from app.runtime import backend_code_signature, configure_logging, is_debug_enabled, load_local_env, runtime_identity, runtime_summary
+from app.runtime import backend_code_signature, configure_logging, is_debug_enabled, load_local_env, managed_runtime_python, runtime_identity, runtime_summary
 from app.runtime_recovery import recover_runtime_state
 from app.storage import prune_runtime_storage
 from app.shorts_service import (
-    create_short_from_url,
     normalize_requested_render_profile,
     normalize_requested_subtitle_style,
     RENDER_PROFILES,
@@ -388,70 +391,86 @@ def _queue_snapshot() -> dict[str, object]:
     }
 
 
-# Heartbeat tracking for job worker threads.
-_job_threads: dict[str, threading.Thread] = {}
-_job_threads_lock = threading.Lock()
+# ---------------------------------------------------------------------------
+# Subprocess-isolated render worker
+# ---------------------------------------------------------------------------
+# The heavy render pipeline (moviepy / ffmpeg / PIL / OpenCV) runs in a child
+# process.  If the worker segfaults, gets OOM-killed, or triggers any
+# unrecoverable native crash, the Flask backend survives and reports the
+# failure cleanly.  Communication uses JSON files in a temp directory.
+# ---------------------------------------------------------------------------
+
+_WORKER_POLL_INTERVAL = 0.8  # seconds between progress reads
 
 
-def _register_job_thread(job_id: str, thread: threading.Thread) -> None:
-    with _job_threads_lock:
-        _job_threads[job_id] = thread
-
-
-def _unregister_job_thread(job_id: str) -> None:
-    with _job_threads_lock:
-        _job_threads.pop(job_id, None)
-
-
-def _job_watchdog() -> None:
-    """Background daemon that detects dead worker threads and marks their jobs as failed."""
-    global _active_jobs
-    while True:
-        time.sleep(5)
-        try:
-            with _job_threads_lock:
-                tracked = list(_job_threads.items())
-            for job_id, thread in tracked:
-                if thread.is_alive():
+def _read_worker_progress(progress_path: Path, last_offset: int) -> tuple[list[dict], int]:
+    """Read new JSONL lines from the progress file written by the worker."""
+    entries: list[dict] = []
+    try:
+        with open(progress_path, "r", encoding="utf-8") as f:
+            f.seek(last_offset)
+            for line in f:
+                line = line.strip()
+                if not line:
                     continue
-                job = _get_job(job_id)
-                if job is None:
-                    _unregister_job_thread(job_id)
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
                     continue
-                if job.get("status") in TERMINAL_JOB_STATUSES:
-                    _unregister_job_thread(job_id)
-                    continue
-                logger.error("Watchdog: worker thread for job %s died unexpectedly.", job_id)
-                _append_job_log(job_id, "failed", "The render process crashed unexpectedly.")
-                _set_job(
-                    job_id,
-                    status="failed",
-                    error="The render process crashed unexpectedly (possible memory issue or codec failure).",
-                    errorHelp="Try again with fewer clips or a shorter video. Check the logs folder for details.",
-                    errorCategory="crash",
-                    errorId=f"crash-{job_id[:8]}",
-                    logPath=str(SERVER_LOG_PATH),
-                    updatedAt=time.time(),
-                    etaSeconds=None,
-                )
-                _unregister_job_thread(job_id)
-                with jobs_lock:
-                    if _active_jobs > 0:
-                        _active_jobs -= 1
-                    _refresh_queue_positions_locked()
-                    for queued_job_id in jobs:
-                        _persist_job_locked(queued_job_id)
-                _job_slots.release()
-        except Exception:
-            logger.exception("Watchdog tick failed")
+            new_offset = f.tell()
+    except FileNotFoundError:
+        return entries, last_offset
+    except OSError:
+        return entries, last_offset
+    return entries, new_offset
 
 
-threading.Thread(target=_job_watchdog, daemon=True, name="job-watchdog").start()
+def _read_worker_result(result_path: Path) -> dict | None:
+    try:
+        return json.loads(result_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+
+
+def _exit_code_diagnosis(rc: int) -> str:
+    """Translate common process exit codes to human-readable causes."""
+    if os.name == "nt":
+        # Windows: negative codes are unsigned 32-bit NTSTATUS or signal codes.
+        codes: dict[int, str] = {
+            -1073741819: "memory access violation (segfault / STATUS_ACCESS_VIOLATION)",
+            -1073741571: "stack overflow (STATUS_STACK_OVERFLOW)",
+            -1073741510: "process terminated by Ctrl+C (STATUS_CONTROL_C_EXIT)",
+            -1073740791: "heap corruption (STATUS_HEAP_CORRUPTION)",
+            -1073740940: "process killed (STATUS_STACK_BUFFER_OVERRUN / fail-fast)",
+        }
+        description = codes.get(rc)
+        if description:
+            return description
+        if rc < 0:
+            return f"native crash (exit code {rc:#010x})"
+    else:
+        import signal as _signal
+        if rc < 0:
+            sig = -rc
+            name = _signal.Signals(sig).name if sig in _signal.valid_signals() else f"signal {sig}"
+            if sig == 9:
+                return f"killed by OS — likely out of memory ({name})"
+            if sig == 11:
+                return f"segmentation fault ({name})"
+            return f"killed by {name}"
+    if rc != 0:
+        return f"exited with code {rc}"
+    return ""
 
 
 def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, clip_count: int) -> None:
+    """Spawn the render pipeline in an isolated child process and relay progress."""
     global _active_jobs
     _job_progress(job_id, "queued", "The job is queued.")
+    work_dir: Path | None = None
+    worker_proc: subprocess.Popen | None = None
+    log_handle = None
+
     try:
         _job_progress(job_id, "queued", "Waiting for an available render worker...")
         _job_slots.acquire()
@@ -465,18 +484,146 @@ def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, cl
                 _persist_job_locked(queued_job_id)
 
         job = _get_job(job_id) or {}
-        result = create_short_from_url(
-            video_url=video_url,
-            api_key=api_key,
-            output_filename=output_filename,
-            clip_count=clip_count,
-            job_id=job_id,
-            progress_callback=lambda stage, message: _job_progress(job_id, stage, message),
-            subtitle_style=job.get("subtitleStyle"),
-            render_profile=job.get("renderProfile") or normalize_requested_render_profile(None),
-        )
-        _append_job_log(job_id, "completed", "Render finished successfully.")
-        _set_job(job_id, status="completed", result=result, updatedAt=time.time(), overallProgress=100.0, stageProgress=100.0, etaSeconds=0.0)
+
+        # --- prepare worker directory and params ---
+        work_dir = Path(tempfile.mkdtemp(prefix=f"render-{job_id[:8]}-", dir=str(OUTPUTS_DIR / "temp")))
+        params_path = work_dir / "params.json"
+        progress_path = work_dir / "progress.jsonl"
+        result_path = work_dir / "result.json"
+        worker_log_path = LOGS_DIR / f"render-worker-{job_id[:12]}.log"
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+        params = {
+            "jobId": job_id,
+            "videoUrl": video_url,
+            "apiKey": api_key,
+            "outputFilename": output_filename,
+            "clipCount": clip_count,
+            "subtitleStyle": job.get("subtitleStyle"),
+            "renderProfile": job.get("renderProfile") or normalize_requested_render_profile(None),
+        }
+        params_path.write_text(json.dumps(params, ensure_ascii=True, indent=2), encoding="utf-8")
+
+        # --- spawn isolated worker ---
+        worker_python = managed_runtime_python() or Path(sys.executable)
+        worker_env = dict(os.environ)
+        worker_env.setdefault("PYTHONUTF8", "1")
+        worker_env.setdefault("PYTHONIOENCODING", "utf-8")
+
+        # On Windows, CREATE_NO_WINDOW prevents a console flash and
+        # CREATE_NEW_PROCESS_GROUP isolates the worker from Ctrl+C in the
+        # launcher terminal (which would kill both the server and the worker).
+        popen_kwargs: dict = {}
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+
+        (OUTPUTS_DIR / "temp").mkdir(parents=True, exist_ok=True)
+        log_handle = open(worker_log_path, "w", encoding="utf-8")
+        try:
+            worker_proc = subprocess.Popen(
+                [str(worker_python), "-m", "app.render_worker", str(params_path)],
+                cwd=str(PROJECT_ROOT),
+                env=worker_env,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                **popen_kwargs,
+            )
+        except Exception:
+            log_handle.close()
+            raise
+
+        _job_progress(job_id, "queued", f"Render worker started (pid {worker_proc.pid}).")
+        logger.info("Render worker pid=%d for job %s, log=%s", worker_proc.pid, job_id, worker_log_path)
+
+        # --- monitor worker: relay progress and wait for completion ---
+        progress_offset = 0
+        last_progress_time = time.time()
+
+        while True:
+            rc = worker_proc.poll()
+
+            # Read any new progress lines
+            entries, progress_offset = _read_worker_progress(progress_path, progress_offset)
+            for entry in entries:
+                stage = entry.get("stage", "rendering")
+                message = entry.get("message", "")
+                _job_progress(job_id, stage, message)
+                last_progress_time = time.time()
+
+            if rc is not None:
+                # Process exited — read any remaining progress
+                entries, progress_offset = _read_worker_progress(progress_path, progress_offset)
+                for entry in entries:
+                    _job_progress(job_id, entry.get("stage", "rendering"), entry.get("message", ""))
+                break
+
+            time.sleep(_WORKER_POLL_INTERVAL)
+
+        log_handle.close()
+
+        # --- interpret result ---
+        if rc == 0:
+            result_payload = _read_worker_result(result_path)
+            if result_payload and result_payload.get("ok"):
+                _append_job_log(job_id, "completed", "Render finished successfully.")
+                _set_job(
+                    job_id,
+                    status="completed",
+                    result=result_payload["result"],
+                    updatedAt=time.time(),
+                    overallProgress=100.0,
+                    stageProgress=100.0,
+                    etaSeconds=0.0,
+                )
+            else:
+                error_msg = (result_payload or {}).get("error", "Worker exited cleanly but produced no result.")
+                _append_job_log(job_id, "failed", error_msg)
+                _set_job(
+                    job_id,
+                    status="failed",
+                    error=error_msg,
+                    errorHelp="Check the render worker log for details.",
+                    errorCategory="worker-error",
+                    errorId=f"worker-error-{job_id[:8]}",
+                    logPath=str(worker_log_path),
+                    updatedAt=time.time(),
+                    etaSeconds=None,
+                )
+        else:
+            # Worker process crashed (segfault, OOM-kill, unhandled exception).
+            result_payload = _read_worker_result(result_path)
+            if result_payload and not result_payload.get("ok"):
+                # Worker wrote an error before dying — use it.
+                error_msg = result_payload.get("error", "Render failed.")
+                error_help = "Check the render worker log for details."
+                error_category = "worker-error"
+            else:
+                # No result file — the process died without Python-level handling.
+                diagnosis = _exit_code_diagnosis(rc)
+                error_msg = f"The render worker crashed ({diagnosis})." if diagnosis else f"The render worker crashed (exit code {rc})."
+                error_help = (
+                    "The render process was killed — this is often caused by running out of memory. "
+                    "Try a shorter video or fewer clips. "
+                    f"Worker log: {worker_log_path}"
+                )
+                error_category = "crash"
+
+            friendly_error_id = f"{error_category}-{job_id[:8]}"
+            logger.error("Render worker for job %s exited with code %d: %s", job_id, rc, error_msg)
+            _append_job_log(job_id, "failed", f"{error_msg} [{friendly_error_id}]")
+            _set_job(
+                job_id,
+                status="failed",
+                error=error_msg,
+                errorHelp=error_help,
+                errorCategory=error_category,
+                errorId=friendly_error_id,
+                workerExitCode=rc,
+                logPath=str(worker_log_path),
+                updatedAt=time.time(),
+                etaSeconds=None,
+            )
+
     except Exception as error:
         friendly = explain_exception(error)
         error_id = f"{friendly.category}-{job_id[:8]}"
@@ -498,7 +645,13 @@ def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, cl
             etaSeconds=None,
         )
     finally:
-        _unregister_job_thread(job_id)
+        if log_handle is not None and not log_handle.closed:
+            log_handle.close()
+        if worker_proc is not None and worker_proc.poll() is None:
+            worker_proc.kill()
+            worker_proc.wait(timeout=10)
+        if work_dir is not None:
+            shutil.rmtree(work_dir, ignore_errors=True)
         with jobs_lock:
             if _active_jobs > 0:
                 _active_jobs -= 1
@@ -692,7 +845,6 @@ def process_video():
         args=(job_id, video_url, api_key, output_filename, clip_count),
         daemon=True,
     )
-    _register_job_thread(job_id, worker)
     worker.start()
 
     return jsonify(
