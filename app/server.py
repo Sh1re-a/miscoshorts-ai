@@ -19,6 +19,8 @@ from app import analytics, storage_manager, subtitle_preview
 from app.doctor import run_doctor
 from app.errors import explain_exception
 from app.paths import FRONTEND_DIST_DIR, LOGS_DIR, OUTPUTS_DIR, PROJECT_ROOT
+import atexit
+
 from app.render_session import cleanup_stale_fingerprint_locks, job_fingerprint, list_active_fingerprint_locks
 from app.runtime import backend_code_signature, configure_logging, is_debug_enabled, load_local_env, managed_runtime_python, runtime_identity, runtime_summary
 from app.runtime_recovery import recover_runtime_state
@@ -56,6 +58,26 @@ RUNTIME_SESSION_ID = secrets.token_hex(8)
 SERVER_STARTED_AT = time.time()
 _active_jobs = 0
 _job_slots = threading.Semaphore(MAX_CONCURRENT_JOBS)
+_active_worker_procs: list[subprocess.Popen] = []
+_active_worker_procs_lock = threading.Lock()
+
+
+def _shutdown_workers() -> None:
+    """Kill all active render worker subprocesses.  Called via atexit."""
+    with _active_worker_procs_lock:
+        procs = list(_active_worker_procs)
+    for proc in procs:
+        try:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+        except Exception:
+            pass
+    if procs:
+        logger.info("atexit: killed %d render worker process(es).", len(procs))
+
+
+atexit.register(_shutdown_workers)
 _DOWNLOAD_PCT_PATTERN = re.compile(r"Downloading\.\.\.\s+(\d+)%")
 _RENDER_CLIP_PATTERN = re.compile(r"clip\s+(\d+)\s+of\s+(\d+)", re.IGNORECASE)
 _LOCK_WAIT_PATTERN = re.compile(
@@ -358,10 +380,23 @@ def _queue_snapshot() -> dict[str, object]:
     issues: list[str] = []
     if _active_jobs != len(active_jobs):
         issues.append(f"Active worker count mismatch: semaphore tracks {_active_jobs}, jobs track {len(active_jobs)}.")
+    # Detect locks pointing at finished jobs and auto-remove them.
+    stale_lock_fingerprints: list[str] = []
     for lock in lock_details:
         lock_job_id = lock.get("jobId")
         if lock_job_id and job_snapshots.get(str(lock_job_id), {}).get("status") in TERMINAL_JOB_STATUSES:
-            issues.append(f"Lock for fingerprint {lock.get('fingerprint')} still points at terminal job {lock_job_id}.")
+            stale_lock_fingerprints.append(str(lock.get("fingerprint", "")))
+            issues.append(f"Lock for fingerprint {lock.get('fingerprint')} still points at terminal job {lock_job_id} (auto-removing).")
+    if stale_lock_fingerprints:
+        # Gather terminal job IDs and run cleanup that will remove the stale locks.
+        terminal_ids = {
+            job_id for job_id, job in job_snapshots.items()
+            if job.get("status") in TERMINAL_JOB_STATUSES
+        }
+        cleaned = cleanup_stale_fingerprint_locks(terminal_job_ids=terminal_ids)
+        if cleaned["removedLocks"]:
+            # Refresh lock_details after cleanup.
+            lock_details = list_active_fingerprint_locks()
     for queued_job in queued_jobs:
         if queued_job.get("queueState") == "waiting_for_identical_render" and queued_job.get("waitingOnFingerprint"):
             if not any(lock.get("fingerprint") == queued_job.get("waitingOnFingerprint") for lock in lock_details):
@@ -532,6 +567,9 @@ def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, cl
             log_handle.close()
             raise
 
+        with _active_worker_procs_lock:
+            _active_worker_procs.append(worker_proc)
+
         _job_progress(job_id, "queued", f"Render worker started (pid {worker_proc.pid}).")
         logger.info("Render worker pid=%d for job %s, log=%s", worker_proc.pid, job_id, worker_log_path)
 
@@ -647,12 +685,18 @@ def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, cl
     finally:
         if log_handle is not None and not log_handle.closed:
             log_handle.close()
-        if worker_proc is not None and worker_proc.poll() is None:
-            try:
-                worker_proc.kill()
-                worker_proc.wait(timeout=10)
-            except Exception:
-                logger.warning("Could not cleanly kill worker pid=%s", getattr(worker_proc, 'pid', '?'))
+        if worker_proc is not None:
+            with _active_worker_procs_lock:
+                try:
+                    _active_worker_procs.remove(worker_proc)
+                except ValueError:
+                    pass
+            if worker_proc.poll() is None:
+                try:
+                    worker_proc.kill()
+                    worker_proc.wait(timeout=10)
+                except Exception:
+                    logger.warning("Could not cleanly kill worker pid=%s", getattr(worker_proc, 'pid', '?'))
         if work_dir is not None:
             shutil.rmtree(work_dir, ignore_errors=True)
         with jobs_lock:

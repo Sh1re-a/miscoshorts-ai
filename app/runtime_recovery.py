@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 from app.paths import OUTPUTS_DIR, OUTPUT_TEMP_DIR
-from app.render_session import cleanup_stale_fingerprint_locks
+from app.render_session import force_remove_all_locks
 from app.runtime import configure_logging
 from app.storage import atomic_write_json
 
@@ -88,7 +88,9 @@ def cleanup_temp_workspaces() -> dict[str, object]:
 
 
 def recover_runtime_state() -> dict[str, object]:
-    lock_report = cleanup_stale_fingerprint_locks()
+    # At startup nothing is running — force-remove ALL lock files unconditionally.
+    # This is critical on Windows where PID recycling makes _pid_is_alive() lie.
+    lock_report = force_remove_all_locks()
     jobs_report = recover_interrupted_job_states()
     temp_report = cleanup_temp_workspaces()
     summary = {

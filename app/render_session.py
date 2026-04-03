@@ -226,7 +226,32 @@ def list_active_fingerprint_locks() -> list[dict[str, object]]:
     return [describe_fingerprint_lock(path) for path in sorted(OUTPUT_LOCKS_DIR.glob("*.lock"))]
 
 
-def cleanup_stale_fingerprint_locks() -> dict[str, list[dict[str, object]]]:
+def force_remove_all_locks() -> dict[str, list[dict[str, object]]]:
+    """Unconditionally remove ALL lock files.  Used at startup when nothing is running."""
+    removed_locks: list[dict[str, object]] = []
+    failed_locks: list[dict[str, object]] = []
+    if not OUTPUT_LOCKS_DIR.exists():
+        return {"removedLocks": removed_locks, "activeLocks": failed_locks}
+
+    for lock_path in sorted(OUTPUT_LOCKS_DIR.glob("*.lock")):
+        details = describe_fingerprint_lock(lock_path)
+        if _safe_unlink_lock(lock_path):
+            details["reason"] = "startup-force-clear"
+            removed_locks.append(details)
+            logger.warning(
+                "Force-removed lock at startup: %s (fingerprint=%s, jobId=%s, pid=%s)",
+                details["path"], details["fingerprint"], details["jobId"], details["pid"],
+            )
+        else:
+            failed_locks.append(details)
+
+    return {"removedLocks": removed_locks, "activeLocks": failed_locks}
+
+
+def cleanup_stale_fingerprint_locks(
+    *,
+    terminal_job_ids: set[str] | None = None,
+) -> dict[str, list[dict[str, object]]]:
     removed_locks: list[dict[str, object]] = []
     active_locks: list[dict[str, object]] = []
     if not OUTPUT_LOCKS_DIR.exists():
@@ -242,6 +267,11 @@ def cleanup_stale_fingerprint_locks() -> dict[str, list[dict[str, object]]]:
         elif not details["alive"]:
             should_remove = True
             reason = "dead-owner"
+        elif terminal_job_ids and details.get("jobId") in terminal_job_ids:
+            # The job that owns this lock is already finished (failed/completed)
+            # but the PID was recycled by the OS (common on Windows).
+            should_remove = True
+            reason = "terminal-job"
 
         if should_remove:
             if _safe_unlink_lock(lock_path):
