@@ -177,12 +177,18 @@ def main() -> None:
             )
             stop_listener_on_port(5001)
             time.sleep(1)
-            backend_process = subprocess.Popen([str(backend_python), "-m", "app.server"], cwd=PROJECT_ROOT, env=launch_env)
+            popen_kw: dict = {}
+            if os.name == "nt":
+                popen_kw["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+            backend_process = subprocess.Popen([str(backend_python), "-m", "app.server"], cwd=PROJECT_ROOT, env=launch_env, **popen_kw)
             wait_for_url(HEALTH_URL, timeout=60, process=backend_process, name="local app")
     else:
         print(f"Starting local app on {APP_URL} ...")
         logger.info("Starting local app at %s", APP_URL)
-        backend_process = subprocess.Popen([str(backend_python), "-m", "app.server"], cwd=PROJECT_ROOT, env=launch_env)
+        popen_kw = {}
+        if os.name == "nt":
+            popen_kw["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+        backend_process = subprocess.Popen([str(backend_python), "-m", "app.server"], cwd=PROJECT_ROOT, env=launch_env, **popen_kw)
         wait_for_url(HEALTH_URL, timeout=60, process=backend_process, name="local app")
 
     print(f"Private speech-model cache: {whisper_cache_dir}")

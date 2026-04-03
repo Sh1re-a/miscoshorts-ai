@@ -378,8 +378,10 @@ def transcribe_clip_for_subtitles(clip: VideoFileClip, output_dir: Path, clip_in
         )
         return transcribe_media(audio_path, word_timestamps=True)
     finally:
-        if audio_path.exists():
-            audio_path.unlink()
+        try:
+            audio_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _load_wav_mono(audio_path: Path) -> tuple[int, "_np.ndarray"] | None:

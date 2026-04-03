@@ -648,8 +648,11 @@ def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, cl
         if log_handle is not None and not log_handle.closed:
             log_handle.close()
         if worker_proc is not None and worker_proc.poll() is None:
-            worker_proc.kill()
-            worker_proc.wait(timeout=10)
+            try:
+                worker_proc.kill()
+                worker_proc.wait(timeout=10)
+            except Exception:
+                logger.warning("Could not cleanly kill worker pid=%s", getattr(worker_proc, 'pid', '?'))
         if work_dir is not None:
             shutil.rmtree(work_dir, ignore_errors=True)
         with jobs_lock:
