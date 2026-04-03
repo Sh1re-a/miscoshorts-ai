@@ -50,6 +50,7 @@ function App() {
   const [doctorReport, setDoctorReport] = useState<DoctorReport | null>(null)
   const [runtimeState, setRuntimeState] = useState<RuntimePayload | null>(null)
   const [knownRuntimeSessionId, setKnownRuntimeSessionId] = useState<string | null>(null)
+  const [isReconnecting, setIsReconnecting] = useState(false)
   const pollErrorCountRef = useRef(0)
   const jobIdRef = useRef<string | null>(null)
   const pollAbortRef = useRef<AbortController | null>(null)
@@ -165,11 +166,16 @@ function App() {
       }
 
       pollErrorCountRef.current = 0
+      setIsReconnecting(false)
       setJob(payload)
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return
       pollErrorCountRef.current += 1
-      if (pollErrorCountRef.current >= 3) {
+      if (pollErrorCountRef.current >= 2) {
+        setIsReconnecting(true)
+      }
+      if (pollErrorCountRef.current >= 10) {
+        setIsReconnecting(false)
         const message = error instanceof Error ? error.message : 'Could not refresh the live job status.'
         setJob((previous) =>
           previous.status === 'completed'
@@ -295,6 +301,7 @@ function App() {
     pollAbortRef.current?.abort()
     pollAbortRef.current = null
     pollErrorCountRef.current = 0
+    setIsReconnecting(false)
 
     setJobId(null)
     setJob({ status: 'idle' })
@@ -915,6 +922,14 @@ function App() {
                   <p className="mt-2 text-xs text-muted-foreground">ETA: {etaLabel}</p>
                 ) : null}
               </section>
+
+              {/* Reconnecting notice */}
+              {isReconnecting ? (
+                <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 flex items-center gap-2">
+                  <LoaderCircle className="h-3.5 w-3.5 animate-spin shrink-0" />
+                  Reconnecting to backend…
+                </div>
+              ) : null}
 
               {/* Queue notices */}
               {job.status === 'queued' && (job.queuePosition ?? 0) > 0 ? (

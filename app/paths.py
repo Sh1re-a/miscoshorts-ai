@@ -26,8 +26,13 @@ else:
 
 INTERNAL_DIR = _resolve_path("MISCOSHORTS_INTERNAL_DIR", _default_internal_dir)
 RUNTIME_DIR = INTERNAL_DIR / "runtime"
-LOGS_DIR = INTERNAL_DIR / "logs"
 SETUP_DIR = INTERNAL_DIR / "setup"
+# On Windows put logs in a plain visible folder inside the project root so
+# users can find them without navigating hidden AppData directories.
+if os.name == "nt":
+    LOGS_DIR = _resolve_path("MISCOSHORTS_LOGS_DIR", PROJECT_ROOT / "logs")
+else:
+    LOGS_DIR = INTERNAL_DIR / "logs"
 OUTPUTS_DIR = _resolve_path("MISCOSHORTS_OUTPUTS_DIR", _default_outputs_dir)
 OUTPUT_JOBS_DIR = OUTPUTS_DIR / "jobs"
 OUTPUT_CACHE_DIR = OUTPUTS_DIR / "cache"
