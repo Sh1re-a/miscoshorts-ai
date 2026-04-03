@@ -2252,6 +2252,16 @@ def _render_selected_clips(
                 outputBytes=output_bytes,
             )
             clips_output.append(clip_payload)
+        except Exception as clip_error:
+            logger.exception("Clip %d/%d failed, continuing with remaining clips.", index, len(clip_candidates))
+            _emit_labeled(
+                progress_callback,
+                "rendering",
+                "CLIP_RENDER",
+                f"Clip {index} failed ({clip_error}). Continuing with remaining clips...",
+                observer=observer,
+                clipIndex=index,
+            )
         finally:
             if clip_final is not None:
                 clip_final.close()
@@ -2264,6 +2274,9 @@ def _render_selected_clips(
             if audio_temp_path is not None and audio_temp_path.exists():
                 audio_temp_path.unlink(missing_ok=True)
             gc.collect()
+
+    if not clips_output:
+        raise RuntimeError("All clips failed to render. Check the logs folder for details.")
 
     return clips_output
 

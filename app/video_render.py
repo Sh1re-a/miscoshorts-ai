@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
@@ -7,6 +8,8 @@ import time
 from pathlib import Path
 
 from moviepy import VideoFileClip
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_RENDER_THREADS = max(4, min(12, os.cpu_count() or 4))
 DEFAULT_RENDER_SETTINGS = {
@@ -71,16 +74,20 @@ def write_high_quality_video(
         video_only_path = output_path.with_suffix(".videoonly.mp4")
         try:
             encode_started_at = time.time()
-            clip.write_videofile(
-                str(video_only_path),
-                codec="libx264",
-                audio=False,
-                fps=fps,
-                threads=threads,
-                preset=settings["video_preset"],
-                ffmpeg_params=base_ffmpeg_params,
-                logger=None,
-            )
+            try:
+                clip.write_videofile(
+                    str(video_only_path),
+                    codec="libx264",
+                    audio=False,
+                    fps=fps,
+                    threads=threads,
+                    preset=settings["video_preset"],
+                    ffmpeg_params=base_ffmpeg_params,
+                    logger=None,
+                )
+            except Exception as enc_error:
+                logger.error("Video encode failed: %s", enc_error)
+                raise RuntimeError(f"Video encoding failed: {enc_error}") from enc_error
             metrics["videoEncodeSeconds"] = round(time.time() - encode_started_at, 2)
             if video_only_path.exists():
                 metrics["videoOnlyBytes"] = video_only_path.stat().st_size
@@ -115,17 +122,21 @@ def write_high_quality_video(
                 video_only_path.unlink(missing_ok=True)
     else:
         encode_started_at = time.time()
-        clip.write_videofile(
-            str(output_path),
-            codec="libx264",
-            audio_codec="aac" if clip.audio is not None else None,
-            fps=fps,
-            audio_bitrate=settings["audio_bitrate"],
-            threads=threads,
-            preset=settings["video_preset"],
-            ffmpeg_params=base_ffmpeg_params,
-            logger=None,
-        )
+        try:
+            clip.write_videofile(
+                str(output_path),
+                codec="libx264",
+                audio_codec="aac" if clip.audio is not None else None,
+                fps=fps,
+                audio_bitrate=settings["audio_bitrate"],
+                threads=threads,
+                preset=settings["video_preset"],
+                ffmpeg_params=base_ffmpeg_params,
+                logger=None,
+            )
+        except Exception as enc_error:
+            logger.error("Video encode failed: %s", enc_error)
+            raise RuntimeError(f"Video encoding failed: {enc_error}") from enc_error
         metrics["videoEncodeSeconds"] = round(time.time() - encode_started_at, 2)
 
     if output_path.exists():

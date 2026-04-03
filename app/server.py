@@ -388,6 +388,67 @@ def _queue_snapshot() -> dict[str, object]:
     }
 
 
+# Heartbeat tracking for job worker threads.
+_job_threads: dict[str, threading.Thread] = {}
+_job_threads_lock = threading.Lock()
+
+
+def _register_job_thread(job_id: str, thread: threading.Thread) -> None:
+    with _job_threads_lock:
+        _job_threads[job_id] = thread
+
+
+def _unregister_job_thread(job_id: str) -> None:
+    with _job_threads_lock:
+        _job_threads.pop(job_id, None)
+
+
+def _job_watchdog() -> None:
+    """Background daemon that detects dead worker threads and marks their jobs as failed."""
+    global _active_jobs
+    while True:
+        time.sleep(5)
+        try:
+            with _job_threads_lock:
+                tracked = list(_job_threads.items())
+            for job_id, thread in tracked:
+                if thread.is_alive():
+                    continue
+                job = _get_job(job_id)
+                if job is None:
+                    _unregister_job_thread(job_id)
+                    continue
+                if job.get("status") in TERMINAL_JOB_STATUSES:
+                    _unregister_job_thread(job_id)
+                    continue
+                logger.error("Watchdog: worker thread for job %s died unexpectedly.", job_id)
+                _append_job_log(job_id, "failed", "The render process crashed unexpectedly.")
+                _set_job(
+                    job_id,
+                    status="failed",
+                    error="The render process crashed unexpectedly (possible memory issue or codec failure).",
+                    errorHelp="Try again with fewer clips or a shorter video. Check the logs folder for details.",
+                    errorCategory="crash",
+                    errorId=f"crash-{job_id[:8]}",
+                    logPath=str(SERVER_LOG_PATH),
+                    updatedAt=time.time(),
+                    etaSeconds=None,
+                )
+                _unregister_job_thread(job_id)
+                with jobs_lock:
+                    if _active_jobs > 0:
+                        _active_jobs -= 1
+                    _refresh_queue_positions_locked()
+                    for queued_job_id in jobs:
+                        _persist_job_locked(queued_job_id)
+                _job_slots.release()
+        except Exception:
+            logger.exception("Watchdog tick failed")
+
+
+threading.Thread(target=_job_watchdog, daemon=True, name="job-watchdog").start()
+
+
 def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, clip_count: int) -> None:
     global _active_jobs
     _job_progress(job_id, "queued", "The job is queued.")
@@ -437,6 +498,7 @@ def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, cl
             etaSeconds=None,
         )
     finally:
+        _unregister_job_thread(job_id)
         with jobs_lock:
             if _active_jobs > 0:
                 _active_jobs -= 1
@@ -630,6 +692,7 @@ def process_video():
         args=(job_id, video_url, api_key, output_filename, clip_count),
         daemon=True,
     )
+    _register_job_thread(job_id, worker)
     worker.start()
 
     return jsonify(
