@@ -208,6 +208,18 @@ def _load_faster_whisper_model() -> tuple[str, object]:
 
     last_error = None
     WHISPER_MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # On CPU, force int8 to avoid float16 crashes (common on Windows without CUDA).
+    _has_cuda = False
+    try:
+        import ctranslate2 as _ct2  # bundled with faster-whisper
+        _has_cuda = "cuda" in _ct2.get_supported_compute_types("cuda")
+    except Exception:
+        pass
+    safe_compute_type = "auto" if _has_cuda else "int8"
+    safe_device = "cuda" if _has_cuda else "cpu"
+    logger.info("Whisper device=%s compute_type=%s (CUDA available: %s)", safe_device, safe_compute_type, _has_cuda)
+
     with _whisper_model_lock:
         for model_name in get_whisper_model_candidates():
             cache_key = f"faster::{model_name}"
@@ -218,15 +230,16 @@ def _load_faster_whisper_model() -> tuple[str, object]:
             try:
                 model = _FasterWhisperModel(
                     model_name,
-                    device="auto",
-                    compute_type="auto",
+                    device=safe_device,
+                    compute_type=safe_compute_type,
                     download_root=str(WHISPER_MODEL_CACHE_DIR),
                     local_files_only=False,
                 )
                 _whisper_model_cache[cache_key] = model
-                logger.info("Prepared faster-whisper model %s", model_name)
+                logger.info("Prepared faster-whisper model %s (device=%s, compute=%s)", model_name, safe_device, safe_compute_type)
                 return model_name, model
             except Exception as error:
+                logger.warning("Failed to load faster-whisper model %s: %s", model_name, error)
                 last_error = error
 
     raise RuntimeError(_format_transcription_backend_error(last_error or RuntimeError("Unknown faster-whisper error."))) from last_error
@@ -291,13 +304,15 @@ def transcribe_media(media_path: Path, *, word_timestamps: bool) -> dict:
             )
             return _normalize_faster_whisper_result(list(segments), info)
         except Exception as error:
+            detail = str(error).strip() or type(error).__name__
+            logger.error("faster-whisper transcription failed: %s", detail, exc_info=True)
             if WHISPER_BACKEND == "faster-whisper":
-                raise RuntimeError("faster-whisper transcription failed.") from error
+                raise RuntimeError(f"faster-whisper transcription failed. {detail}") from error
             if ensure_openai_whisper_available():
                 backend, model_name, model = "openai-whisper", *_load_openai_whisper_model()
-                logger.warning("Falling back to openai-whisper after faster-whisper failed.")
+                logger.warning("Falling back to openai-whisper after faster-whisper failed: %s", detail)
             else:
-                raise RuntimeError("faster-whisper transcription failed.") from error
+                raise RuntimeError(f"faster-whisper transcription failed. {detail}") from error
 
     transcribe_options = {
         "fp16": False,
