@@ -157,6 +157,24 @@ def _lock_path(fingerprint: str) -> Path:
     return OUTPUT_LOCKS_DIR / f"{fingerprint}.lock"
 
 
+def _safe_unlink_lock(lock_path: Path) -> bool:
+    """Delete a lock file, tolerating Windows PermissionError (WinError 32).
+
+    On Windows a lock file may still be held open by a dead-but-not-yet-reaped
+    process.  Crashing because of that would bring down the /api/runtime
+    endpoint which is polled every 2 seconds.
+    """
+    try:
+        lock_path.unlink(missing_ok=True)
+        return True
+    except PermissionError:
+        logger.warning("Cannot delete lock %s (file held by another process) — will retry later.", lock_path)
+        return False
+    except OSError as exc:
+        logger.warning("Cannot delete lock %s: %s", lock_path, exc)
+        return False
+
+
 def _pid_is_alive(pid: int | None) -> bool:
     if pid is None or pid <= 0:
         return False
@@ -222,17 +240,20 @@ def cleanup_stale_fingerprint_locks() -> dict[str, list[dict[str, object]]]:
             reason = "dead-owner"
 
         if should_remove:
-            lock_path.unlink(missing_ok=True)
-            details["reason"] = reason
-            removed_locks.append(details)
-            logger.warning(
-                "Removed orphan fingerprint lock %s (fingerprint=%s, jobId=%s, pid=%s, reason=%s)",
-                details["path"],
-                details["fingerprint"],
-                details["jobId"],
-                details["pid"],
-                reason,
-            )
+            if _safe_unlink_lock(lock_path):
+                details["reason"] = reason
+                removed_locks.append(details)
+                logger.warning(
+                    "Removed orphan fingerprint lock %s (fingerprint=%s, jobId=%s, pid=%s, reason=%s)",
+                    details["path"],
+                    details["fingerprint"],
+                    details["jobId"],
+                    details["pid"],
+                    reason,
+                )
+            else:
+                # Could not delete (Windows file lock) — treat as still active.
+                active_locks.append(details)
         else:
             active_locks.append(details)
 
@@ -277,12 +298,14 @@ def acquire_fingerprint_lock(
                     details["jobId"],
                     details["pid"],
                 )
-                lock_path.unlink(missing_ok=True)
-                continue
+                if _safe_unlink_lock(lock_path):
+                    continue
+                # Windows: file still locked — fall through to wait.
             if not details["payloadValid"] and float(details["ageSeconds"]) > LOCK_STALE_SECONDS:
                 logger.warning("Removing stale unreadable fingerprint lock %s after %.1fs", lock_path, float(details["ageSeconds"]))
-                lock_path.unlink(missing_ok=True)
-                continue
+                if _safe_unlink_lock(lock_path):
+                    continue
+                # Windows: file still locked — fall through to wait.
             if not wait_message_sent:
                 owner_job_id = details["jobId"] or "unknown"
                 owner_pid = details["pid"] if details["pid"] is not None else "unknown"
@@ -310,4 +333,4 @@ def acquire_fingerprint_lock(
                 current_details.get("ownerToken"),
             )
         else:
-            lock_path.unlink(missing_ok=True)
+            _safe_unlink_lock(lock_path)
