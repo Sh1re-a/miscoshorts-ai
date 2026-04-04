@@ -99,9 +99,9 @@ jobs:
         run: |
           if ($env:APP_PID) {
             # Kill process tree to ensure child workers are also stopped
-            $pid = [int]$env:APP_PID
-            Write-Host "Stopping process tree for PID $pid"
-            taskkill /T /F /PID $pid 2>$null
+            $appPid = [int]$env:APP_PID
+            Write-Host "Stopping process tree for PID $appPid"
+            taskkill /T /F /PID $appPid 2>$null
             Start-Sleep -Seconds 2
           }
 
