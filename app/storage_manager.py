@@ -72,10 +72,18 @@ def _job_state_counts(jobs_by_id: dict[str, dict]) -> dict[str, int]:
     return counts
 
 
+def _normalize_output_dir(raw: str) -> str:
+    """Normalize output directory path for consistent cross-platform comparison."""
+    stripped = raw.strip()
+    if not stripped:
+        return ""
+    return str(Path(stripped))
+
+
 def _output_dir_reference_counts(jobs_by_id: dict[str, dict]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for job in jobs_by_id.values():
-        output_dir = str((job.get("result") or {}).get("outputDir") or "").strip()
+        output_dir = _normalize_output_dir(str((job.get("result") or {}).get("outputDir") or ""))
         if not output_dir:
             continue
         counts[output_dir] = counts.get(output_dir, 0) + 1
