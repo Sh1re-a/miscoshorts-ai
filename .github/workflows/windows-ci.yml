@@ -44,6 +44,7 @@ jobs:
         shell: pwsh
         env:
           PYTEST_TIMEOUT: 120
+          PYTHONPATH: ${{ github.workspace }}
         run: |
           & ".\.miscoshorts\runtime\venv\Scripts\pytest.exe" tests/ -v --timeout=120 --tb=short 2>&1 | Tee-Object -FilePath pytest-output.txt
           if ($LASTEXITCODE -ne 0) {
