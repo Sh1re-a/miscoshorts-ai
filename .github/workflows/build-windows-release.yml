@@ -1,0 +1,192 @@
+name: Build Windows Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v1.0.0)'
+        required: true
+        default: 'v0.0.0-dev'
+
+env:
+  MISCOSHORTS_INTERNAL_DIR: ${{ github.workspace }}\.miscoshorts
+  MISCOSHORTS_OUTPUTS_DIR: ${{ github.workspace }}\outputs
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $version = "${{ github.event.inputs.version }}"
+          } else {
+            $version = "${{ github.ref_name }}"
+          }
+          Write-Host "Building version: $version"
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install FFmpeg
+        shell: pwsh
+        run: choco install ffmpeg -y
+
+      - name: Run Windows setup (dependencies only)
+        shell: pwsh
+        run: ./setup_windows.ps1 -SkipLaunch -NonInteractive
+
+      - name: Install PyInstaller
+        shell: pwsh
+        run: |
+          & ".\.miscoshorts\runtime\venv\Scripts\pip.exe" install pyinstaller
+
+      # ─────────────────────────────────────────────────────────────
+      # Build standalone executable
+      # ─────────────────────────────────────────────────────────────
+      - name: Build with PyInstaller
+        shell: pwsh
+        run: |
+          $venvPython = ".\.miscoshorts\runtime\venv\Scripts\python.exe"
+          & $venvPython -m PyInstaller `
+            --name "MiscoshortsAI" `
+            --onedir `
+            --console `
+            --noconfirm `
+            --clean `
+            --add-data "frontend/dist;frontend/dist" `
+            --add-data "app;app" `
+            --hidden-import "app.server" `
+            --hidden-import "app.app_launcher" `
+            --hidden-import "app.render_worker" `
+            --hidden-import "flask" `
+            --hidden-import "PIL" `
+            --hidden-import "cv2" `
+            --hidden-import "moviepy" `
+            --hidden-import "moviepy.editor" `
+            --hidden-import "moviepy.video.io.VideoFileClip" `
+            --hidden-import "yt_dlp" `
+            --hidden-import "faster_whisper" `
+            --hidden-import "ctranslate2" `
+            --collect-all "moviepy" `
+            --collect-all "faster_whisper" `
+            --collect-all "ctranslate2" `
+            --collect-all "yt_dlp" `
+            --exclude-module "torch" `
+            --exclude-module "tensorflow" `
+            --exclude-module "tensorboard" `
+            run.py
+          
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::PyInstaller build failed"
+            exit 1
+          }
+
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist\MiscoshortsAI\MiscoshortsAI.exe")) {
+            Write-Host "::error::MiscoshortsAI.exe not found in dist"
+            Get-ChildItem -Recurse dist | Select-Object FullName
+            exit 1
+          }
+          $exeSize = (Get-Item "dist\MiscoshortsAI\MiscoshortsAI.exe").Length / 1MB
+          Write-Host "Build successful: MiscoshortsAI.exe ($([math]::Round($exeSize, 2)) MB)"
+
+      # ─────────────────────────────────────────────────────────────
+      # Create release package
+      # ─────────────────────────────────────────────────────────────
+      - name: Create release archive
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          $archiveName = "MiscoshortsAI-$version-windows.zip"
+          
+          # Add README for users
+          $readme = @(
+            "MiscoshortsAI - YouTube to Shorts Generator"
+            "============================================"
+            ""
+            "FIRST-TIME SETUP:"
+            "1. Install FFmpeg: https://ffmpeg.org/download.html"
+            "   (Add ffmpeg to your PATH or place ffmpeg.exe next to MiscoshortsAI.exe)"
+            ""
+            "2. Create a .env file next to MiscoshortsAI.exe with:"
+            "   GEMINI_API_KEY=your-api-key-here"
+            ""
+            "3. Double-click MiscoshortsAI.exe to start the app"
+            ""
+            "4. Open http://127.0.0.1:5001 in your browser"
+            ""
+            "The app will download speech recognition models on first use (~1.5 GB)."
+            "Outputs are saved in %LOCALAPPDATA%\MiscoshortsAI\outputs"
+            ""
+            "Version: $version"
+          )
+          $readme -join "`r`n" | Out-File -FilePath "dist\MiscoshortsAI\README.txt" -Encoding utf8
+          
+          # Create zip archive
+          Compress-Archive -Path "dist\MiscoshortsAI\*" -DestinationPath $archiveName -CompressionLevel Optimal
+          
+          $zipSize = (Get-Item $archiveName).Length / 1MB
+          Write-Host "Created $archiveName ($([math]::Round($zipSize, 2)) MB)"
+          
+          "ARCHIVE_NAME=$archiveName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiscoshortsAI-windows
+          path: dist/MiscoshortsAI/
+          retention-days: 7
+
+      # ─────────────────────────────────────────────────────────────
+      # Create GitHub Release (only for tags)
+      # ─────────────────────────────────────────────────────────────
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: MiscoshortsAI-${{ steps.version.outputs.VERSION }}-windows.zip
+          draft: true
+          generate_release_notes: true
+          body: |
+            ## MiscoshortsAI ${{ steps.version.outputs.VERSION }}
+            
+            ### Download
+            - **Windows**: `MiscoshortsAI-${{ steps.version.outputs.VERSION }}-windows.zip`
+            
+            ### Requirements
+            - FFmpeg must be installed and in PATH
+            - A Gemini API key (set in `.env` file)
+            
+            ### First-time Setup
+            1. Extract the zip file
+            2. Create a `.env` file with `GEMINI_API_KEY=your-key`
+            3. Run `MiscoshortsAI.exe`
+            4. Open http://127.0.0.1:5001 in your browser
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload PyInstaller warnings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyinstaller-logs
+          path: |
+            build/MiscoshortsAI/warn-MiscoshortsAI.txt
+            *.log
+          if-no-files-found: ignore

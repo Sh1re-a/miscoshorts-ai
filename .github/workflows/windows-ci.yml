@@ -1,0 +1,119 @@
+name: Windows CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+env:
+  MISCOSHORTS_INTERNAL_DIR: ${{ github.workspace }}\.miscoshorts
+  MISCOSHORTS_OUTPUTS_DIR: ${{ github.workspace }}\outputs
+
+jobs:
+  windows-tests:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install FFmpeg
+        shell: pwsh
+        run: choco install ffmpeg -y
+
+      - name: Run Windows setup script without browser launch
+        shell: pwsh
+        run: ./setup_windows.ps1 -SkipLaunch -NonInteractive
+
+      # ─────────────────────────────────────────────────────────────
+      # Pytest — full test suite on Windows
+      # ─────────────────────────────────────────────────────────────
+      - name: Install pytest
+        shell: pwsh
+        run: |
+          & ".\.miscoshorts\runtime\venv\Scripts\pip.exe" install pytest pytest-timeout
+
+      - name: Run pytest
+        shell: pwsh
+        env:
+          PYTEST_TIMEOUT: 120
+        run: |
+          & ".\.miscoshorts\runtime\venv\Scripts\pytest.exe" tests/ -v --timeout=120 --tb=short 2>&1 | Tee-Object -FilePath pytest-output.txt
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::Pytest failed with exit code $LASTEXITCODE"
+            exit $LASTEXITCODE
+          }
+
+      # ─────────────────────────────────────────────────────────────
+      # Smoke test — start server and verify health endpoints
+      # ─────────────────────────────────────────────────────────────
+      - name: Start local app
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath ".\.miscoshorts\runtime\venv\Scripts\python.exe" -ArgumentList "-m", "app.app_launcher" -PassThru
+          "APP_PID=$($process.Id)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Wait for health endpoint
+        shell: pwsh
+        run: |
+          $deadline = (Get-Date).AddSeconds(90)
+          $lastError = $null
+          do {
+            try {
+              $response = Invoke-RestMethod -Uri "http://127.0.0.1:5001/api/health" -TimeoutSec 5
+              if ($response.status -eq "ok") {
+                Write-Host "Health check passed"
+                exit 0
+              }
+            }
+            catch {
+              $lastError = $_.Exception.Message
+            }
+            Start-Sleep -Seconds 2
+          } while ((Get-Date) -lt $deadline)
+
+          Write-Host "::error::Health endpoint timeout. Last error: $lastError"
+          throw "Timed out waiting for the local app health endpoint on Windows."
+
+      - name: Verify bootstrap endpoint
+        shell: pwsh
+        run: |
+          $response = Invoke-RestMethod -Uri "http://127.0.0.1:5001/api/bootstrap" -TimeoutSec 5
+          if ($response.frontendBuilt -ne $true) {
+            Write-Host "::error::frontendBuilt was false"
+            throw "frontendBuilt was false after Windows setup completed."
+          }
+          Write-Host "Bootstrap check passed: frontendBuilt=$($response.frontendBuilt)"
+
+      - name: Stop local app
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:APP_PID) {
+            # Kill process tree to ensure child workers are also stopped
+            $pid = [int]$env:APP_PID
+            Write-Host "Stopping process tree for PID $pid"
+            taskkill /T /F /PID $pid 2>$null
+            Start-Sleep -Seconds 2
+          }
+
+      # ─────────────────────────────────────────────────────────────
+      # Artifacts — always upload logs for debugging
+      # ─────────────────────────────────────────────────────────────
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-results
+          path: |
+            pytest-output.txt
+            .miscoshorts/setup/windows-setup.log
+            .miscoshorts/logs/
+          if-no-files-found: ignore
