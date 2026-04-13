@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -48,6 +49,7 @@ if not DEBUG_MODE:
 app = Flask(__name__, static_folder=str(FRONTEND_DIST_DIR), static_url_path="/")
 jobs: dict[str, dict] = {}
 jobs_lock = threading.Lock()
+_shutdown_requested = threading.Event()
 JOB_STATE_DIR = OUTPUTS_DIR / "_job_state"
 MAX_CONCURRENT_JOBS = max(1, int(os.getenv("MAX_CONCURRENT_JOBS", "1")))
 MAX_QUEUED_JOBS = max(0, int(os.getenv("MAX_QUEUED_JOBS", "2")))
@@ -60,31 +62,142 @@ _active_jobs = 0
 _job_slots = threading.Semaphore(MAX_CONCURRENT_JOBS)
 _active_worker_procs: list[subprocess.Popen] = []
 _active_worker_procs_lock = threading.Lock()
+_job_worker_map: dict[str, subprocess.Popen] = {}  # job_id -> worker process
+_job_cancel_flags: dict[str, bool] = {}  # job_id -> True if cancellation requested
+_cleanup_thread: threading.Thread | None = None
+_CLEANUP_INTERVAL = 60  # seconds between cleanup runs
 
 
 def _shutdown_workers() -> None:
-    """Kill all active render worker subprocesses.  Called via atexit."""
+    """Kill all active render worker subprocesses. Called via atexit."""
+    logger.info("Shutting down: signaling cleanup thread to stop...")
+    _shutdown_requested.set()
+    
+    # Wait for cleanup thread to finish
+    if _cleanup_thread and _cleanup_thread.is_alive():
+        _cleanup_thread.join(timeout=2)
+    
     with _active_worker_procs_lock:
         procs = list(_active_worker_procs)
+        # Clear all tracking maps
+        _active_worker_procs.clear()
+        _job_worker_map.clear()
+        _job_cancel_flags.clear()
+    
     for proc in procs:
         try:
             if proc.poll() is None:
-                proc.kill()
-                proc.wait(timeout=5)
-        except Exception:
-            pass
+                logger.info("Killing worker process pid=%s", proc.pid)
+                proc.terminate()  # Try graceful termination first
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()  # Force kill if needed
+                    proc.wait(timeout=2)
+        except Exception as e:
+            logger.warning("Error killing worker: %s", e)
+    
     if procs:
         logger.info("atexit: killed %d render worker process(es).", len(procs))
+    
+    # Clean up temp directories
+    _cleanup_stale_temp_dirs()
 
+
+def _cleanup_stale_temp_dirs() -> None:
+    """Remove any temp directories that might have been left behind."""
+    temp_dir = OUTPUTS_DIR / "temp"
+    if not temp_dir.exists():
+        return
+    
+    cutoff = time.time() - 3600  # 1 hour old
+    removed = 0
+    for item in temp_dir.iterdir():
+        try:
+            if item.is_dir() and item.stat().st_mtime < cutoff:
+                shutil.rmtree(item, ignore_errors=True)
+                removed += 1
+        except Exception:
+            pass
+    
+    if removed:
+        logger.info("Cleaned up %d stale temp directories.", removed)
+
+
+def _cleanup_orphan_processes() -> None:
+    """Check for and clean up any orphaned worker processes."""
+    with _active_worker_procs_lock:
+        orphaned = []
+        for proc in _active_worker_procs:
+            if proc.poll() is not None:
+                orphaned.append(proc)
+        
+        for proc in orphaned:
+            _active_worker_procs.remove(proc)
+        
+        # Also clean up job worker map for dead processes
+        dead_jobs = [
+            job_id for job_id, proc in _job_worker_map.items()
+            if proc.poll() is not None
+        ]
+        for job_id in dead_jobs:
+            _job_worker_map.pop(job_id, None)
+            _job_cancel_flags.pop(job_id, None)
+    
+    if orphaned:
+        logger.debug("Cleaned up %d orphaned process references.", len(orphaned))
+
+
+def _cleanup_thread_func() -> None:
+    """Background thread that periodically cleans up resources."""
+    logger.info("Cleanup thread started.")
+    while not _shutdown_requested.wait(timeout=_CLEANUP_INTERVAL):
+        try:
+            _cleanup_orphan_processes()
+            _cleanup_stale_fingerprint_locks()
+            _cleanup_stale_temp_dirs()
+            _cleanup_expired_jobs()
+        except Exception as e:
+            logger.warning("Error in cleanup thread: %s", e)
+    logger.info("Cleanup thread stopped.")
+
+
+def _start_cleanup_thread() -> None:
+    """Start the background cleanup thread."""
+    global _cleanup_thread
+    if _cleanup_thread is None or not _cleanup_thread.is_alive():
+        _cleanup_thread = threading.Thread(target=_cleanup_thread_func, daemon=True, name="cleanup-thread")
+        _cleanup_thread.start()
+
+
+def _signal_handler(signum, frame):
+    """Handle shutdown signals gracefully."""
+    sig_name = signal.Signals(signum).name if hasattr(signal, 'Signals') else str(signum)
+    logger.info("Received %s signal, initiating graceful shutdown...", sig_name)
+    _shutdown_workers()
+    sys.exit(0)
+
+
+# Register signal handlers
+if threading.current_thread() is threading.main_thread():
+    try:
+        signal.signal(signal.SIGTERM, _signal_handler)
+        signal.signal(signal.SIGINT, _signal_handler)
+    except Exception as e:
+        logger.debug("Could not register signal handlers: %s", e)
 
 atexit.register(_shutdown_workers)
 _DOWNLOAD_PCT_PATTERN = re.compile(r"Downloading\.\.\.\s+(\d+)%")
+_DOWNLOAD_ETA_PATTERN = re.compile(r"~(\d+)s\s+left")
 _RENDER_CLIP_PATTERN = re.compile(r"clip\s+(\d+)\s+of\s+(\d+)", re.IGNORECASE)
 _LOCK_WAIT_PATTERN = re.compile(
     r"^LOCK_WAIT \| fingerprint=(?P<fingerprint>[0-9a-f]+) \| ownerJobId=(?P<owner_job_id>[a-zA-Z0-9_-]+) \| ownerPid=(?P<owner_pid>[0-9]+|unknown) \| ",
     re.IGNORECASE,
 )
 STARTUP_RECOVERY = recover_runtime_state()
+
+# Start cleanup thread
+_start_cleanup_thread()
 
 
 def _job_state_path(job_id: str) -> Path:
@@ -276,7 +389,13 @@ def _derive_progress_fields(job: dict, stage: str, message: str) -> dict[str, fl
         pct = float(match.group(1)) if match else 20.0
         stage_progress = pct
         overall = 10.0 + pct * 0.20
-        eta_seconds = max(8.0, (100.0 - pct) * 1.2)
+        # Try to extract actual ETA from message (e.g., "~1219s left")
+        eta_match = _DOWNLOAD_ETA_PATTERN.search(message)
+        if eta_match:
+            eta_seconds = float(eta_match.group(1))
+        else:
+            # Fallback estimate if ETA not in message
+            eta_seconds = max(30.0, (100.0 - pct) * 3.0)
     elif stage == "transcribing":
         lowered_message = message.lower()
         if "preparing the local speech model" in lowered_message:
@@ -569,6 +688,8 @@ def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, cl
 
         with _active_worker_procs_lock:
             _active_worker_procs.append(worker_proc)
+            _job_worker_map[job_id] = worker_proc
+            _job_cancel_flags.pop(job_id, None)  # Clear any stale cancel flag
 
         _job_progress(job_id, "queued", f"Render worker started (pid {worker_proc.pid}).")
         logger.info("Render worker pid=%d for job %s, log=%s", worker_proc.pid, job_id, worker_log_path)
@@ -578,6 +699,13 @@ def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, cl
         last_progress_time = time.time()
 
         while True:
+            # Check for cancellation
+            if _job_cancel_flags.get(job_id):
+                logger.info("Cancellation requested for job %s, killing worker...", job_id)
+                worker_proc.kill()
+                worker_proc.wait(timeout=10)
+                raise Exception("Job cancelled by user")
+            
             rc = worker_proc.poll()
 
             # Read any new progress lines
@@ -691,6 +819,8 @@ def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, cl
                     _active_worker_procs.remove(worker_proc)
                 except ValueError:
                     pass
+                _job_worker_map.pop(job_id, None)
+                _job_cancel_flags.pop(job_id, None)
             if worker_proc.poll() is None:
                 try:
                     worker_proc.kill()
@@ -708,6 +838,37 @@ def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, cl
         _job_slots.release()
         _cleanup_expired_jobs()
 
+
+# ── Global error handlers ────────────────────────────────────────────
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    """Catch-all error handler for unhandled exceptions."""
+    logger.exception("Unhandled exception in request: %s", e)
+    return jsonify({
+        "error": "An unexpected error occurred.",
+        "errorHelp": "Check the server logs for details.",
+        "errorCategory": "internal-error",
+    }), 500
+
+
+@app.errorhandler(404)
+def handle_not_found(e):
+    """Handle 404 errors."""
+    return jsonify({"error": "Resource not found"}), 404
+
+
+@app.errorhandler(500)
+def handle_internal_error(e):
+    """Handle 500 errors."""
+    logger.exception("Internal server error: %s", e)
+    return jsonify({
+        "error": "Internal server error.",
+        "errorHelp": "The server encountered an unexpected condition.",
+    }), 500
+
+
+# ── Health & Bootstrap endpoints ─────────────────────────────────────
 
 @app.get("/api/health")
 def healthcheck():
@@ -915,6 +1076,78 @@ def get_job(job_id: str):
     if job is None:
         return jsonify({"error": "Job not found"}), 404
     return jsonify(job)
+
+
+@app.post("/api/jobs/<job_id>/cancel")
+def cancel_job(job_id: str):
+    """Cancel an in-progress job and clean up all associated files."""
+    job = _get_job(job_id)
+    if job is None:
+        return jsonify({"error": "Job not found"}), 404
+    
+    status = job.get("status", "")
+    
+    # Can't cancel completed or already failed jobs
+    if status in TERMINAL_JOB_STATUSES:
+        return jsonify({"error": f"Cannot cancel a job that is already {status}"}), 400
+    
+    logger.info("Cancelling job %s (current status: %s)", job_id, status)
+    
+    # Set the cancel flag so the worker monitoring loop picks it up
+    with _active_worker_procs_lock:
+        worker = _job_worker_map.get(job_id)
+        _job_cancel_flags[job_id] = True
+        
+        # If we have a direct handle to the worker, kill it immediately
+        if worker is not None and worker.poll() is None:
+            try:
+                worker.terminate()  # Try graceful termination first
+                try:
+                    worker.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    worker.kill()  # Force kill if needed
+                    worker.wait(timeout=2)
+                logger.info("Killed worker process for job %s (pid %s)", job_id, worker.pid)
+            except Exception as e:
+                logger.warning("Failed to kill worker for job %s: %s", job_id, e)
+            finally:
+                # Clean up from tracking maps
+                _job_worker_map.pop(job_id, None)
+                try:
+                    _active_worker_procs.remove(worker)
+                except ValueError:
+                    pass
+    
+    # Update job status to failed/cancelled
+    _set_job(
+        job_id,
+        status="failed",
+        error="Job cancelled by user.",
+        errorHelp="Start a new render when you're ready.",
+        errorCategory="cancelled",
+        updatedAt=time.time(),
+        etaSeconds=None,
+    )
+    _append_job_log(job_id, "failed", "Job cancelled by user.")
+    
+    # Clean up via the storage cleanup logic
+    try:
+        # Re-fetch job so the dict reflects the "failed" status we just set
+        updated_job = _get_job(job_id) or job
+        storage_manager.delete_job_storage({job_id: updated_job}, job_id, mode="job")
+    except Exception as e:
+        logger.warning("Error during cancel cleanup for job %s: %s", job_id, e)
+    
+    # Remove job from memory and disk state
+    with jobs_lock:
+        jobs.pop(job_id, None)
+    _job_state_path(job_id).unlink(missing_ok=True)
+    
+    # Clean up any cancel flag
+    _job_cancel_flags.pop(job_id, None)
+    
+    logger.info("Job %s cancelled and cleaned up.", job_id)
+    return jsonify({"ok": True, "message": "Job cancelled and cleaned up."})
 
 
 @app.get("/api/jobs/<job_id>/download/video")

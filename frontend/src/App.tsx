@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { CheckCircle2, Download, HardDrive, LoaderCircle, Play, PlaySquare, RefreshCw, RotateCcw, ThumbsUp, ThumbsDown, BarChart3, Trash2 } from 'lucide-react'
+import { CheckCircle2, Clock, Download, HardDrive, List, LoaderCircle, Play, PlaySquare, RefreshCw, RotateCcw, StopCircle, ThumbsUp, ThumbsDown, BarChart3, Trash2 } from 'lucide-react'
 
 import { Badge } from './components/ui/badge'
 import { Button } from './components/ui/button'
@@ -9,7 +9,7 @@ import { Label } from './components/ui/label'
 import { Progress } from './components/ui/progress'
 import { feedbackTags, progressByStatus, stageDescriptions, statusTitles } from './features/jobs/config'
 import type { AnalyticsInsights, BootstrapPayload, ClipFeedback, DoctorReport, JobPayload, JobStatus, ProcessErrorPayload, PruneResult, RuntimePayload, StorageReport } from './features/jobs/types'
-import { apiKeyStorageKey, formatBytes, formatEta, formatLogTime, getEtaWindow, loadSavedApiKey, readJsonResponse } from './features/jobs/utils'
+import { apiKeyStorageKey, estimateTotalJobTime, formatBytes, formatEta, formatLogTime, getBackoffDelay, getEtaWindow, jobPayloadChanged, loadSavedApiKey, loadSavedJobId, readJsonResponse, safeFetch, savePendingJobId } from './features/jobs/utils'
 
 const fallbackRenderProfile = 'studio'
 const fallbackRenderProfiles = {
@@ -51,12 +51,34 @@ function App() {
   const [runtimeState, setRuntimeState] = useState<RuntimePayload | null>(null)
   const [knownRuntimeSessionId, setKnownRuntimeSessionId] = useState<string | null>(null)
   const [isReconnecting, setIsReconnecting] = useState(false)
+  const [isCancelling, setIsCancelling] = useState(false)
+  const [, setConnectionErrors] = useState(0)
   const pollErrorCountRef = useRef(0)
+  const runtimeErrorCountRef = useRef(0)
   const jobIdRef = useRef<string | null>(null)
   const pollAbortRef = useRef<AbortController | null>(null)
+  const runtimeAbortRef = useRef<AbortController | null>(null)
+  const prevRuntimeRef = useRef<RuntimePayload | null>(null)
+  const prevJobRef = useRef<JobPayload | null>(null)
+  const pollIntervalRef = useRef<number | null>(null)
+  const runtimeIntervalRef = useRef<number | null>(null)
 
   // Keep ref in sync so async callbacks can read the latest value
   useEffect(() => { jobIdRef.current = jobId }, [jobId])
+
+  // Persist jobId to localStorage so it survives page reload
+  useEffect(() => {
+    savePendingJobId(jobId)
+  }, [jobId])
+
+  // On startup, restore jobId from localStorage if present
+  useEffect(() => {
+    const savedJobId = loadSavedJobId()
+    if (savedJobId && !jobId) {
+      setJobId(savedJobId)
+      setJob({ status: 'queued', message: 'Reconnecting to job...' })
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     let cancelled = false
@@ -106,28 +128,69 @@ function App() {
   }, [])
 
   const loadRuntimeSnapshot = useEffectEvent(async () => {
+    // Cancel any in-flight request
+    runtimeAbortRef.current?.abort()
+    const controller = new AbortController()
+    runtimeAbortRef.current = controller
+    
     try {
-      const response = await fetch('/api/runtime')
+      const response = await safeFetch('/api/runtime', { 
+        signal: controller.signal,
+        timeoutMs: 8000 
+      })
+      
       if (!response.ok) {
-        return
+        throw new Error(`Runtime API returned ${response.status}`)
       }
 
       const payload = await readJsonResponse<RuntimePayload>(response)
-      setRuntimeState(payload)
-      setKnownRuntimeSessionId(payload.runtimeSessionId)
-    } catch {
-      // Keep rendering usable even if live runtime telemetry is temporarily unavailable.
+      
+      // Reset error count on success
+      runtimeErrorCountRef.current = 0
+      
+      // Only update state if meaningful data changed to reduce flickering
+      const prev = prevRuntimeRef.current
+      const queueChanged = !prev || 
+        prev.queue.activeCount !== payload.queue.activeCount ||
+        prev.queue.queuedCount !== payload.queue.queuedCount ||
+        prev.consistency.status !== payload.consistency.status
+      
+      const jobsChanged = !prev ||
+        (prev.recentJobs?.length ?? 0) !== (payload.recentJobs?.length ?? 0) ||
+        prev.recentJobs?.some((j, i) => j.status !== payload.recentJobs?.[i]?.status)
+      
+      if (queueChanged || jobsChanged || prev?.runtimeSessionId !== payload.runtimeSessionId) {
+        prevRuntimeRef.current = payload
+        setRuntimeState(payload)
+        setKnownRuntimeSessionId(payload.runtimeSessionId)
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return
+      
+      runtimeErrorCountRef.current += 1
+      // Only log after multiple failures to avoid console spam
+      if (runtimeErrorCountRef.current === 3) {
+        console.warn('Runtime polling experiencing issues:', error)
+      }
     }
   })
 
   useEffect(() => {
     void loadRuntimeSnapshot()
 
-    const intervalId = window.setInterval(() => {
+    // Use a stable interval with longer delay to reduce server load
+    runtimeIntervalRef.current = window.setInterval(() => {
       void loadRuntimeSnapshot()
-    }, 2000)
+    }, 2500) // Slightly longer interval for stability
 
-    return () => window.clearInterval(intervalId)
+    return () => {
+      if (runtimeIntervalRef.current) {
+        window.clearInterval(runtimeIntervalRef.current)
+        runtimeIntervalRef.current = null
+      }
+      runtimeAbortRef.current?.abort()
+      runtimeAbortRef.current = null
+    }
   }, [loadRuntimeSnapshot])
 
   const pollJob = useEffectEvent(async () => {
@@ -141,7 +204,11 @@ function App() {
     pollAbortRef.current = controller
 
     try {
-      const response = await fetch(`/api/jobs/${jobId}`, { signal: controller.signal })
+      const response = await safeFetch(`/api/jobs/${jobId}`, { 
+        signal: controller.signal,
+        timeoutMs: 10000
+      })
+      
       // Guard: if jobId was cleared while the fetch was in-flight, discard the response
       if (jobIdRef.current !== jobId) return
       const payload = await readJsonResponse<JobPayload>(response)
@@ -165,16 +232,27 @@ function App() {
         throw new Error(payload.error ?? 'Could not load job status.')
       }
 
+      // Success - reset error state
       pollErrorCountRef.current = 0
       setIsReconnecting(false)
-      setJob(payload)
+      setConnectionErrors(0)
+      
+      // Only update job state if meaningful fields changed to reduce flickering
+      if (jobPayloadChanged(prevJobRef.current, payload)) {
+        prevJobRef.current = payload
+        setJob(payload)
+      }
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return
+      
       pollErrorCountRef.current += 1
-      if (pollErrorCountRef.current >= 2) {
+      setConnectionErrors(pollErrorCountRef.current)
+      
+      if (pollErrorCountRef.current >= 2 && pollErrorCountRef.current < 10) {
         setIsReconnecting(true)
       }
-      if (pollErrorCountRef.current >= 10) {
+      
+      if (pollErrorCountRef.current >= 15) {
         setIsReconnecting(false)
         const message = error instanceof Error ? error.message : 'Could not refresh the live job status.'
         setJob((previous) =>
@@ -184,7 +262,7 @@ function App() {
                 ...previous,
                 status: 'failed',
                 error: message,
-                errorHelp: 'The app lost contact with the backend queue state. Check the runtime status below, then start the render again if needed.',
+                errorHelp: 'The app lost contact with the backend. Check that the server is running, then start a new render.',
               },
         )
       }
@@ -196,21 +274,41 @@ function App() {
       // Abort any in-flight poll when jobId becomes null (e.g. resetFlow)
       pollAbortRef.current?.abort()
       pollAbortRef.current = null
+      if (pollIntervalRef.current) {
+        window.clearInterval(pollIntervalRef.current)
+        pollIntervalRef.current = null
+      }
       return
     }
 
+    // Initial poll
     void pollJob()
 
-    const intervalId = window.setInterval(() => {
+    // Use adaptive polling: faster during active work, slower otherwise
+    const getInterval = () => {
+      const isActive = !['idle', 'completed', 'failed'].includes(job.status)
+      const hasErrors = pollErrorCountRef.current > 0
+      
+      if (hasErrors) {
+        // Backoff on errors
+        return getBackoffDelay(pollErrorCountRef.current, 1500, 10000)
+      }
+      return isActive ? 1200 : 3000 // Faster when active, slower when idle
+    }
+
+    pollIntervalRef.current = window.setInterval(() => {
       void pollJob()
-    }, 1200)
+    }, getInterval())
 
     return () => {
-      window.clearInterval(intervalId)
+      if (pollIntervalRef.current) {
+        window.clearInterval(pollIntervalRef.current)
+        pollIntervalRef.current = null
+      }
       pollAbortRef.current?.abort()
       pollAbortRef.current = null
     }
-  }, [jobId, pollJob])
+  }, [jobId, pollJob, job.status])
 
   useEffect(() => {
     if (['idle', 'completed', 'failed'].includes(job.status)) {
@@ -251,6 +349,8 @@ function App() {
     : etaWindow
       ? `${formatEta(etaWindow[0])} to ${formatEta(etaWindow[1])}`
       : null
+  // Pre-start time estimate based on clip count
+  const preStartEstimate = useMemo(() => estimateTotalJobTime(selectedClipCount), [selectedClipCount])
   const hasStarted = job.status !== 'idle' || isSubmitting || jobId !== null
   const effectiveClipCount = job.result?.clipCount ?? job.clipCount ?? selectedClipCount
   const currentRenderProfileLabel = renderProfiles[selectedRenderProfile] ?? renderProfiles[fallbackRenderProfile] ?? 'Studio HQ 1080x1920 MP4'
@@ -296,12 +396,54 @@ function App() {
     return { recoveredJobs, clearedLocks, clearedTempWorkspaces }
   }, [runtimeState])
 
+  // Combine active and queued jobs, with active ones first
+  const visibleJobs = useMemo(() => {
+    if (!runtimeState) return []
+    const active = runtimeState.queue.activeJobs ?? []
+    const queued = runtimeState.queue.queuedJobs ?? []
+    const recent = runtimeState.recentJobs ?? []
+    // Deduplicate: activeJobs + queuedJobs, then completed from recentJobs
+    const seenIds = new Set<string>()
+    const result: typeof recent = []
+    for (const job of [...active, ...queued]) {
+      if (!seenIds.has(job.jobId)) {
+        seenIds.add(job.jobId)
+        result.push(job)
+      }
+    }
+    // Add recent completed/failed jobs (up to 5 total)
+    for (const job of recent) {
+      if (result.length >= 5) break
+      if (!seenIds.has(job.jobId) && (job.status === 'completed' || job.status === 'failed')) {
+        seenIds.add(job.jobId)
+        result.push(job)
+      }
+    }
+    return result
+  }, [runtimeState])
+
   function resetFlow() {
-    // Abort any in-flight job poll immediately so it can't overwrite the reset
+    // Clean up intervals
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current)
+      pollIntervalRef.current = null
+    }
+    if (runtimeIntervalRef.current) {
+      clearInterval(runtimeIntervalRef.current)
+      runtimeIntervalRef.current = null
+    }
+    // Abort any in-flight requests
     pollAbortRef.current?.abort()
     pollAbortRef.current = null
+    runtimeAbortRef.current?.abort()
+    runtimeAbortRef.current = null
+    // Reset error counters
     pollErrorCountRef.current = 0
+    setConnectionErrors(0)
+    prevJobRef.current = null
+    prevRuntimeRef.current = null
     setIsReconnecting(false)
+    setIsCancelling(false)
 
     setJobId(null)
     setJob({ status: 'idle' })
@@ -317,6 +459,48 @@ function App() {
     setPreviewClipIndex(null)
     setAnalyticsData(null)
     setShowAnalytics(false)
+  }
+
+  function switchToJob(targetJobId: string, targetJob?: { status?: string; message?: string }) {
+    // Clean up intervals (they'll be restarted by useEffect for new job)
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current)
+      pollIntervalRef.current = null
+    }
+    if (runtimeIntervalRef.current) {
+      clearInterval(runtimeIntervalRef.current)
+      runtimeIntervalRef.current = null
+    }
+    // Abort any in-flight requests
+    pollAbortRef.current?.abort()
+    pollAbortRef.current = null
+    runtimeAbortRef.current?.abort()
+    runtimeAbortRef.current = null
+    // Reset error counters
+    pollErrorCountRef.current = 0
+    setConnectionErrors(0)
+    prevJobRef.current = null
+    prevRuntimeRef.current = null
+    setIsReconnecting(false)
+    setIsCancelling(false)
+
+    // Clear per-job UI state
+    setClipFeedback({})
+    setCleanupConfirm(null)
+    setSourceMediaDeleted(false)
+    setCleanupActionError(null)
+    setPreviewClipIndex(null)
+    setAnalyticsData(null)
+    setShowAnalytics(false)
+    setRequestError(null)
+    setIsSubmitting(false)
+
+    // Switch to new job
+    setJobId(targetJobId)
+    setJob({
+      status: (targetJob?.status as JobStatus) ?? 'queued',
+      message: targetJob?.message ?? 'Loading job...',
+    })
   }
 
   const handleRating = useCallback(async (clipIndex: number, rating: 'good' | 'bad') => {
@@ -519,6 +703,29 @@ function App() {
     }
   }, [loadStorageReport])
 
+  const handleCancelJob = useCallback(async () => {
+    if (!jobId) return
+    setIsCancelling(true)
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      })
+      if (res.ok) {
+        // Job cancelled - reset to idle state
+        resetFlow()
+        void loadStorageReport()
+      } else {
+        const data = await readJsonResponse<{ error?: string }>(res).catch(() => ({} as { error?: string }))
+        setRequestError(data.error ?? 'Could not cancel the job.')
+      }
+    } catch {
+      setRequestError('Network error while cancelling.')
+    } finally {
+      setIsCancelling(false)
+    }
+  }, [jobId, loadStorageReport])
+
   function clearSavedApiKey() {
     try {
       window.localStorage.removeItem(apiKeyStorageKey)
@@ -656,6 +863,73 @@ function App() {
             {runtimeIssues.map((issue) => <p key={issue}>{issue}</p>)}
           </div>
         ) : null}
+      </div>
+    </section>
+  ) : null
+
+  /* ─── Sidebar module: Jobs ──────────────────────────────────────── */
+  const jobsModule = visibleJobs.length > 0 ? (
+    <section className="rounded-lg border border-border bg-white p-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          <List className="inline h-3.5 w-3.5 mr-1" />
+          Jobs
+        </h3>
+        <span className="text-[11px] text-muted-foreground">{visibleJobs.length}</span>
+      </div>
+      <div className="mt-2 space-y-1.5">
+        {visibleJobs.map((j) => {
+          const isCurrentJob = j.jobId === jobId
+          const isActive = ['validating', 'downloading', 'transcribing', 'analyzing', 'rendering'].includes(j.status ?? '')
+          const isQueued = j.status === 'queued'
+          const isCompleted = j.status === 'completed'
+          const isFailed = j.status === 'failed'
+          
+          return (
+            <button
+              key={j.jobId}
+              type="button"
+              onClick={() => !isCurrentJob && switchToJob(j.jobId, { status: j.status, message: j.message })}
+              disabled={isCurrentJob}
+              className={`w-full text-left rounded-md px-2 py-1.5 transition-colors ${
+                isCurrentJob
+                  ? 'bg-primary/10 ring-1 ring-primary/30'
+                  : 'hover:bg-muted'
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-medium text-foreground truncate max-w-[120px]">
+                  {j.jobId.slice(0, 8)}…
+                </span>
+                <span className={`flex items-center gap-1 text-[10px] font-medium ${
+                  isCompleted ? 'text-emerald-600' : 
+                  isFailed ? 'text-destructive' : 
+                  isActive ? 'text-primary' : 
+                  isQueued ? 'text-amber-600' : 
+                  'text-muted-foreground'
+                }`}>
+                  {isActive && <LoaderCircle className="h-2.5 w-2.5 animate-spin" />}
+                  {isQueued && <Clock className="h-2.5 w-2.5" />}
+                  {isCompleted && <CheckCircle2 className="h-2.5 w-2.5" />}
+                  {j.status ?? 'unknown'}
+                </span>
+              </div>
+              {j.overallProgress != null && !isCompleted && !isFailed ? (
+                <div className="mt-1 h-1 w-full rounded-full bg-muted overflow-hidden">
+                  <div 
+                    className={`h-full transition-all ${isActive ? 'bg-primary' : 'bg-amber-500'}`}
+                    style={{ width: `${j.overallProgress}%` }}
+                  />
+                </div>
+              ) : null}
+              {j.etaSeconds != null && j.etaSeconds > 0 && !isCompleted && !isFailed ? (
+                <p className="mt-0.5 text-[10px] text-muted-foreground">
+                  ETA: {formatEta(j.etaSeconds)}
+                </p>
+              ) : null}
+            </button>
+          )
+        })}
       </div>
     </section>
   ) : null
@@ -877,6 +1151,19 @@ function App() {
                   </div>
                 </div>
 
+                {/* Time estimate preview */}
+                <div className="rounded-md border border-border bg-muted/50 px-3 py-2">
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <Clock className="h-3.5 w-3.5" />
+                    <span>
+                      Estimated time: <span className="font-medium text-foreground">{preStartEstimate[0]}–{preStartEstimate[1]} min</span>
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    Depends on video length and network speed. Transcription is usually the longest step.
+                  </p>
+                </div>
+
                 <Button className="w-full" type="submit" disabled={!canSubmit}>
                   {isSubmitting || isWorking ? (
                     <><LoaderCircle className="mr-2 h-3.5 w-3.5 animate-spin" /> Rendering…</>
@@ -910,6 +1197,22 @@ function App() {
                       <p className="mt-0.5 text-[11px] text-muted-foreground">Stage progress: {job.stageProgress}%</p>
                     ) : null}
                   </div>
+                  {/* Cancel button - only show when job is in progress (not completed/failed) */}
+                  {!['completed', 'failed', 'idle'].includes(job.status) ? (
+                    <button
+                      type="button"
+                      onClick={() => void handleCancelJob()}
+                      disabled={isCancelling}
+                      className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-destructive ring-1 ring-destructive/30 hover:bg-destructive/10 disabled:opacity-50 transition-colors shrink-0"
+                    >
+                      {isCancelling ? (
+                        <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <StopCircle className="h-3.5 w-3.5" />
+                      )}
+                      {isCancelling ? 'Cancelling…' : 'Cancel'}
+                    </button>
+                  ) : null}
                 </div>
                 <div className="mt-3 space-y-1">
                   <div className="flex items-center justify-between text-[11px] text-muted-foreground">
@@ -1277,6 +1580,7 @@ function App() {
         <aside className="w-full shrink-0 space-y-3 lg:w-64">
           {systemHealthModule}
           {runtimeModule}
+          {jobsModule}
           {storageModule}
         </aside>
       </div>
