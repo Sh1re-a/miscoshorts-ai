@@ -178,6 +178,18 @@ def _safe_unlink_lock(lock_path: Path) -> bool:
 def _pid_is_alive(pid: int | None) -> bool:
     if pid is None or pid <= 0:
         return False
+    if os.name == "nt":
+        # On Windows, os.kill(pid, 0) sends CTRL_C_EVENT (signal 0) which
+        # actually delivers a keyboard interrupt to the process group.
+        # Use OpenProcess instead to safely check if a process exists.
+        import ctypes
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if handle:
+            kernel32.CloseHandle(handle)
+            return True
+        return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
