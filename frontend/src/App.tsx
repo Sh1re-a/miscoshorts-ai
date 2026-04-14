@@ -35,6 +35,7 @@ function App() {
   const [nowMs, setNowMs] = useState(() => Date.now())
   const [clipFeedback, setClipFeedback] = useState<Record<number, ClipFeedback>>({})
   const [analyticsData, setAnalyticsData] = useState<AnalyticsInsights | null>(null)
+  const [analyticsError, setAnalyticsError] = useState(false)
   const [showAnalytics, setShowAnalytics] = useState(false)
   const [selectedClipCount, setSelectedClipCount] = useState(3)
   const [cleanupConfirm, setCleanupConfirm] = useState<null | 'source' | 'job'>(null)
@@ -246,7 +247,7 @@ function App() {
       
       pollErrorCountRef.current += 1
       
-      if (pollErrorCountRef.current >= 2 && pollErrorCountRef.current < 10) {
+      if (pollErrorCountRef.current >= 2 && pollErrorCountRef.current < 15) {
         setIsReconnecting(true)
       }
       
@@ -460,7 +461,7 @@ function App() {
     setShowAnalytics(false)
   }
 
-  function switchToJob(targetJobId: string, targetJob?: { status?: string; message?: string }) {
+  function switchToJob(targetJobId: string, targetJob?: { status?: string; message?: string; runtimeSessionId?: string }) {
     // Clean up job polling interval (will be restarted by useEffect for new job)
     if (pollIntervalRef.current) {
       clearTimeout(pollIntervalRef.current)
@@ -491,23 +492,25 @@ function App() {
     setJob({
       status: (targetJob?.status as JobStatus) ?? 'queued',
       message: targetJob?.message ?? 'Loading job...',
+      runtimeSessionId: targetJob?.runtimeSessionId,
     })
   }
 
   const handleRating = useCallback(async (clipIndex: number, rating: 'good' | 'bad') => {
     if (!jobId) return
 
-    setClipFeedback(prev => ({
-      ...prev,
-      [clipIndex]: { ...prev[clipIndex], rating, tags: prev[clipIndex]?.tags ?? [], saving: true, saved: false },
-    }))
+    setClipFeedback(prev => {
+      const old = prev[clipIndex]
+      // Clear tags when the rating direction changes (positive tags don't belong on bad ratings)
+      const tags = old?.rating === rating ? (old.tags ?? []) : []
+      return { ...prev, [clipIndex]: { rating, tags, saving: true, saved: false } }
+    })
 
     try {
-      const existing = clipFeedback[clipIndex]
       await fetch(`/api/jobs/${jobId}/clips/${clipIndex}/feedback`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rating, tags: existing?.tags ?? [] }),
+        body: JSON.stringify({ rating, tags: [] }),
       })
       setClipFeedback(prev => ({
         ...prev,
@@ -519,28 +522,32 @@ function App() {
         [clipIndex]: { ...prev[clipIndex]!, saving: false },
       }))
     }
-  }, [jobId, clipFeedback])
+  }, [jobId])
 
   const handleTagToggle = useCallback(async (clipIndex: number, tagId: string) => {
     if (!jobId) return
 
-    const existing = clipFeedback[clipIndex]
-    if (!existing?.rating) return
+    // Read current state synchronously via the updater — avoids stale closure
+    let rating: 'good' | 'bad' | undefined
+    let tags: string[] = []
 
-    const tags = existing.tags.includes(tagId)
-      ? existing.tags.filter(t => t !== tagId)
-      : [...existing.tags, tagId]
+    setClipFeedback(prev => {
+      const existing = prev[clipIndex]
+      if (!existing?.rating) return prev
+      rating = existing.rating
+      tags = existing.tags.includes(tagId)
+        ? existing.tags.filter(t => t !== tagId)
+        : [...existing.tags, tagId]
+      return { ...prev, [clipIndex]: { ...existing, tags, saving: true } }
+    })
 
-    setClipFeedback(prev => ({
-      ...prev,
-      [clipIndex]: { ...prev[clipIndex]!, tags, saving: true },
-    }))
+    if (!rating) return
 
     try {
       await fetch(`/api/jobs/${jobId}/clips/${clipIndex}/feedback`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rating: existing.rating, tags }),
+        body: JSON.stringify({ rating, tags }),
       })
       setClipFeedback(prev => ({
         ...prev,
@@ -552,23 +559,26 @@ function App() {
         [clipIndex]: { ...prev[clipIndex]!, saving: false },
       }))
     }
-  }, [jobId, clipFeedback])
+  }, [jobId])
 
   const loadAnalytics = useCallback(async () => {
+    setAnalyticsError(false)
     try {
-      const res = await fetch('/api/analytics')
+      const res = await safeFetch('/api/analytics', { timeoutMs: 8000 })
       if (res.ok) {
         setAnalyticsData(await readJsonResponse<AnalyticsInsights>(res))
+      } else {
+        setAnalyticsError(true)
       }
     } catch {
-      // silently fail
+      setAnalyticsError(true)
     }
   }, [])
 
   const loadStorageReport = useCallback(async () => {
     setStorageLoading(true)
     try {
-      const res = await fetch('/api/storage')
+      const res = await safeFetch('/api/storage', { timeoutMs: 10000 })
       if (res.ok) {
         setStorageReport(await readJsonResponse<StorageReport>(res))
       }
@@ -583,10 +593,11 @@ function App() {
     if (!jobId) return
     setCleanupActionError(null)
     try {
-      const res = await fetch(`/api/storage/jobs/${jobId}/cleanup`, {
+      const res = await safeFetch(`/api/storage/jobs/${jobId}/cleanup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode: 'source_media' }),
+        timeoutMs: 15000,
       })
       if (res.ok) {
         setSourceMediaDeleted(true)
@@ -617,10 +628,11 @@ function App() {
     if (!jobId) return
     setCleanupActionError(null)
     try {
-      const res = await fetch(`/api/storage/jobs/${jobId}/cleanup`, {
+      const res = await safeFetch(`/api/storage/jobs/${jobId}/cleanup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode: 'job' }),
+        timeoutMs: 15000,
       })
       if (res.ok) {
         // Wipe the panel immediately — a deleted job must not linger in the UI.
@@ -645,10 +657,11 @@ function App() {
     setPruneWorking(true)
     setLastPruneResult(null)
     try {
-      const res = await fetch('/api/storage/prune', {
+      const res = await safeFetch('/api/storage/prune', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pruneTemp: true }),
+        timeoutMs: 20000,
       })
       if (res.ok) {
         const data = await readJsonResponse<PruneResult>(res)
@@ -672,10 +685,11 @@ function App() {
     setPruneWorking(true)
     setLastPruneResult(null)
     try {
-      const res = await fetch('/api/storage/prune', {
+      const res = await safeFetch('/api/storage/prune', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pruneFailedJobs: true }),
+        timeoutMs: 20000,
       })
       if (res.ok) {
         const data = await readJsonResponse<PruneResult>(res)
@@ -698,9 +712,10 @@ function App() {
     if (!jobId) return
     setIsCancelling(true)
     try {
-      const res = await fetch(`/api/jobs/${jobId}/cancel`, {
+      const res = await safeFetch(`/api/jobs/${jobId}/cancel`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        timeoutMs: 10000,
       })
       if (res.ok) {
         // Job cancelled - reset to idle state
@@ -735,7 +750,7 @@ function App() {
     setIsSubmitting(true)
 
     try {
-      const response = await fetch('/api/process', {
+      const response = await safeFetch('/api/process', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -748,6 +763,7 @@ function App() {
           renderProfile: selectedRenderProfile,
           subtitleStyle: lockedSubtitleStyle,
         }),
+        timeoutMs: 15000,
       })
 
       const payload = await readJsonResponse<ProcessErrorPayload>(response)
@@ -880,7 +896,7 @@ function App() {
             <button
               key={j.jobId}
               type="button"
-              onClick={() => !isCurrentJob && switchToJob(j.jobId, { status: j.status, message: j.message })}
+              onClick={() => !isCurrentJob && switchToJob(j.jobId, { status: j.status, message: j.message, runtimeSessionId: j.runtimeSessionId })}
               disabled={isCurrentJob}
               className={`w-full text-left rounded-md px-2 py-1.5 transition-colors ${
                 isCurrentJob
@@ -1552,7 +1568,14 @@ function App() {
                           </button>
                         </div>
                       ) : showAnalytics ? (
-                        <p className="mt-2 text-xs text-muted-foreground">Loading…</p>
+                        <p className="mt-2 text-xs text-muted-foreground">
+                          {analyticsError ? 'Could not load insights. ' : 'Loading…'}
+                          {analyticsError && (
+                            <button type="button" onClick={() => void loadAnalytics()} className="text-primary hover:text-primary/80 transition-colors">
+                              Retry
+                            </button>
+                          )}
+                        </p>
                       ) : null}
                     </div>
                   </>

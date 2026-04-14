@@ -310,18 +310,24 @@ def acquire_fingerprint_lock(
     while fd is None:
         try:
             fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(
-                fd,
-                json.dumps(
-                    {
-                        "fingerprint": fingerprint,
-                        "jobId": job_id,
-                        "pid": os.getpid(),
-                        "createdAt": time.time(),
-                        "ownerToken": owner_token,
-                    }
-                ).encode("utf-8"),
-            )
+            try:
+                os.write(
+                    fd,
+                    json.dumps(
+                        {
+                            "fingerprint": fingerprint,
+                            "jobId": job_id,
+                            "pid": os.getpid(),
+                            "createdAt": time.time(),
+                            "ownerToken": owner_token,
+                        }
+                    ).encode("utf-8"),
+                )
+            except Exception:
+                os.close(fd)
+                fd = None
+                _safe_unlink_lock(lock_path)
+                raise
         except FileExistsError:
             details = describe_fingerprint_lock(lock_path)
             if not details["alive"]:

@@ -713,8 +713,11 @@ def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, cl
             # Check for cancellation
             if _job_cancel_flags.get(job_id):
                 logger.info("Cancellation requested for job %s, killing worker...", job_id)
-                worker_proc.kill()
-                worker_proc.wait(timeout=10)
+                try:
+                    worker_proc.kill()
+                    worker_proc.wait(timeout=10)
+                except (subprocess.TimeoutExpired, OSError) as kill_err:
+                    logger.warning("Worker kill for job %s did not complete cleanly: %s", job_id, kill_err)
                 raise Exception("Job cancelled by user")
             
             rc = worker_proc.poll()
