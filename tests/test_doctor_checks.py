@@ -120,8 +120,11 @@ class WritableFixMessageTests(unittest.TestCase):
         self.assertIn("network", msg.lower())
 
     def test_non_windows_message(self) -> None:
+        # Create path before patching os.name; in Python 3.11, Path()
+        # checks os.name at construction and fails with PosixPath on Windows.
+        test_path = Path("/test")
         with patch("os.name", "posix"):
-            msg = _writable_fix_message(Path("/test"))
+            msg = _writable_fix_message(test_path)
             self.assertIn("writable", msg.lower())
             self.assertNotIn("Desktop", msg)
 
