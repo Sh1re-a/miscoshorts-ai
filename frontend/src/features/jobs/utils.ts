@@ -3,9 +3,6 @@ import type { JobPayload } from './types'
 export const apiKeyStorageKey = 'miscoshorts.apiKey'
 export const jobIdStorageKey = 'miscoshorts.activeJobId'
 
-// Connection state management
-export type ConnectionState = 'connected' | 'reconnecting' | 'disconnected'
-
 export function loadSavedJobId(): string | null {
   try {
     return window.localStorage.getItem(jobIdStorageKey) ?? null
@@ -207,20 +204,4 @@ export function estimateTotalJobTime(clipCount: number): [number, number] {
   const maxSeconds = downloadRange[1] + transcribeRange[1] + analyzeRange[1] + (renderPerClip[1] * clipCount)
   
   return [Math.ceil(minSeconds / 60), Math.ceil(maxSeconds / 60)]
-}
-
-/**
- * Shallow compare two objects to detect meaningful changes.
- * Returns true if objects are effectively equal.
- */
-export function shallowEqual<T extends Record<string, unknown>>(a: T | null, b: T | null): boolean {
-  if (a === b) return true
-  if (!a || !b) return false
-  const keysA = Object.keys(a)
-  const keysB = Object.keys(b)
-  if (keysA.length !== keysB.length) return false
-  for (const key of keysA) {
-    if (a[key] !== b[key]) return false
-  }
-  return true
 }

@@ -401,6 +401,8 @@ def normalize_requested_subtitle_style(subtitle_style: dict | None) -> dict:
             raise ValueError(f"subtitleStyle field '{key}' must be a string.")
 
     return subtitles.normalize_subtitle_style(subtitle_style)
+
+
 def _load_cascades() -> "tuple[_cv2.CascadeClassifier, _cv2.CascadeClassifier]":
     """Lazy-load Haar cascades into module-level singletons (once per process)."""
     global _FRONTAL_CASCADE, _PROFILE_CASCADE
@@ -519,8 +521,11 @@ def _run_cascade(
     kwargs: dict,
 ) -> list[tuple[int, int, int, int]]:
     """Run a Haar cascade and return detections as a plain list (empty on failure)."""
-    found = cascade.detectMultiScale(frame, **kwargs)
-    return found.tolist() if len(found) > 0 else []
+    try:
+        found = cascade.detectMultiScale(frame, **kwargs)
+        return found.tolist() if len(found) > 0 else []
+    except Exception:
+        return []
 
 
 # ─── Advanced content-type classification ────────────────────────────

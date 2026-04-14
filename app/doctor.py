@@ -387,9 +387,9 @@ def run_doctor(*, prepare_whisper: bool = False, render_smoke: bool = False) -> 
             "configuredValue": WHISPER_MODEL,
             "cacheSizeBytes": _directory_size(MODEL_CACHE_DIR),
         },
-            "python": runtime_info,
-            "debugEnabled": is_debug_enabled(),
-        }
+        "python": runtime_info,
+        "debugEnabled": is_debug_enabled(),
+    }
     _write_report_snapshot(report)
     logger.info("Doctor report generated with status %s", overall_status)
     return report

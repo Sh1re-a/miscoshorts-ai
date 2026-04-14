@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from app.paths import OUTPUTS_DIR
+from app.storage import atomic_write_json as _atomic_write_json
 
 _ANALYTICS_DIR = OUTPUTS_DIR / "_analytics"
 _FEEDBACK_DIR = _ANALYTICS_DIR / "feedback"
@@ -328,11 +329,3 @@ def _top_n(counts: dict[str, int], n: int) -> list[dict]:
     """Return top-n items sorted by count descending."""
     return [{"tag": k, "count": v} for k, v in
             sorted(counts.items(), key=lambda x: x[1], reverse=True)[:n]]
-
-
-def _atomic_write_json(path: Path, data: dict) -> None:
-    """Write JSON atomically via temp file + rename."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=True, indent=2), encoding="utf-8")
-    tmp.replace(path)

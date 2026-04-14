@@ -352,7 +352,9 @@ def _resolve_job_artifact_path(job_id: str, artifact_path: str | None) -> Path |
 def _append_job_log(job_id: str, stage: str, message: str) -> None:
     entry = {"time": time.time(), "stage": stage, "message": message}
     with jobs_lock:
-        job = jobs.setdefault(job_id, {})
+        job = jobs.get(job_id)
+        if job is None:
+            return  # Job was removed (e.g. cancelled)
         logs = job.setdefault("logs", [])
         logs.append(entry)
         if len(logs) > 120:
@@ -437,9 +439,14 @@ def _derive_progress_fields(job: dict, stage: str, message: str) -> dict[str, fl
     }
 
 
-def _set_job(job_id: str, **fields) -> None:
+def _set_job(job_id: str, *, _create: bool = False, **fields) -> None:
     with jobs_lock:
-        jobs.setdefault(job_id, {}).update(fields)
+        if _create:
+            jobs[job_id] = fields
+        elif job_id not in jobs:
+            return  # Job was removed (e.g. cancelled) — do not re-create
+        else:
+            jobs[job_id].update(fields)
         _persist_job_locked(job_id)
 
 
@@ -489,6 +496,7 @@ def _queue_snapshot() -> dict[str, object]:
             key=lambda item: (float(item.get("updatedAt") or item.get("createdAt") or 0), item["jobId"]),
             reverse=True,
         )[:12]
+        active_jobs_count = _active_jobs
 
     active_jobs.sort(key=lambda item: (float(item.get("createdAt") or 0), item["jobId"]))
     queued_jobs.sort(
@@ -500,8 +508,8 @@ def _queue_snapshot() -> dict[str, object]:
     )
     lock_details = list_active_fingerprint_locks()
     issues: list[str] = []
-    if _active_jobs != len(active_jobs):
-        issues.append(f"Active worker count mismatch: semaphore tracks {_active_jobs}, jobs track {len(active_jobs)}.")
+    if active_jobs_count != len(active_jobs):
+        issues.append(f"Active worker count mismatch: semaphore tracks {active_jobs_count}, jobs track {len(active_jobs)}.")
     # Detect locks pointing at finished jobs and auto-remove them.
     stale_lock_fingerprints: list[str] = []
     for lock in lock_details:
@@ -934,13 +942,11 @@ def doctor_report():
 
 @app.get("/api/runtime")
 def runtime_status():
-    global STARTUP_RECOVERY
     lock_cleanup = cleanup_stale_fingerprint_locks()
     if lock_cleanup["removedLocks"]:
-        STARTUP_RECOVERY = {
-            **STARTUP_RECOVERY,
-            "clearedLocks": list(STARTUP_RECOVERY.get("clearedLocks") or []) + lock_cleanup["removedLocks"],
-        }
+        existing = list(STARTUP_RECOVERY.get("clearedLocks") or [])
+        existing.extend(lock_cleanup["removedLocks"])
+        STARTUP_RECOVERY["clearedLocks"] = existing
     snapshot = _queue_snapshot()
     snapshot["backendSignature"] = backend_code_signature()
     snapshot["logPath"] = str(SERVER_LOG_PATH)
@@ -950,13 +956,11 @@ def runtime_status():
 
 @app.post("/api/process")
 def process_video():
-    global STARTUP_RECOVERY
     lock_cleanup = cleanup_stale_fingerprint_locks()
     if lock_cleanup["removedLocks"]:
-        STARTUP_RECOVERY = {
-            **STARTUP_RECOVERY,
-            "clearedLocks": list(STARTUP_RECOVERY.get("clearedLocks") or []) + lock_cleanup["removedLocks"],
-        }
+        existing = list(STARTUP_RECOVERY.get("clearedLocks") or [])
+        existing.extend(lock_cleanup["removedLocks"])
+        STARTUP_RECOVERY["clearedLocks"] = existing
     _cleanup_expired_jobs()
     doctor_report = run_doctor(prepare_whisper=False)
     blocking_checks = doctor_report.get("blockingChecks") or [
@@ -1032,6 +1036,7 @@ def process_video():
     matching_job = _matching_live_job_for_fingerprint(pipeline_fingerprint)
     _set_job(
         job_id,
+        _create=True,
         status="queued",
         subtitleStyle=subtitle_style,
         renderProfile=render_profile,

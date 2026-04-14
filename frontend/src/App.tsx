@@ -26,7 +26,6 @@ function App() {
   const [renderProfiles, setRenderProfiles] = useState<Record<string, string>>(fallbackRenderProfiles)
   const [selectedRenderProfile, setSelectedRenderProfile] = useState(fallbackRenderProfile)
   const [speakerMode, setSpeakerMode] = useState('auto')
-  const [, setHasPyannoteToken] = useState(false)
   const [outputFilename, setOutputFilename] = useState('short_con_subs.mp4')
   const [jobId, setJobId] = useState<string | null>(null)
   const [job, setJob] = useState<JobPayload>({ status: 'idle' })
@@ -52,7 +51,6 @@ function App() {
   const [knownRuntimeSessionId, setKnownRuntimeSessionId] = useState<string | null>(null)
   const [isReconnecting, setIsReconnecting] = useState(false)
   const [isCancelling, setIsCancelling] = useState(false)
-  const [, setConnectionErrors] = useState(0)
   const pollErrorCountRef = useRef(0)
   const runtimeErrorCountRef = useRef(0)
   const jobIdRef = useRef<string | null>(null)
@@ -96,7 +94,6 @@ function App() {
           setRenderProfiles(payload.renderProfiles ?? fallbackRenderProfiles)
           setSelectedRenderProfile(payload.defaultRenderProfile || fallbackRenderProfile)
           setSpeakerMode(payload.speakerDiarizationMode ?? 'auto')
-          setHasPyannoteToken(Boolean(payload.hasPyannoteToken))
           setKnownRuntimeSessionId(payload.runtimeSessionId)
         }
       } catch {
@@ -211,9 +208,10 @@ function App() {
       
       // Guard: if jobId was cleared while the fetch was in-flight, discard the response
       if (jobIdRef.current !== jobId) return
-      const payload = await readJsonResponse<JobPayload>(response)
 
+      // Check 404 BEFORE parsing JSON — the body may not be valid JSON
       if (response.status === 404) {
+        const payload = await readJsonResponse<JobPayload>(response).catch(() => ({} as JobPayload))
         const latestRuntimeSessionId = runtimeState?.runtimeSessionId ?? knownRuntimeSessionId
         const runtimeChanged = Boolean(job.runtimeSessionId && latestRuntimeSessionId && job.runtimeSessionId !== latestRuntimeSessionId)
         setJob({
@@ -228,6 +226,8 @@ function App() {
         return
       }
 
+      const payload = await readJsonResponse<JobPayload>(response)
+
       if (!response.ok) {
         throw new Error(payload.error ?? 'Could not load job status.')
       }
@@ -235,7 +235,6 @@ function App() {
       // Success - reset error state
       pollErrorCountRef.current = 0
       setIsReconnecting(false)
-      setConnectionErrors(0)
       
       // Only update job state if meaningful fields changed to reduce flickering
       if (jobPayloadChanged(prevJobRef.current, payload)) {
@@ -246,7 +245,6 @@ function App() {
       if (error instanceof DOMException && error.name === 'AbortError') return
       
       pollErrorCountRef.current += 1
-      setConnectionErrors(pollErrorCountRef.current)
       
       if (pollErrorCountRef.current >= 2 && pollErrorCountRef.current < 10) {
         setIsReconnecting(true)
@@ -275,7 +273,7 @@ function App() {
       pollAbortRef.current?.abort()
       pollAbortRef.current = null
       if (pollIntervalRef.current) {
-        window.clearInterval(pollIntervalRef.current)
+        window.clearTimeout(pollIntervalRef.current)
         pollIntervalRef.current = null
       }
       return
@@ -296,13 +294,22 @@ function App() {
       return isActive ? 1200 : 3000 // Faster when active, slower when idle
     }
 
-    pollIntervalRef.current = window.setInterval(() => {
-      void pollJob()
-    }, getInterval())
+    // Use setTimeout recursion so the delay is re‑evaluated each cycle
+    const scheduleNext = () => {
+      pollIntervalRef.current = window.setTimeout(() => {
+        void Promise.resolve(pollJob()).finally(() => {
+          // Only schedule the next tick if we haven't been cleaned up
+          if (pollIntervalRef.current !== null) {
+            scheduleNext()
+          }
+        })
+      }, getInterval())
+    }
+    scheduleNext()
 
     return () => {
       if (pollIntervalRef.current) {
-        window.clearInterval(pollIntervalRef.current)
+        window.clearTimeout(pollIntervalRef.current)
         pollIntervalRef.current = null
       }
       pollAbortRef.current?.abort()
@@ -423,25 +430,17 @@ function App() {
   }, [runtimeState])
 
   function resetFlow() {
-    // Clean up intervals
+    // Clean up job polling interval
     if (pollIntervalRef.current) {
-      clearInterval(pollIntervalRef.current)
+      clearTimeout(pollIntervalRef.current)
       pollIntervalRef.current = null
     }
-    if (runtimeIntervalRef.current) {
-      clearInterval(runtimeIntervalRef.current)
-      runtimeIntervalRef.current = null
-    }
-    // Abort any in-flight requests
+    // Abort any in-flight job poll
     pollAbortRef.current?.abort()
     pollAbortRef.current = null
-    runtimeAbortRef.current?.abort()
-    runtimeAbortRef.current = null
     // Reset error counters
     pollErrorCountRef.current = 0
-    setConnectionErrors(0)
     prevJobRef.current = null
-    prevRuntimeRef.current = null
     setIsReconnecting(false)
     setIsCancelling(false)
 
@@ -462,25 +461,17 @@ function App() {
   }
 
   function switchToJob(targetJobId: string, targetJob?: { status?: string; message?: string }) {
-    // Clean up intervals (they'll be restarted by useEffect for new job)
+    // Clean up job polling interval (will be restarted by useEffect for new job)
     if (pollIntervalRef.current) {
-      clearInterval(pollIntervalRef.current)
+      clearTimeout(pollIntervalRef.current)
       pollIntervalRef.current = null
     }
-    if (runtimeIntervalRef.current) {
-      clearInterval(runtimeIntervalRef.current)
-      runtimeIntervalRef.current = null
-    }
-    // Abort any in-flight requests
+    // Abort any in-flight job poll
     pollAbortRef.current?.abort()
     pollAbortRef.current = null
-    runtimeAbortRef.current?.abort()
-    runtimeAbortRef.current = null
     // Reset error counters
     pollErrorCountRef.current = 0
-    setConnectionErrors(0)
     prevJobRef.current = null
-    prevRuntimeRef.current = null
     setIsReconnecting(false)
     setIsCancelling(false)
 
