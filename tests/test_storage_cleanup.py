@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from app.paths import OUTPUT_JOBS_DIR
 from app.storage_manager import delete_job_storage, prune_storage
 
 
@@ -72,6 +73,39 @@ class StorageCleanupTests(unittest.TestCase):
             self.assertEqual(report["failedJobs"]["removedItems"], 1)
             self.assertEqual(report["failedJobs"]["removedJobIds"], ["job-failed"])
             self.assertFalse(failed_job_state.exists())
+
+    def test_prune_storage_protects_active_job_output_and_cache_paths(self) -> None:
+        jobs = {
+            "job-active": {
+                "status": "rendering",
+                "jobFingerprint": "fp-active",
+                "videoUrl": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            },
+        }
+        protected_cache = "/tmp/cache-protected"
+        with patch("app.storage_manager.cache_dir_for_url", return_value=Path(protected_cache)), \
+             patch("app.storage_manager.OUTPUT_TEMP_DIR", Path("/tmp/outputs-temp")), \
+             patch("app.storage_manager.list_active_fingerprint_locks", return_value=[]), \
+             patch("app.storage_manager.prune_runtime_storage") as mock_prune:
+            mock_prune.return_value = {
+                "temp": {"removedItems": 0, "removedBytes": 0},
+                "cache": {"removedItems": 0, "removedBytes": 0},
+                "jobs": {"removedItems": 0, "removedBytes": 0},
+                "summary": {},
+            }
+            report = prune_storage(
+                jobs,
+                prune_temp=False,
+                prune_cache=True,
+                prune_jobs=True,
+                prune_failed_jobs=False,
+                dry_run=True,
+            )
+
+        kwargs = mock_prune.call_args.kwargs
+        self.assertIn(protected_cache, kwargs["protected_cache_paths"])
+        self.assertIn(str(OUTPUT_JOBS_DIR / "fp-active"), kwargs["protected_job_paths"])
+        self.assertIn("protectedPaths", report)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,8 @@ import time
 from pathlib import Path
 
 from app.media_cache import cache_dir_for_url
-from app.paths import OUTPUT_CACHE_DIR, OUTPUTS_DIR
+from app.paths import OUTPUT_CACHE_DIR, OUTPUTS_DIR, OUTPUT_JOBS_DIR, OUTPUT_TEMP_DIR
+from app.render_session import list_active_fingerprint_locks
 from app.storage import atomic_write_json, path_size, prune_runtime_storage, storage_summary
 
 TERMINAL_JOB_STATUSES = {"completed", "failed"}
@@ -182,6 +183,61 @@ def _job_output_dir(job: dict) -> Path | None:
     return Path(output_dir) if output_dir else None
 
 
+def _active_resource_protection(jobs_by_id: dict[str, dict]) -> dict[str, set[str]]:
+    protected_temp_paths: set[str] = set()
+    protected_cache_paths: set[str] = set()
+    protected_job_paths: set[str] = set()
+
+    active_job_ids = {
+        job_id
+        for job_id, job in jobs_by_id.items()
+        if str(job.get("status") or "") in ACTIVE_JOB_STATUSES
+    }
+    active_fingerprints = {
+        str(job.get("jobFingerprint"))
+        for job in jobs_by_id.values()
+        if str(job.get("status") or "") in ACTIVE_JOB_STATUSES and job.get("jobFingerprint")
+    }
+
+    for job_id, job in jobs_by_id.items():
+        status = str(job.get("status") or "")
+        if status not in ACTIVE_JOB_STATUSES:
+            continue
+
+        video_url = str(job.get("videoUrl") or (job.get("result") or {}).get("videoUrl") or "").strip()
+        if video_url:
+            protected_cache_paths.add(str(cache_dir_for_url(video_url)))
+
+        output_dir = _job_output_dir(job)
+        if output_dir is not None:
+            protected_job_paths.add(str(output_dir))
+
+        fingerprint = str(job.get("jobFingerprint") or "").strip()
+        if fingerprint:
+            protected_job_paths.add(str(OUTPUT_JOBS_DIR / fingerprint))
+
+    for lock in list_active_fingerprint_locks():
+        fingerprint = str(lock.get("fingerprint") or "").strip()
+        if fingerprint:
+            active_fingerprints.add(fingerprint)
+            protected_job_paths.add(str(OUTPUT_JOBS_DIR / fingerprint))
+
+    if OUTPUT_TEMP_DIR.exists():
+        for child in OUTPUT_TEMP_DIR.iterdir():
+            name = child.name
+            if any(name.startswith(f"{fingerprint}-") for fingerprint in active_fingerprints):
+                protected_temp_paths.add(str(child))
+                continue
+            if name.startswith("render-") and any(job_id[:8] in name for job_id in active_job_ids):
+                protected_temp_paths.add(str(child))
+
+    return {
+        "temp": protected_temp_paths,
+        "cache": protected_cache_paths,
+        "jobs": protected_job_paths,
+    }
+
+
 def _remove_path(path: Path, *, dry_run: bool) -> dict[str, int]:
     existed = path.exists()
     removed_bytes = path_size(path)
@@ -251,11 +307,15 @@ def delete_job_storage(jobs_by_id: dict[str, dict], job_id: str, *, mode: str, d
 
 
 def prune_storage(jobs_by_id: dict[str, dict], *, prune_temp: bool, prune_cache: bool, prune_jobs: bool, prune_failed_jobs: bool, dry_run: bool = False) -> dict[str, object]:
+    protected_paths = _active_resource_protection(jobs_by_id)
     report = prune_runtime_storage(
         dry_run=dry_run,
         prune_temp=prune_temp,
         prune_cache=prune_cache,
         prune_jobs=prune_jobs,
+        protected_temp_paths=protected_paths["temp"],
+        protected_cache_paths=protected_paths["cache"],
+        protected_job_paths=protected_paths["jobs"],
     )
 
     removed_failed_job_ids: list[str] = []
@@ -276,5 +336,10 @@ def prune_storage(jobs_by_id: dict[str, dict], *, prune_temp: bool, prune_cache:
         "removedItems": len(removed_failed_job_ids),
         "removedBytes": removed_failed_job_bytes,
         "removedJobIds": removed_failed_job_ids,
+    }
+    report["protectedPaths"] = {
+        "temp": sorted(protected_paths["temp"]),
+        "cache": sorted(protected_paths["cache"]),
+        "jobs": sorted(protected_paths["jobs"]),
     }
     return report

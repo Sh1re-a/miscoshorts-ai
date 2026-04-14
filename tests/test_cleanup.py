@@ -209,6 +209,67 @@ class CleanupExpiredJobsTests(unittest.TestCase):
         with server.jobs_lock:
             self.assertIn("j-active-old", server.jobs)
 
+    def test_removes_old_recovered_failures_on_shorter_retention(self) -> None:
+        old_time = time.time() - (server.RECOVERED_JOB_RETENTION_SECONDS + 60)
+        fresh_time = time.time()
+        with server.jobs_lock:
+            server.jobs["j-recovered-old"] = {
+                "status": "failed",
+                "recoveredByRestart": True,
+                "createdAt": old_time,
+                "updatedAt": old_time,
+            }
+            server.jobs["j-failed-normal"] = {
+                "status": "failed",
+                "createdAt": fresh_time,
+                "updatedAt": fresh_time,
+            }
+
+        server._cleanup_expired_jobs()
+
+        with server.jobs_lock:
+            self.assertNotIn("j-recovered-old", server.jobs)
+            self.assertIn("j-failed-normal", server.jobs)
+
+    def test_removes_old_placeholder_terminal_jobs(self) -> None:
+        old_time = time.time() - (server.PLACEHOLDER_JOB_RETENTION_SECONDS + 60)
+        with server.jobs_lock:
+            server.jobs["j-placeholder"] = {
+                "status": "completed",
+                "createdAt": old_time,
+                "updatedAt": old_time,
+                "runtimeSessionId": "previous-session",
+            }
+
+        server._cleanup_expired_jobs()
+
+        with server.jobs_lock:
+            self.assertNotIn("j-placeholder", server.jobs)
+
+
+class CleanupFailureLogTests(unittest.TestCase):
+    def test_cleanup_old_failure_logs_removes_stale_worker_and_run_files(self) -> None:
+        import tempfile
+        old_time = time.time() - (server.RENDER_FAILURE_LOG_RETENTION_SECONDS + 60)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            stale_run = root / "run-old.json"
+            stale_worker = root / "render-worker-old.log"
+            fresh_run = root / "run-fresh.json"
+            stale_run.write_text("{}", encoding="utf-8")
+            stale_worker.write_text("{}", encoding="utf-8")
+            fresh_run.write_text("{}", encoding="utf-8")
+            os.utime(stale_run, (old_time, old_time))
+            os.utime(stale_worker, (old_time, old_time))
+
+            with patch("app.server.LOGS_DIR", root):
+                removed = server._cleanup_old_failure_logs()
+
+            self.assertEqual(removed, 2)
+            self.assertFalse(stale_run.exists())
+            self.assertFalse(stale_worker.exists())
+            self.assertTrue(fresh_run.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

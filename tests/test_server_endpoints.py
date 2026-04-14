@@ -139,5 +139,68 @@ class BootstrapEndpointTests(unittest.TestCase):
         self.assertIsInstance(data["frontendBuilt"], bool)
 
 
+class RuntimeSnapshotTests(unittest.TestCase):
+    def setUp(self) -> None:
+        with server.jobs_lock:
+            self._saved_jobs = {k: copy.deepcopy(v) for k, v in server.jobs.items()}
+
+    def tearDown(self) -> None:
+        with server.jobs_lock:
+            server.jobs.clear()
+            server.jobs.update(self._saved_jobs)
+
+    def test_queue_snapshot_hides_old_recovered_failures_from_recent_jobs(self) -> None:
+        now = time.time()
+        with server.jobs_lock:
+            server.jobs.clear()
+            server.jobs["job-recovered-old"] = {
+                "status": "failed",
+                "recoveredByRestart": True,
+                "createdAt": now - server.RECOVERED_JOB_VISIBILITY_SECONDS - 30,
+                "updatedAt": now - server.RECOVERED_JOB_VISIBILITY_SECONDS - 30,
+            }
+            server.jobs["job-fresh-failed"] = {
+                "status": "failed",
+                "createdAt": now,
+                "updatedAt": now,
+            }
+
+        snapshot = server._queue_snapshot()
+        recent_ids = [job["jobId"] for job in snapshot["recentJobs"]]
+        self.assertIn("job-fresh-failed", recent_ids)
+        self.assertNotIn("job-recovered-old", recent_ids)
+
+    def test_queue_snapshot_hides_placeholder_previous_session_jobs(self) -> None:
+        now = time.time()
+        with server.jobs_lock:
+            server.jobs.clear()
+            server.jobs["job-placeholder"] = {
+                "status": "completed",
+                "createdAt": now,
+                "updatedAt": now,
+                "runtimeSessionId": "previous-session",
+            }
+            server.jobs["job-real"] = {
+                "status": "completed",
+                "createdAt": now,
+                "updatedAt": now,
+                "runtimeSessionId": "previous-session",
+                "message": "Real job summary",
+            }
+
+        snapshot = server._queue_snapshot()
+        recent_ids = [job["jobId"] for job in snapshot["recentJobs"]]
+        self.assertIn("job-real", recent_ids)
+        self.assertNotIn("job-placeholder", recent_ids)
+
+    def test_friendly_job_error_fields_classify_gemini_overload(self) -> None:
+        fields = server._friendly_job_error_fields(
+            "Gemini request failed: This model is currently experiencing high demand. Please try again later.",
+            fallback_log_path=server.SERVER_LOG_PATH,
+        )
+        self.assertEqual(fields["errorCategory"], "api_quota")
+        self.assertIn("temporarily unavailable", fields["error"].lower())
+
+
 if __name__ == "__main__":
     unittest.main()

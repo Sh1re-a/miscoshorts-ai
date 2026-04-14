@@ -135,9 +135,58 @@ def find_listener_pid(port: int) -> int | None:
         return None
 
 
+def _pid_matches_miscoshorts_server(pid: int, expected_project_root: str | None = None) -> bool:
+    expected_root = str(expected_project_root or PROJECT_ROOT).strip()
+    if not expected_root:
+        return False
+
+    try:
+        if os.name == "nt":
+            completed = subprocess.run(
+                [
+                    "powershell",
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-Command",
+                    f"(Get-CimInstance Win32_Process -Filter \"ProcessId = {pid}\").CommandLine",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+            )
+            command_line = completed.stdout.strip()
+        else:
+            completed = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+            )
+            command_line = completed.stdout.strip()
+    except Exception:
+        return False
+
+    if not command_line:
+        return False
+
+    lowered = command_line.lower()
+    return "app.server" in lowered and expected_root.lower() in lowered
+
+
 def stop_listener_on_port(port: int) -> bool:
     pid = find_listener_pid(port)
     if pid is None or pid == os.getpid():
+        return False
+    if not _pid_matches_miscoshorts_server(pid):
+        logger.warning(
+            "Refusing to kill pid=%s on port %s because it does not look like a Miscoshorts server process.",
+            pid,
+            port,
+        )
         return False
 
     try:
@@ -193,7 +242,11 @@ def main() -> None:
                 running_signature,
                 expected_signature,
             )
-            stop_listener_on_port(5001)
+            if not stop_listener_on_port(5001) and url_responds(HEALTH_URL):
+                raise RuntimeError(
+                    "Port 5001 is already occupied by a process that could not be verified as a Miscoshorts app server. "
+                    "Stop that process manually or change the conflicting service before launching Miscoshorts again."
+                )
             popen_kw: dict = {}
             if os.name == "nt":
                 popen_kw["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP

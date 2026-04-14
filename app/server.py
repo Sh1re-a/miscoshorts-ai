@@ -54,6 +54,9 @@ JOB_STATE_DIR = OUTPUTS_DIR / "_job_state"
 MAX_CONCURRENT_JOBS = max(1, int(os.getenv("MAX_CONCURRENT_JOBS", "1")))
 MAX_QUEUED_JOBS = max(0, int(os.getenv("MAX_QUEUED_JOBS", "2")))
 JOB_RETENTION_HOURS = max(1, int(os.getenv("JOB_RETENTION_HOURS", "24")))
+RECOVERED_JOB_RETENTION_SECONDS = max(300, int(os.getenv("RECOVERED_JOB_RETENTION_SECONDS", "1800")))
+RECOVERED_JOB_VISIBILITY_SECONDS = max(60, int(os.getenv("RECOVERED_JOB_VISIBILITY_SECONDS", "300")))
+PLACEHOLDER_JOB_RETENTION_SECONDS = max(300, int(os.getenv("PLACEHOLDER_JOB_RETENTION_SECONDS", "900")))
 ACTIVE_JOB_STATUSES = {"validating", "downloading", "transcribing", "analyzing", "rendering"}
 TERMINAL_JOB_STATUSES = {"completed", "failed"}
 RUNTIME_SESSION_ID = secrets.token_hex(8)
@@ -66,6 +69,7 @@ _job_worker_map: dict[str, subprocess.Popen] = {}  # job_id -> worker process
 _job_cancel_flags: dict[str, bool] = {}  # job_id -> True if cancellation requested
 _cleanup_thread: threading.Thread | None = None
 _CLEANUP_INTERVAL = 60  # seconds between cleanup runs
+RENDER_FAILURE_LOG_RETENTION_SECONDS = max(3600, int(os.getenv("RENDER_FAILURE_LOG_RETENTION_SECONDS", str(7 * 86400))))
 
 
 def _shutdown_workers() -> None:
@@ -124,6 +128,26 @@ def _cleanup_stale_temp_dirs() -> None:
         logger.info("Cleaned up %d stale temp directories.", removed)
 
 
+def _cleanup_old_failure_logs() -> int:
+    if not LOGS_DIR.exists():
+        return 0
+
+    cutoff = time.time() - RENDER_FAILURE_LOG_RETENTION_SECONDS
+    removed = 0
+    for pattern in ("run-*.json", "render-worker-*.log"):
+        for path in LOGS_DIR.glob(pattern):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+                    removed += 1
+            except OSError:
+                continue
+
+    if removed:
+        logger.info("Cleaned up %d stale failure log/report files.", removed)
+    return removed
+
+
 def _cleanup_orphan_processes() -> None:
     """Check for and clean up any orphaned worker processes."""
     with _active_worker_procs_lock:
@@ -154,8 +178,9 @@ def _cleanup_thread_func() -> None:
     while not _shutdown_requested.wait(timeout=_CLEANUP_INTERVAL):
         try:
             _cleanup_orphan_processes()
-            _cleanup_stale_fingerprint_locks()
+            cleanup_stale_fingerprint_locks()
             _cleanup_stale_temp_dirs()
+            _cleanup_old_failure_logs()
             _cleanup_expired_jobs()
         except Exception as e:
             logger.warning("Error in cleanup thread: %s", e)
@@ -311,7 +336,7 @@ def _refresh_queue_positions() -> None:
 
 
 def _cleanup_expired_jobs() -> int:
-    cutoff = time.time() - (JOB_RETENTION_HOURS * 3600)
+    now = time.time()
     removed_job_ids: list[str] = []
 
     with jobs_lock:
@@ -320,6 +345,12 @@ def _cleanup_expired_jobs() -> int:
             if status in ACTIVE_JOB_STATUSES or status == "queued":
                 continue
             updated_at = float(job.get("updatedAt") or job.get("createdAt") or 0)
+            retention_seconds = JOB_RETENTION_HOURS * 3600
+            if job.get("recoveredByRestart") and status == "failed":
+                retention_seconds = min(retention_seconds, RECOVERED_JOB_RETENTION_SECONDS)
+            if _is_placeholder_terminal_job(job):
+                retention_seconds = min(retention_seconds, PLACEHOLDER_JOB_RETENTION_SECONDS)
+            cutoff = now - retention_seconds
             if updated_at and updated_at < cutoff:
                 removed_job_ids.append(job_id)
                 jobs.pop(job_id, None)
@@ -479,7 +510,150 @@ def _matching_live_job_for_fingerprint(fingerprint: str, *, exclude_job_id: str 
     return snapshot
 
 
+def _friendly_job_error_fields(error_message: str, *, fallback_log_path: Path) -> dict[str, str]:
+    friendly = explain_exception(RuntimeError(error_message))
+    return {
+        "error": friendly.summary,
+        "errorHelp": friendly.hint or f"Open the worker log for technical details: {fallback_log_path}",
+        "errorCategory": friendly.category,
+    }
+
+
+def _normalize_submission_payload(payload: dict) -> tuple[str, str, object, str, int, str]:
+    video_url = (payload.get("videoUrl") or "").strip()
+    api_key = (payload.get("apiKey") or "").strip()
+    output_filename = (payload.get("outputFilename") or "short_con_subs.mp4").strip() or "short_con_subs.mp4"
+    subtitle_style = payload.get("subtitleStyle")
+    render_profile = payload.get("renderProfile")
+    clip_count = payload.get("clipCount") or 3
+
+    if not api_key and not (os.getenv("GEMINI_API_KEY") or "").strip():
+        raise ValueError("Gemini API key is required. Paste it in the app or add GEMINI_API_KEY to .env.")
+
+    video_url = validate_video_url(video_url)
+    output_filename = sanitize_output_filename(output_filename)
+    subtitle_style = normalize_requested_subtitle_style(subtitle_style)
+    render_profile = normalize_requested_render_profile(render_profile)
+
+    try:
+        clip_count = max(1, min(5, int(clip_count)))
+    except (TypeError, ValueError) as error:
+        raise ValueError("clipCount must be a number between 1 and 5") from error
+
+    return video_url, api_key, subtitle_style, render_profile, clip_count, output_filename
+
+
+def _queue_or_start_job(
+    *,
+    video_url: str,
+    api_key: str,
+    output_filename: str,
+    clip_count: int,
+    subtitle_style,
+    render_profile: str,
+    retry_source_job_id: str | None = None,
+    retry_mode: str | None = None,
+) -> tuple[dict[str, object], int]:
+    counts = _count_jobs_by_status()
+    if counts["active"] >= MAX_CONCURRENT_JOBS and counts["queued"] >= MAX_QUEUED_JOBS:
+        return (
+            {
+                "error": "The render queue is full right now. Try again in a few minutes.",
+                "limits": {
+                    "maxConcurrentJobs": MAX_CONCURRENT_JOBS,
+                    "maxQueuedJobs": MAX_QUEUED_JOBS,
+                },
+                "jobs": counts,
+            },
+            503,
+        )
+
+    job_id = secrets.token_hex(12)
+    pipeline_fingerprint = job_fingerprint(
+        video_url=video_url,
+        output_filename=output_filename,
+        clip_count=clip_count,
+        render_profile=render_profile,
+        subtitle_style=subtitle_style,
+    )
+    matching_job = _matching_live_job_for_fingerprint(pipeline_fingerprint)
+    _set_job(
+        job_id,
+        _create=True,
+        status="queued",
+        videoUrl=video_url,
+        outputFilename=output_filename,
+        subtitleStyle=subtitle_style,
+        renderProfile=render_profile,
+        jobFingerprint=pipeline_fingerprint,
+        clipCount=clip_count,
+        createdAt=time.time(),
+        updatedAt=time.time(),
+        overallProgress=4.0,
+        stageProgress=5.0,
+        runtimeSessionId=RUNTIME_SESSION_ID,
+        queueState="waiting_for_identical_render" if matching_job is not None else "waiting_for_worker",
+        waitingOnJobId=matching_job.get("jobId") if matching_job is not None else None,
+        waitingOnFingerprint=pipeline_fingerprint if matching_job is not None else None,
+        retriedFromJobId=retry_source_job_id,
+        retryMode=retry_mode,
+    )
+    _refresh_queue_positions()
+    _append_job_log(
+        job_id,
+        "queued",
+        "The job was created and is waiting for the worker thread."
+        if retry_source_job_id is None
+        else (
+            f"The job was retried from failed job {retry_source_job_id} and is waiting for the worker thread."
+            if retry_mode != "analysis"
+            else f"The job was retried from failed job {retry_source_job_id} and will reuse cached source/transcript data when available."
+        ),
+    )
+
+    job_snapshot = _get_job(job_id) or {}
+
+    worker = threading.Thread(
+        target=_run_job,
+        args=(job_id, video_url, api_key, output_filename, clip_count),
+        daemon=True,
+    )
+    worker.start()
+
+    return (
+        {
+            "jobId": job_id,
+            "status": "queued",
+            "clipCount": clip_count,
+            "queuePosition": job_snapshot.get("queuePosition", 0),
+            "renderProfile": render_profile,
+            "jobFingerprint": pipeline_fingerprint,
+            "queueState": job_snapshot.get("queueState"),
+            "waitingOnJobId": job_snapshot.get("waitingOnJobId"),
+            "runtimeSessionId": RUNTIME_SESSION_ID,
+            "retriedFromJobId": retry_source_job_id,
+            "retryMode": retry_mode,
+        },
+        202,
+    )
+
+
+def _is_placeholder_terminal_job(job: dict) -> bool:
+    status = str(job.get("status") or "")
+    if status not in TERMINAL_JOB_STATUSES:
+        return False
+    if str(job.get("runtimeSessionId") or "") != "previous-session":
+        return False
+    has_real_context = any(
+        job.get(key)
+        for key in ("jobFingerprint", "videoUrl", "outputFilename", "error", "message")
+    )
+    has_result = isinstance(job.get("result"), dict) and bool(job.get("result"))
+    return not has_real_context and not has_result
+
+
 def _queue_snapshot() -> dict[str, object]:
+    now = time.time()
     with jobs_lock:
         job_snapshots = {job_id: dict(job) for job_id, job in jobs.items()}
         active_jobs = [
@@ -493,7 +667,16 @@ def _queue_snapshot() -> dict[str, object]:
             if job.get("status") == "queued"
         ]
         recent_jobs = sorted(
-            ({"jobId": job_id, **job} for job_id, job in job_snapshots.items()),
+            (
+                {"jobId": job_id, **job}
+                for job_id, job in job_snapshots.items()
+                if not (
+                    job.get("recoveredByRestart")
+                    and job.get("status") == "failed"
+                    and float(job.get("updatedAt") or job.get("createdAt") or 0) < (now - RECOVERED_JOB_VISIBILITY_SECONDS)
+                )
+                and not _is_placeholder_terminal_job(job)
+            ),
             key=lambda item: (float(item.get("updatedAt") or item.get("createdAt") or 0), item["jobId"]),
             reverse=True,
         )[:12]
@@ -567,6 +750,7 @@ def _queue_snapshot() -> dict[str, object]:
 # ---------------------------------------------------------------------------
 
 _WORKER_POLL_INTERVAL = 0.8  # seconds between progress reads
+WORKER_STALL_TIMEOUT_SECONDS = max(180, int(os.getenv("WORKER_STALL_TIMEOUT_SECONDS", "600")))
 
 
 def _read_worker_progress(progress_path: Path, last_offset: int) -> tuple[list[dict], int]:
@@ -738,6 +922,30 @@ def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, cl
                     _job_progress(job_id, entry.get("stage", "rendering"), entry.get("message", ""))
                 break
 
+            if time.time() - last_progress_time > WORKER_STALL_TIMEOUT_SECONDS:
+                current_job = _get_job(job_id) or {}
+                current_stage = str(current_job.get("status") or "rendering")
+                stall_seconds = round(time.time() - last_progress_time, 1)
+                logger.error(
+                    "Worker for job %s stalled for %.1fs without progress updates. Killing pid=%s.",
+                    job_id,
+                    stall_seconds,
+                    getattr(worker_proc, "pid", "?"),
+                )
+                _job_progress(
+                    job_id,
+                    current_stage,
+                    f"No progress heartbeat was received for {stall_seconds:.0f}s. The render worker will be stopped so the app does not appear frozen.",
+                )
+                try:
+                    worker_proc.kill()
+                    worker_proc.wait(timeout=10)
+                except Exception as kill_error:
+                    logger.warning("Could not kill stalled worker for job %s cleanly: %s", job_id, kill_error)
+                raise TimeoutError(
+                    f"The render worker stopped reporting progress for {stall_seconds:.0f} seconds."
+                )
+
             time.sleep(_WORKER_POLL_INTERVAL)
 
         log_handle.close()
@@ -759,13 +967,14 @@ def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, cl
             else:
                 error_msg = (result_payload or {}).get("error", "Worker exited cleanly but produced no result.")
                 _append_job_log(job_id, "failed", error_msg)
+                friendly_fields = _friendly_job_error_fields(error_msg, fallback_log_path=worker_log_path)
                 _set_job(
                     job_id,
                     status="failed",
-                    error=error_msg,
-                    errorHelp="Check the render worker log for details.",
-                    errorCategory="worker-error",
-                    errorId=f"worker-error-{job_id[:8]}",
+                    error=friendly_fields["error"],
+                    errorHelp=friendly_fields["errorHelp"],
+                    errorCategory=friendly_fields["errorCategory"],
+                    errorId=f"{friendly_fields['errorCategory']}-{job_id[:8]}",
                     logPath=str(worker_log_path),
                     updatedAt=time.time(),
                     etaSeconds=None,
@@ -776,8 +985,10 @@ def _run_job(job_id: str, video_url: str, api_key: str, output_filename: str, cl
             if result_payload and not result_payload.get("ok"):
                 # Worker wrote an error before dying — use it.
                 error_msg = result_payload.get("error", "Render failed.")
-                error_help = "Check the render worker log for details."
-                error_category = "worker-error"
+                friendly_fields = _friendly_job_error_fields(error_msg, fallback_log_path=worker_log_path)
+                error_msg = friendly_fields["error"]
+                error_help = friendly_fields["errorHelp"]
+                error_category = friendly_fields["errorCategory"]
             else:
                 # No result file — the process died without Python-level handling.
                 diagnosis = _exit_code_diagnosis(rc)
@@ -990,96 +1201,91 @@ def process_video():
         )
 
     payload = request.get_json(silent=True) or {}
-    video_url = (payload.get("videoUrl") or "").strip()
-    api_key = (payload.get("apiKey") or "").strip()
-    output_filename = (payload.get("outputFilename") or "short_con_subs.mp4").strip() or "short_con_subs.mp4"
-    subtitle_style = payload.get("subtitleStyle")
-    render_profile = payload.get("renderProfile")
-    clip_count = payload.get("clipCount") or 3
-
-    if not api_key and not (os.getenv("GEMINI_API_KEY") or "").strip():
-        return jsonify({"error": "Gemini API key is required. Paste it in the app or add GEMINI_API_KEY to .env."}), 400
-
     try:
-        video_url = validate_video_url(video_url)
-        output_filename = sanitize_output_filename(output_filename)
-        subtitle_style = normalize_requested_subtitle_style(subtitle_style)
-        render_profile = normalize_requested_render_profile(render_profile)
+        video_url, api_key, subtitle_style, render_profile, clip_count, output_filename = _normalize_submission_payload(payload)
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
 
-    try:
-        clip_count = max(1, min(5, int(clip_count)))
-    except (TypeError, ValueError):
-        return jsonify({"error": "clipCount must be a number between 1 and 5"}), 400
-
-    counts = _count_jobs_by_status()
-    if counts["active"] >= MAX_CONCURRENT_JOBS and counts["queued"] >= MAX_QUEUED_JOBS:
-        return (
-            jsonify(
-                {
-                    "error": "The render queue is full right now. Try again in a few minutes.",
-                    "limits": {
-                        "maxConcurrentJobs": MAX_CONCURRENT_JOBS,
-                        "maxQueuedJobs": MAX_QUEUED_JOBS,
-                    },
-                    "jobs": counts,
-                }
-            ),
-            503,
-        )
-
-    job_id = secrets.token_hex(12)
-    pipeline_fingerprint = job_fingerprint(
+    response_payload, status_code = _queue_or_start_job(
         video_url=video_url,
+        api_key=api_key,
         output_filename=output_filename,
         clip_count=clip_count,
-        render_profile=render_profile,
         subtitle_style=subtitle_style,
+        render_profile=render_profile,
     )
-    matching_job = _matching_live_job_for_fingerprint(pipeline_fingerprint)
-    _set_job(
-        job_id,
-        _create=True,
-        status="queued",
-        subtitleStyle=subtitle_style,
-        renderProfile=render_profile,
-        jobFingerprint=pipeline_fingerprint,
-        clipCount=clip_count,
-        createdAt=time.time(),
-        updatedAt=time.time(),
-        overallProgress=4.0,
-        stageProgress=5.0,
-        runtimeSessionId=RUNTIME_SESSION_ID,
-        queueState="waiting_for_identical_render" if matching_job is not None else "waiting_for_worker",
-        waitingOnJobId=matching_job.get("jobId") if matching_job is not None else None,
-        waitingOnFingerprint=pipeline_fingerprint if matching_job is not None else None,
+    return jsonify(response_payload), status_code
+
+
+@app.post("/api/jobs/<job_id>/retry")
+def retry_job(job_id: str):
+    source_job = _get_job(job_id)
+    if source_job is None:
+        return jsonify({"error": "Job not found"}), 404
+    if str(source_job.get("status") or "") != "failed":
+        return jsonify({"error": "Only failed jobs can be retried."}), 400
+
+    payload = request.get_json(silent=True) or {}
+    retry_payload = {
+        "videoUrl": source_job.get("videoUrl"),
+        "apiKey": payload.get("apiKey") or "",
+        "outputFilename": source_job.get("outputFilename") or "short_con_subs.mp4",
+        "clipCount": source_job.get("clipCount") or 3,
+        "renderProfile": source_job.get("renderProfile"),
+        "subtitleStyle": source_job.get("subtitleStyle"),
+    }
+
+    try:
+        video_url, api_key, subtitle_style, render_profile, clip_count, output_filename = _normalize_submission_payload(retry_payload)
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+
+    response_payload, status_code = _queue_or_start_job(
+        video_url=video_url,
+        api_key=api_key,
+        output_filename=output_filename,
+        clip_count=clip_count,
+        subtitle_style=subtitle_style,
+        render_profile=render_profile,
+        retry_source_job_id=job_id,
     )
-    _refresh_queue_positions()
-    _append_job_log(job_id, "queued", "The job was created and is waiting for the worker thread.")
+    return jsonify(response_payload), status_code
 
-    job_snapshot = _get_job(job_id) or {}
 
-    worker = threading.Thread(
-        target=_run_job,
-        args=(job_id, video_url, api_key, output_filename, clip_count),
-        daemon=True,
+@app.post("/api/jobs/<job_id>/retry-analysis")
+def retry_job_from_analysis(job_id: str):
+    source_job = _get_job(job_id)
+    if source_job is None:
+        return jsonify({"error": "Job not found"}), 404
+    if str(source_job.get("status") or "") != "failed":
+        return jsonify({"error": "Only failed jobs can be retried."}), 400
+
+    payload = request.get_json(silent=True) or {}
+    retry_payload = {
+        "videoUrl": source_job.get("videoUrl"),
+        "apiKey": payload.get("apiKey") or "",
+        "outputFilename": source_job.get("outputFilename") or "short_con_subs.mp4",
+        "clipCount": source_job.get("clipCount") or 3,
+        "renderProfile": source_job.get("renderProfile"),
+        "subtitleStyle": source_job.get("subtitleStyle"),
+    }
+
+    try:
+        video_url, api_key, subtitle_style, render_profile, clip_count, output_filename = _normalize_submission_payload(retry_payload)
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+
+    response_payload, status_code = _queue_or_start_job(
+        video_url=video_url,
+        api_key=api_key,
+        output_filename=output_filename,
+        clip_count=clip_count,
+        subtitle_style=subtitle_style,
+        render_profile=render_profile,
+        retry_source_job_id=job_id,
+        retry_mode="analysis",
     )
-    worker.start()
-
-    return jsonify(
-        {
-            "jobId": job_id,
-            "status": "queued",
-            "clipCount": clip_count,
-            "queuePosition": job_snapshot.get("queuePosition", 0),
-            "renderProfile": render_profile,
-            "jobFingerprint": pipeline_fingerprint,
-            "queueState": job_snapshot.get("queueState"),
-            "waitingOnJobId": job_snapshot.get("waitingOnJobId"),
-            "runtimeSessionId": RUNTIME_SESSION_ID,
-        }
-    ), 202
+    return jsonify(response_payload), status_code
 
 
 @app.get("/api/jobs/<job_id>")

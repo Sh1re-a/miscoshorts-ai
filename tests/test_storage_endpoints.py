@@ -117,6 +117,17 @@ class StorageEndpointTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("failedJobs", response.get_json())
 
+    def test_prune_endpoint_returns_protected_paths_metadata(self) -> None:
+        with server.jobs_lock:
+            server.jobs.clear()
+        response = self.client.post("/api/storage/prune", json={"pruneTemp": True})
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertIn("protectedPaths", payload)
+        self.assertIn("temp", payload["protectedPaths"])
+        self.assertIn("cache", payload["protectedPaths"])
+        self.assertIn("jobs", payload["protectedPaths"])
+
     def test_prune_temp_returns_temp_key(self) -> None:
         """Prune with pruneTemp=true must include a 'temp' key in the response."""
         response = self.client.post("/api/storage/prune", json={"pruneTemp": True})
