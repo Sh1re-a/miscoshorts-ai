@@ -129,6 +129,8 @@ export type JobPayload = {
   waitingOnJobId?: string | null
   waitingOnFingerprint?: string | null
   runtimeSessionId?: string
+  retriedFromJobId?: string | null
+  retryMode?: 'analysis' | null
 }
 
 export type BootstrapPayload = {
@@ -165,6 +167,8 @@ export type ProcessErrorPayload = {
   queueState?: JobPayload['queueState']
   waitingOnJobId?: string | null
   runtimeSessionId?: string
+  retriedFromJobId?: string | null
+  retryMode?: 'analysis' | null
 }
 
 export type DoctorCheck = {
@@ -283,3 +287,5 @@ export type RuntimePayload = {
   recentJobs: RuntimeJobSummary[]
   consistency: RuntimeConsistencyPayload
 }
+
+export type RuntimeBannerState = 'ok' | 'degraded' | 'offline' | 'restarted'

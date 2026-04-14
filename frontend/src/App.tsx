@@ -8,7 +8,7 @@ import { Input } from './components/ui/input'
 import { Label } from './components/ui/label'
 import { Progress } from './components/ui/progress'
 import { feedbackTags, progressByStatus, stageDescriptions, statusTitles } from './features/jobs/config'
-import type { AnalyticsInsights, BootstrapPayload, ClipFeedback, DoctorReport, JobPayload, JobStatus, ProcessErrorPayload, PruneResult, RuntimePayload, StorageReport } from './features/jobs/types'
+import type { AnalyticsInsights, BootstrapPayload, ClipFeedback, DoctorReport, JobPayload, JobStatus, ProcessErrorPayload, PruneResult, RuntimeBannerState, RuntimePayload, StorageReport } from './features/jobs/types'
 import { apiKeyStorageKey, estimateTotalJobTime, formatBytes, formatEta, formatLogTime, getBackoffDelay, getEtaWindow, jobPayloadChanged, loadSavedApiKey, loadSavedJobId, readJsonResponse, safeFetch, savePendingJobId } from './features/jobs/utils'
 
 const fallbackRenderProfile = 'studio'
@@ -52,6 +52,8 @@ function App() {
   const [knownRuntimeSessionId, setKnownRuntimeSessionId] = useState<string | null>(null)
   const [isReconnecting, setIsReconnecting] = useState(false)
   const [isCancelling, setIsCancelling] = useState(false)
+  const [isRetrying, setIsRetrying] = useState(false)
+  const [runtimeBanner, setRuntimeBanner] = useState<{ state: RuntimeBannerState; message: string } | null>(null)
   const pollErrorCountRef = useRef(0)
   const runtimeErrorCountRef = useRef(0)
   const jobIdRef = useRef<string | null>(null)
@@ -162,6 +164,18 @@ function App() {
         setRuntimeState(payload)
         setKnownRuntimeSessionId(payload.runtimeSessionId)
       }
+      setRuntimeBanner((previous) => {
+        if (previous?.state === 'restarted' && job.runtimeSessionId && job.runtimeSessionId !== payload.runtimeSessionId) {
+          return previous
+        }
+        if (payload.consistency.status === 'degraded' && payload.consistency.issues.length > 0) {
+          return {
+            state: 'degraded',
+            message: 'The backend is running, but it detected queue or lock inconsistencies. Review the runtime panel before trusting old state.',
+          }
+        }
+        return null
+      })
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return
       
@@ -169,6 +183,10 @@ function App() {
       // Only log after multiple failures to avoid console spam
       if (runtimeErrorCountRef.current === 3) {
         console.warn('Runtime polling experiencing issues:', error)
+        setRuntimeBanner({
+          state: 'offline',
+          message: 'The dashboard is losing contact with the backend. The page may look stale until the connection recovers.',
+        })
       }
     }
   })
@@ -223,6 +241,12 @@ function App() {
           errorHelp: 'Start the render again from this page. The backend queue state is now the source of truth.',
           runtimeSessionId: latestRuntimeSessionId ?? job.runtimeSessionId,
         })
+        if (runtimeChanged) {
+          setRuntimeBanner({
+            state: 'restarted',
+            message: 'The backend restarted while this job was active. The old live state was discarded and you should start the render again.',
+          })
+        }
         setJobId(null)
         return
       }
@@ -236,6 +260,14 @@ function App() {
       // Success - reset error state
       pollErrorCountRef.current = 0
       setIsReconnecting(false)
+      setRuntimeBanner((previous) => {
+        if (previous?.state === 'restarted') {
+          return previous
+        }
+        return runtimeState?.consistency.status === 'degraded'
+          ? previous
+          : null
+      })
       
       // Only update job state if meaningful fields changed to reduce flickering
       if (jobPayloadChanged(prevJobRef.current, payload)) {
@@ -254,6 +286,10 @@ function App() {
       if (pollErrorCountRef.current >= 15) {
         setIsReconnecting(false)
         const message = error instanceof Error ? error.message : 'Could not refresh the live job status.'
+        setRuntimeBanner({
+          state: 'offline',
+          message: 'The dashboard lost contact with the backend for too long. Treat the current job view as stale until the backend reconnects or is restarted.',
+        })
         setJob((previous) =>
           previous.status === 'completed'
             ? previous
@@ -444,6 +480,7 @@ function App() {
     prevJobRef.current = null
     setIsReconnecting(false)
     setIsCancelling(false)
+    setRuntimeBanner(null)
 
     setJobId(null)
     setJob({ status: 'idle' })
@@ -475,6 +512,7 @@ function App() {
     prevJobRef.current = null
     setIsReconnecting(false)
     setIsCancelling(false)
+    setRuntimeBanner(null)
 
     // Clear per-job UI state
     setClipFeedback({})
@@ -731,6 +769,114 @@ function App() {
       setIsCancelling(false)
     }
   }, [jobId, loadStorageReport])
+
+  const handleRetryJob = useCallback(async () => {
+    if (!jobId) return
+    setRequestError(null)
+    setIsRetrying(true)
+
+    try {
+      const response = await safeFetch(`/api/jobs/${jobId}/retry`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          apiKey,
+        }),
+        timeoutMs: 15000,
+      })
+
+      const payload = await readJsonResponse<ProcessErrorPayload>(response)
+      if (!response.ok || !payload.jobId) {
+        const details = payload.details ? ` ${payload.details}` : ''
+        throw new Error((payload.error ?? 'Could not retry the job.') + details)
+      }
+
+      pollErrorCountRef.current = 0
+      setCleanupConfirm(null)
+      setSourceMediaDeleted(false)
+      setCleanupActionError(null)
+      setLastPruneResult(null)
+      setRuntimeBanner(null)
+      setJobId(payload.jobId)
+      setJob({
+        status: payload.status ?? 'queued',
+        queuePosition: payload.queuePosition ?? 0,
+        renderProfile: payload.renderProfile ?? selectedRenderProfile,
+        jobFingerprint: payload.jobFingerprint,
+        queueState: payload.queueState,
+        waitingOnJobId: payload.waitingOnJobId,
+        runtimeSessionId: payload.runtimeSessionId,
+        retriedFromJobId: payload.retriedFromJobId,
+        retryMode: payload.retryMode,
+        message:
+          payload.queueState === 'waiting_for_identical_render'
+            ? `This retry is waiting for the identical live render${payload.waitingOnJobId ? ` (${payload.waitingOnJobId})` : ''} so the backend can safely reuse the finished output.`
+            : (payload.queuePosition ?? 0) > 0
+            ? `Retry queued in position ${payload.queuePosition}.`
+            : 'Retry started locally with the same render settings.',
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unexpected retry error'
+      setRequestError(message)
+    } finally {
+      setIsRetrying(false)
+    }
+  }, [apiKey, jobId, selectedRenderProfile])
+
+  const handleRetryAnalysisJob = useCallback(async () => {
+    if (!jobId) return
+    setRequestError(null)
+    setIsRetrying(true)
+
+    try {
+      const response = await safeFetch(`/api/jobs/${jobId}/retry-analysis`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          apiKey,
+        }),
+        timeoutMs: 15000,
+      })
+
+      const payload = await readJsonResponse<ProcessErrorPayload>(response)
+      if (!response.ok || !payload.jobId) {
+        const details = payload.details ? ` ${payload.details}` : ''
+        throw new Error((payload.error ?? 'Could not retry from analysis cache.') + details)
+      }
+
+      pollErrorCountRef.current = 0
+      setCleanupConfirm(null)
+      setSourceMediaDeleted(false)
+      setCleanupActionError(null)
+      setLastPruneResult(null)
+      setRuntimeBanner(null)
+      setJobId(payload.jobId)
+      setJob({
+        status: payload.status ?? 'queued',
+        queuePosition: payload.queuePosition ?? 0,
+        renderProfile: payload.renderProfile ?? selectedRenderProfile,
+        jobFingerprint: payload.jobFingerprint,
+        queueState: payload.queueState,
+        waitingOnJobId: payload.waitingOnJobId,
+        runtimeSessionId: payload.runtimeSessionId,
+        retriedFromJobId: payload.retriedFromJobId,
+        retryMode: payload.retryMode,
+        message:
+          payload.queueState === 'waiting_for_identical_render'
+            ? `This analysis retry is waiting for the identical live render${payload.waitingOnJobId ? ` (${payload.waitingOnJobId})` : ''} so the backend can safely reuse the finished output.`
+            : 'Analysis retry started. Cached source and transcript data will be reused when available.',
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unexpected analysis retry error'
+      setRequestError(message)
+    } finally {
+      setIsRetrying(false)
+    }
+  }, [apiKey, jobId, selectedRenderProfile])
 
   function clearSavedApiKey() {
     try {
@@ -1059,6 +1205,19 @@ function App() {
 
         {/* ─── Main column ────────────────────────────────────────── */}
         <main className="min-w-0 flex-1 space-y-4">
+          {runtimeBanner ? (
+            <div
+              className={`rounded-md border px-3 py-2 text-xs ${
+                runtimeBanner.state === 'restarted'
+                  ? 'border-destructive/30 bg-destructive/5 text-destructive'
+                  : runtimeBanner.state === 'offline'
+                    ? 'border-amber-300 bg-amber-50 text-amber-800'
+                    : 'border-amber-300 bg-amber-50 text-amber-800'
+              }`}
+            >
+              {runtimeBanner.message}
+            </div>
+          ) : null}
           {!hasStarted ? (
             /* ━━━━ IDLE / FORM STATE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
             <form className="space-y-3" onSubmit={handleSubmit}>
@@ -1282,6 +1441,28 @@ function App() {
                   <p className="font-medium">{job.error}</p>
                   {job.errorHelp ? <p>{job.errorHelp}</p> : null}
                   {job.errorId ? <p>Support ID: {job.errorId}</p> : null}
+                  {job.status === 'failed' ? (
+                    <div className="pt-2 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void handleRetryJob()}
+                        disabled={isRetrying}
+                        className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-foreground ring-1 ring-border hover:bg-white/60 disabled:opacity-50 transition-colors"
+                      >
+                        {isRetrying ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}
+                        {isRetrying ? 'Retrying…' : 'Retry Same Render'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleRetryAnalysisJob()}
+                        disabled={isRetrying}
+                        className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-foreground ring-1 ring-border hover:bg-white/60 disabled:opacity-50 transition-colors"
+                      >
+                        {isRetrying ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                        {isRetrying ? 'Retrying…' : 'Retry From Analysis Cache'}
+                      </button>
+                    </div>
+                  ) : null}
                 </section>
               ) : null}
 
