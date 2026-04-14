@@ -178,8 +178,9 @@ def _signal_handler(signum, frame):
     sys.exit(0)
 
 
-# Register signal handlers
-if threading.current_thread() is threading.main_thread():
+# Register signal handlers (skip during pytest to avoid SystemExit crashing the runner)
+_RUNNING_UNDER_TEST = "pytest" in sys.modules or "unittest" in sys.modules
+if threading.current_thread() is threading.main_thread() and not _RUNNING_UNDER_TEST:
     try:
         signal.signal(signal.SIGTERM, _signal_handler)
         signal.signal(signal.SIGINT, _signal_handler)
