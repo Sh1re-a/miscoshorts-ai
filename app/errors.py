@@ -26,11 +26,19 @@ def explain_exception(error: Exception) -> FriendlyError:
             summary="The Gemini API key was rejected.",
             hint="Check that the key is correct, active, and has access to the selected Gemini model.",
         )
-    if "quota" in lowered or "rate limit" in lowered or "429" in lowered:
+    if (
+        "quota" in lowered
+        or "rate limit" in lowered
+        or "429" in lowered
+        or "high demand" in lowered
+        or "resource exhausted" in lowered
+        or "temporarily unavailable" in lowered
+        or "try again later" in lowered
+    ):
         return FriendlyError(
             category="api_quota",
-            summary="Gemini is temporarily unavailable for this request.",
-            hint="Wait a moment and try again, or check whether the Gemini project has remaining quota.",
+            summary="Gemini is temporarily unavailable or overloaded for this request.",
+            hint="Wait a moment and retry. If this keeps happening, try again later or switch to a Gemini model with more available capacity.",
         )
     if "ffmpeg" in lowered and ("not installed" in lowered or "not available" in lowered):
         return FriendlyError(

@@ -154,5 +154,32 @@ class EnsureToolsTests(unittest.TestCase):
                 ensure_tools()
 
 
+class AppLauncherSafetyTests(unittest.TestCase):
+    def test_stop_listener_on_port_refuses_unverified_process(self) -> None:
+        from app import app_launcher
+
+        with patch("app.app_launcher.find_listener_pid", return_value=4242), \
+             patch("app.app_launcher.os.getpid", return_value=1), \
+             patch("app.app_launcher._pid_matches_miscoshorts_server", return_value=False), \
+             patch("app.app_launcher.os.kill") as mock_kill:
+            stopped = app_launcher.stop_listener_on_port(5001)
+
+        self.assertFalse(stopped)
+        mock_kill.assert_not_called()
+
+    def test_stop_listener_on_port_kills_verified_process(self) -> None:
+        from app import app_launcher
+
+        with patch("app.app_launcher.find_listener_pid", side_effect=[4242, None]), \
+             patch("app.app_launcher.os.getpid", return_value=1), \
+             patch("app.app_launcher._pid_matches_miscoshorts_server", return_value=True), \
+             patch("app.app_launcher.os.kill") as mock_kill, \
+             patch("app.app_launcher.time.sleep"):
+            stopped = app_launcher.stop_listener_on_port(5001)
+
+        self.assertTrue(stopped)
+        mock_kill.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

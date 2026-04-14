@@ -22,6 +22,9 @@ from app.transcription import (
     load_whisper_model,
 )
 
+DOCTOR_DISK_FAIL_BYTES = max(1 * 1024 * 1024 * 1024, int(os.getenv("DOCTOR_DISK_FAIL_BYTES", str(3 * 1024 * 1024 * 1024))))
+DOCTOR_DISK_WARN_BYTES = max(DOCTOR_DISK_FAIL_BYTES, int(os.getenv("DOCTOR_DISK_WARN_BYTES", str(8 * 1024 * 1024 * 1024))))
+
 
 @dataclass
 class DoctorCheck:
@@ -72,6 +75,13 @@ def _add_check(
             blocks_rendering=blocks_rendering,
         )
     )
+
+
+def _free_disk_bytes(path: Path) -> int | None:
+    try:
+        return int(shutil.disk_usage(path).free)
+    except OSError:
+        return None
 
 
 def _module_exists(module_name: str) -> bool:
@@ -206,6 +216,43 @@ def run_doctor(*, prepare_whisper: bool = False, render_smoke: bool = False) -> 
             _add_check(checks, "PASS", label, f"{path} is writable.")
         else:
             _add_check(checks, "FAIL", label, f"{path} is not writable.", _writable_fix_message(path))
+
+    free_outputs_bytes = _free_disk_bytes(OUTPUTS_DIR)
+    if free_outputs_bytes is None:
+        _add_check(
+            checks,
+            "WARN",
+            "Free disk space",
+            f"Could not determine free disk space for {OUTPUTS_DIR}.",
+            "Check available space manually before starting a long render.",
+            requirement="optional",
+            blocks_rendering=False,
+        )
+    elif free_outputs_bytes < DOCTOR_DISK_FAIL_BYTES:
+        _add_check(
+            checks,
+            "FAIL",
+            "Free disk space",
+            f"Only {_format_bytes(free_outputs_bytes)} is free where outputs are stored.",
+            f"Free at least {_format_bytes(DOCTOR_DISK_FAIL_BYTES)} before rendering, or move outputs to a larger disk.",
+        )
+    elif free_outputs_bytes < DOCTOR_DISK_WARN_BYTES:
+        _add_check(
+            checks,
+            "WARN",
+            "Free disk space",
+            f"Only {_format_bytes(free_outputs_bytes)} is free where outputs are stored. Large renders may fail.",
+            f"Free more space before long renders. {_format_bytes(DOCTOR_DISK_WARN_BYTES)} or more is safer.",
+            requirement="optional",
+            blocks_rendering=False,
+        )
+    else:
+        _add_check(
+            checks,
+            "PASS",
+            "Free disk space",
+            f"{_format_bytes(free_outputs_bytes)} is free where outputs are stored.",
+        )
 
     # Windows long-path warning — the classic 260-char limit can surface when
     # the project is nested deeply (e.g. inside OneDrive or deeply nested dev

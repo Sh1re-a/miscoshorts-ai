@@ -139,23 +139,29 @@ class WindowsOrphanProcessKillTests(unittest.TestCase):
                 "pid": 99999,
                 "createdAt": time.time() - 30,
                 "ownerToken": "tok",
+                "projectRoot": r"C:\miscoshorts-ai",
             }))
 
             with patch("app.runtime_recovery.OUTPUT_LOCKS_DIR", locks_dir), \
                  patch("app.runtime_recovery.os.name", "nt"), \
                  patch("app.runtime_recovery.os.getpid", return_value=1), \
                  patch("app.runtime_recovery.subprocess.run") as mock_run:
-                mock_run.return_value = MagicMock(returncode=0)
+                mock_run.side_effect = [
+                    MagicMock(returncode=0, stdout=r'python -m app.render_worker C:\miscoshorts-ai\outputs\temp\params.json'),
+                    MagicMock(returncode=0, stdout=""),
+                ]
 
                 from app.runtime_recovery import _kill_orphaned_lock_owners
                 killed = _kill_orphaned_lock_owners()
 
-            # Verify taskkill was called with /T /F flags
-            if mock_run.called:
-                args = mock_run.call_args[0][0]
-                self.assertEqual(args[0], "taskkill")
-                self.assertIn("/T", args)
-                self.assertIn("/F", args)
+            self.assertEqual(killed, [99999])
+            self.assertGreaterEqual(mock_run.call_count, 2)
+            verify_args = mock_run.call_args_list[0][0][0]
+            kill_args = mock_run.call_args_list[1][0][0]
+            self.assertEqual(verify_args[0], "powershell")
+            self.assertEqual(kill_args[0], "taskkill")
+            self.assertIn("/T", kill_args)
+            self.assertIn("/F", kill_args)
 
 
 class WindowsAtomicWriteTests(unittest.TestCase):

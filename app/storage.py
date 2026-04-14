@@ -86,13 +86,53 @@ def _remove_path(path: Path, dry_run: bool) -> int:
     return removed_bytes
 
 
-def _prune_children(root: Path, *, max_age_seconds: float, dry_run: bool, last_used_reader=None) -> dict[str, int]:
+def _resolved_protected_paths(paths: set[str] | None) -> set[Path]:
+    resolved: set[Path] = set()
+    for raw_path in paths or set():
+        try:
+            resolved.add(Path(raw_path).resolve())
+        except Exception:
+            continue
+    return resolved
+
+
+def _path_is_protected(path: Path, protected_paths: set[Path]) -> bool:
+    if not protected_paths:
+        return False
+
+    try:
+        resolved = path.resolve()
+    except Exception:
+        resolved = path
+
+    for protected in protected_paths:
+        if resolved == protected:
+            return True
+        try:
+            resolved.relative_to(protected)
+            return True
+        except ValueError:
+            pass
+    return False
+
+
+def _prune_children(
+    root: Path,
+    *,
+    max_age_seconds: float,
+    dry_run: bool,
+    last_used_reader=None,
+    protected_paths: set[str] | None = None,
+) -> dict[str, int]:
     removed_items = 0
     removed_bytes = 0
     if not root.exists():
         return {"removedItems": 0, "removedBytes": 0}
+    resolved_protected = _resolved_protected_paths(protected_paths)
 
     for child in root.iterdir():
+        if _path_is_protected(child, resolved_protected):
+            continue
         last_used_at = last_used_reader(child) if last_used_reader else None
         age_seconds = max(0.0, time.time() - last_used_at) if last_used_at else _age_seconds(child)
         if age_seconds < max_age_seconds:
@@ -103,12 +143,22 @@ def _prune_children(root: Path, *, max_age_seconds: float, dry_run: bool, last_u
     return {"removedItems": removed_items, "removedBytes": removed_bytes}
 
 
-def prune_runtime_storage(*, dry_run: bool = False, prune_temp: bool = True, prune_cache: bool = True, prune_jobs: bool = True) -> dict:
+def prune_runtime_storage(
+    *,
+    dry_run: bool = False,
+    prune_temp: bool = True,
+    prune_cache: bool = True,
+    prune_jobs: bool = True,
+    protected_temp_paths: set[str] | None = None,
+    protected_cache_paths: set[str] | None = None,
+    protected_job_paths: set[str] | None = None,
+) -> dict:
     temp_stats = (
         _prune_children(
             OUTPUT_TEMP_DIR,
             max_age_seconds=TEMP_RETENTION_HOURS * 3600,
             dry_run=dry_run,
+            protected_paths=protected_temp_paths,
         )
         if prune_temp
         else {"removedItems": 0, "removedBytes": 0}
@@ -118,6 +168,7 @@ def prune_runtime_storage(*, dry_run: bool = False, prune_temp: bool = True, pru
             OUTPUT_CACHE_DIR,
             max_age_seconds=CACHE_RETENTION_DAYS * 86400,
             dry_run=dry_run,
+            protected_paths=protected_cache_paths,
         )
         if prune_cache
         else {"removedItems": 0, "removedBytes": 0}
@@ -128,6 +179,7 @@ def prune_runtime_storage(*, dry_run: bool = False, prune_temp: bool = True, pru
             max_age_seconds=JOB_OUTPUT_RETENTION_DAYS * 86400,
             dry_run=dry_run,
             last_used_reader=_result_last_used,
+            protected_paths=protected_job_paths,
         )
         if prune_jobs
         else {"removedItems": 0, "removedBytes": 0}

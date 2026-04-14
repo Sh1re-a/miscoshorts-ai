@@ -13,13 +13,13 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 from app.paths import OUTPUT_JOBS_DIR, OUTPUT_LOCKS_DIR, OUTPUT_TEMP_DIR
-from app.runtime import configure_logging
+from app.runtime import configure_logging, pipeline_compat_signature
 from app.storage import atomic_write_json
 
 logger, _LOG_PATH = configure_logging("render-session")
 
 ProgressCallback = Callable[[str, str], None]
-PIPELINE_FINGERPRINT_VERSION = "v3"
+PIPELINE_FINGERPRINT_VERSION = "v4"
 LOCK_WAIT_TIMEOUT_SECONDS = max(60, int(os.getenv("FINGERPRINT_LOCK_WAIT_TIMEOUT_SECONDS", "1800")))
 LOCK_STALE_SECONDS = max(300, int(os.getenv("FINGERPRINT_LOCK_STALE_SECONDS", "900")))
 
@@ -39,6 +39,7 @@ def job_fingerprint(
 ) -> str:
     payload = {
         "version": PIPELINE_FINGERPRINT_VERSION,
+        "pipelineCompat": pipeline_compat_signature(),
         "videoUrl": video_url,
         "outputFilename": output_filename,
         "clipCount": clip_count,
@@ -332,6 +333,7 @@ def acquire_fingerprint_lock(
                             "pid": os.getpid(),
                             "createdAt": time.time(),
                             "ownerToken": owner_token,
+                            "projectRoot": str(Path.cwd()),
                         }
                     ).encode("utf-8"),
                 )

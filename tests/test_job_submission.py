@@ -204,6 +204,72 @@ class SubmissionSuccessTests(_SubmissionTestBase):
             mock_thread.start.assert_called_once()
 
 
+class RetryJobTests(_SubmissionTestBase):
+    @patch("app.server.run_doctor")
+    def test_retry_failed_job_returns_new_job_id(self, mock_doctor) -> None:
+        mock_doctor.return_value = {"status": "PASS", "blockingChecks": [], "checks": []}
+        with server.jobs_lock:
+            server.jobs["failed-job"] = {
+                "status": "failed",
+                "videoUrl": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                "outputFilename": "retry.mp4",
+                "clipCount": 2,
+                "renderProfile": "studio",
+                "subtitleStyle": {"fontPreset": "soft", "colorPreset": "editorial"},
+                "createdAt": time.time(),
+                "updatedAt": time.time(),
+            }
+        with patch("app.server.threading") as mock_threading:
+            mock_threading.Thread.return_value = MagicMock()
+            res = self.client.post("/api/jobs/failed-job/retry", json={"apiKey": "test-key-1234"})
+
+        self.assertEqual(res.status_code, 202)
+        data = res.get_json()
+        self.assertIn("jobId", data)
+        self.assertNotEqual(data["jobId"], "failed-job")
+        self.assertEqual(data["retriedFromJobId"], "failed-job")
+
+    def test_retry_non_failed_job_returns_400(self) -> None:
+        with server.jobs_lock:
+            server.jobs["queued-job"] = {
+                "status": "queued",
+                "videoUrl": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                "createdAt": time.time(),
+                "updatedAt": time.time(),
+            }
+
+        res = self.client.post("/api/jobs/queued-job/retry", json={"apiKey": "test-key-1234"})
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("Only failed jobs", res.get_json()["error"])
+
+    def test_retry_missing_job_returns_404(self) -> None:
+        res = self.client.post("/api/jobs/missing-job/retry", json={"apiKey": "test-key-1234"})
+        self.assertEqual(res.status_code, 404)
+
+    @patch("app.server.run_doctor")
+    def test_retry_analysis_failed_job_sets_retry_mode(self, mock_doctor) -> None:
+        mock_doctor.return_value = {"status": "PASS", "blockingChecks": [], "checks": []}
+        with server.jobs_lock:
+            server.jobs["failed-analysis-job"] = {
+                "status": "failed",
+                "videoUrl": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                "outputFilename": "retry-analysis.mp4",
+                "clipCount": 1,
+                "renderProfile": "balanced",
+                "subtitleStyle": {"fontPreset": "soft", "colorPreset": "editorial"},
+                "createdAt": time.time(),
+                "updatedAt": time.time(),
+            }
+        with patch("app.server.threading") as mock_threading:
+            mock_threading.Thread.return_value = MagicMock()
+            res = self.client.post("/api/jobs/failed-analysis-job/retry-analysis", json={"apiKey": "test-key-1234"})
+
+        self.assertEqual(res.status_code, 202)
+        data = res.get_json()
+        self.assertEqual(data["retriedFromJobId"], "failed-analysis-job")
+        self.assertEqual(data["retryMode"], "analysis")
+
+
 class GetJobEndpointTests(_SubmissionTestBase):
     """GET /api/jobs/<id> response shape tests."""
 

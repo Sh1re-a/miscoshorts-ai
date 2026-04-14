@@ -7,7 +7,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from app.paths import OUTPUTS_DIR, OUTPUT_LOCKS_DIR, OUTPUT_TEMP_DIR
+from app.paths import OUTPUTS_DIR, OUTPUT_LOCKS_DIR, OUTPUT_TEMP_DIR, PROJECT_ROOT
 from app.render_session import force_remove_all_locks
 from app.runtime import configure_logging
 from app.storage import atomic_write_json
@@ -16,6 +16,7 @@ logger, _LOG_PATH = configure_logging("runtime-recovery")
 
 JOB_STATE_DIR = OUTPUTS_DIR / "_job_state"
 RECOVERABLE_JOB_STATUSES = {"queued", "validating", "downloading", "transcribing", "analyzing", "rendering"}
+STARTUP_TEMP_STALE_SECONDS = max(3600, int(os.getenv("STARTUP_TEMP_STALE_SECONDS", str(12 * 3600))))
 
 
 def recover_interrupted_job_states() -> dict[str, object]:
@@ -68,14 +69,79 @@ def recover_interrupted_job_states() -> dict[str, object]:
     return {"recoveredAt": recovered_at, "recoveredJobIds": recovered_job_ids}
 
 
-def cleanup_temp_workspaces() -> dict[str, object]:
+def _extract_temp_workspace_job_id(path: Path) -> str | None:
+    if not path.is_dir():
+        return None
+
+    params_path = path / "params.json"
+    if params_path.exists():
+        try:
+            payload = json.loads(params_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict):
+            job_id = payload.get("jobId")
+            if isinstance(job_id, str) and job_id.strip():
+                return job_id.strip()
+
+    stem = path.name
+    if stem.startswith("render-"):
+        return None
+
+    parts = stem.split("-")
+    if len(parts) >= 3:
+        return parts[1]
+    return None
+
+
+def _should_remove_temp_workspace(
+    path: Path,
+    *,
+    recovered_job_ids: set[str],
+    cleared_lock_fingerprints: set[str],
+) -> bool:
+    try:
+        age_seconds = max(0.0, time.time() - path.stat().st_mtime)
+    except OSError:
+        age_seconds = 0.0
+
+    if age_seconds >= STARTUP_TEMP_STALE_SECONDS:
+        return True
+
+    if not path.is_dir():
+        return age_seconds >= STARTUP_TEMP_STALE_SECONDS
+
+    workspace_job_id = _extract_temp_workspace_job_id(path)
+    if workspace_job_id and workspace_job_id in recovered_job_ids:
+        return True
+
+    workspace_name = path.name
+    if any(workspace_name.startswith(f"{fingerprint}-") for fingerprint in cleared_lock_fingerprints):
+        return True
+
+    return False
+
+
+def cleanup_temp_workspaces(
+    *,
+    recovered_job_ids: set[str] | None = None,
+    cleared_lock_fingerprints: set[str] | None = None,
+) -> dict[str, object]:
     cleared_paths: list[str] = []
+    recovered_job_ids = recovered_job_ids or set()
+    cleared_lock_fingerprints = cleared_lock_fingerprints or set()
 
     if not OUTPUT_TEMP_DIR.exists():
         return {"clearedTempWorkspacePaths": cleared_paths}
 
     for child in sorted(OUTPUT_TEMP_DIR.iterdir()):
         if not child.exists():
+            continue
+        if not _should_remove_temp_workspace(
+            child,
+            recovered_job_ids=recovered_job_ids,
+            cleared_lock_fingerprints=cleared_lock_fingerprints,
+        ):
             continue
         if child.is_dir():
             shutil.rmtree(child, ignore_errors=True)
@@ -87,6 +153,48 @@ def cleanup_temp_workspaces() -> dict[str, object]:
         logger.warning("Removed %s stale temp workspace item(s) during startup recovery.", len(cleared_paths))
 
     return {"clearedTempWorkspacePaths": cleared_paths}
+
+
+def _pid_matches_miscoshorts_worker(pid: int, expected_project_root: str | None) -> bool:
+    expected_root = (expected_project_root or str(PROJECT_ROOT)).strip()
+    if not expected_root:
+        return False
+
+    try:
+        if os.name == "nt":
+            completed = subprocess.run(
+                [
+                    "powershell",
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-Command",
+                    f"(Get-CimInstance Win32_Process -Filter \"ProcessId = {pid}\").CommandLine",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+            )
+            command_line = completed.stdout.strip()
+        else:
+            completed = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+            )
+            command_line = completed.stdout.strip()
+    except Exception:
+        return False
+
+    if not command_line:
+        return False
+
+    lowered = command_line.lower()
+    return "app.render_worker" in lowered and expected_root.lower() in lowered
 
 
 def _kill_orphaned_lock_owners() -> list[int]:
@@ -102,6 +210,14 @@ def _kill_orphaned_lock_owners() -> list[int]:
             continue
         pid = payload.get("pid") if isinstance(payload, dict) else None
         if not isinstance(pid, int) or pid <= 0 or pid == os.getpid():
+            continue
+        expected_project_root = payload.get("projectRoot") if isinstance(payload, dict) else None
+        if not _pid_matches_miscoshorts_worker(pid, str(expected_project_root or "")):
+            logger.warning(
+                "Skipping orphan kill for pid=%s from lock %s because the process could not be verified as a Miscoshorts render worker.",
+                pid,
+                lock_path.name,
+            )
             continue
         try:
             if os.name == "nt":
@@ -132,7 +248,14 @@ def recover_runtime_state() -> dict[str, object]:
     killed_pids = _kill_orphaned_lock_owners()
     lock_report = force_remove_all_locks()
     jobs_report = recover_interrupted_job_states()
-    temp_report = cleanup_temp_workspaces()
+    temp_report = cleanup_temp_workspaces(
+        recovered_job_ids=set(jobs_report["recoveredJobIds"]),
+        cleared_lock_fingerprints={
+            str(lock.get("fingerprint"))
+            for lock in lock_report["removedLocks"]
+            if lock.get("fingerprint")
+        },
+    )
     summary = {
         "recoveredAt": jobs_report["recoveredAt"],
         "recoveredJobIds": jobs_report["recoveredJobIds"],

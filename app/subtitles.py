@@ -1180,7 +1180,7 @@ def _render_vertical_gradient_image_cached(width, height, height_ratio, anchor, 
         opacity = int(round(max_alpha * (1.0 - progress if anchor == 'top' else progress)))
         gradient[row, :, 3] = opacity
 
-    return Image.fromarray(gradient, mode='RGBA')
+    return Image.fromarray(gradient)
 
 
 def _render_vertical_gradient_image(width, height, *, height_ratio, anchor, max_alpha):

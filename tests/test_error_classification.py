@@ -29,6 +29,10 @@ class ExplainExceptionTests(unittest.TestCase):
         err = explain_exception(Exception("Resource has been exhausted (429 rate limit)"))
         self.assertEqual(err.category, "api_quota")
 
+    def test_gemini_high_demand_maps_to_api_quota(self) -> None:
+        err = explain_exception(Exception("Gemini request failed: This model is currently experiencing high demand. Please try again later."))
+        self.assertEqual(err.category, "api_quota")
+
     # ── Dependencies ─────────────────────────────────────────────────
 
     def test_ffmpeg_missing(self) -> None:
