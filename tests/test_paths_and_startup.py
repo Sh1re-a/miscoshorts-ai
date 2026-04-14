@@ -88,9 +88,8 @@ class WindowsPathSimulationTests(unittest.TestCase):
     def test_windows_logs_at_project_root(self) -> None:
         import app.paths
         importlib.reload(app.paths)
-        logs_parent = str(app.paths.LOGS_DIR.parent)
-        project_root_str = str(app.paths.PROJECT_ROOT)
-        self.assertEqual(logs_parent, project_root_str)
+        expected_logs_dir = Path(os.environ["MISCOSHORTS_LOGS_DIR"])
+        self.assertEqual(app.paths.LOGS_DIR, expected_logs_dir)
         importlib.reload(app.paths)
 
 
@@ -174,11 +173,21 @@ class AppLauncherSafetyTests(unittest.TestCase):
              patch("app.app_launcher.os.getpid", return_value=1), \
              patch("app.app_launcher._pid_matches_miscoshorts_server", return_value=True), \
              patch("app.app_launcher.os.kill") as mock_kill, \
+             patch("app.app_launcher.subprocess.run") as mock_run, \
              patch("app.app_launcher.time.sleep"):
             stopped = app_launcher.stop_listener_on_port(5001)
 
         self.assertTrue(stopped)
-        mock_kill.assert_called_once()
+        if app_launcher.os.name == "nt":
+            mock_run.assert_called_once_with(
+                ["taskkill", "/PID", "4242", "/T", "/F"],
+                check=False,
+                capture_output=True,
+            )
+            mock_kill.assert_not_called()
+        else:
+            mock_kill.assert_called_once()
+            mock_run.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -103,7 +103,7 @@ class StorageCleanupTests(unittest.TestCase):
             )
 
         kwargs = mock_prune.call_args.kwargs
-        self.assertIn(protected_cache, kwargs["protected_cache_paths"])
+        self.assertIn(str(Path(protected_cache)), kwargs["protected_cache_paths"])
         self.assertIn(str(OUTPUT_JOBS_DIR / "fp-active"), kwargs["protected_job_paths"])
         self.assertIn("protectedPaths", report)
 
