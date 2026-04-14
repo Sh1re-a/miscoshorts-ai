@@ -62,7 +62,10 @@ dir_has_files() {
 fail() {
 	echo ""
 	echo "${RED}Setup failed: $1${RESET}"
-	echo "${DIM}Log file: $LOG_PATH${RESET}"
+	echo ""
+	echo "${DIM}If you cannot fix this yourself, send these two files for support:${RESET}"
+	echo "${DIM}  $LOG_PATH${RESET}"
+	echo "${DIM}  $DOCTOR_REPORT_PATH${RESET}"
 	echo ""
 	read "?Press Enter to close this window"
 	exit 1
@@ -120,8 +123,11 @@ mkdir -p "$MODEL_CACHE_DIR"
 echo ""
 echo "${CYAN}Miscoshorts AI${RESET}"
 echo "${DIM}Local setup and launch${RESET}"
+echo ""
+echo "  This terminal window is part of the app. Keep it open while the app is running."
+echo "  Your browser will open automatically when setup is done."
+echo "  First-time setup may take 15–30 minutes (downloads the speech model ~1.5 GB)."
 info "Private runtime files live in $INTERNAL_DIR and are ignored by Git/GitHub."
-info "Speech model cache lives in $MODEL_CACHE_DIR."
 info "If something fails, send the files in $SETUP_DIR for support."
 
 # ─── Step 1: Check & install tools ───

@@ -402,6 +402,49 @@ On the first run it sets everything up. On later runs it reuses the existing set
 
 That makes it the best file to send to a non-technical Windows user together with the full project folder.
 
+## macOS First-Run Checklist
+
+For a non-technical Mac tester, the safest path is:
+
+1. Download the full GitHub ZIP (green **Code** button → **Download ZIP**).
+2. Extract it fully — double-click the ZIP to unzip it.
+3. Move the extracted folder to a normal writable location such as Desktop or Documents.
+4. Open the extracted folder so you can see `launch_app.command` inside it.
+5. **Right-click** `launch_app.command` and choose **Open** from the menu.
+6. A security dialog will appear saying the file is from an unidentified developer. Click **Open** again to confirm.
+7. A terminal window opens and setup begins. Leave it open.
+8. Wait for setup to finish and the browser to open automatically.
+
+The right-click → Open step is necessary on the first run only. After that, double-clicking works fine.
+
+Why right-click instead of double-click the first time: macOS quarantines files downloaded from the internet and blocks them from running directly. Right-click → Open bypasses that prompt.
+
+What the Mac launcher installs automatically if missing (requires an internet connection on first run):
+
+- **Python 3.12** via Homebrew if no Python 3.10+ is found
+- **FFmpeg** via Homebrew if it is missing
+- **Node.js** via Homebrew if `frontend/dist` is missing and the UI must be built locally
+- **Python packages** into a private `.miscoshorts/runtime/venv` on first run
+- **Whisper speech model** (~1.5 GB for distil-large-v3) into `.miscoshorts/runtime/model-cache/` if not already cached
+
+What should not happen on every run:
+
+- the Python environment should not reinstall every time
+- the frontend should not rebuild every time unless its sources changed
+- the Whisper model should not redownload unless the private cache was deleted
+
+First-run timing guide:
+
+- If Python, FFmpeg, and Node.js are already installed: usually **10–20 minutes** (mostly the Whisper model download ~1.5 GB)
+- If nothing is installed yet: **20–40 minutes** depending on your internet speed
+
+After setup finishes, a browser tab opens automatically. Paste a YouTube URL, add your Gemini API key, and click Render.
+
+If anything goes wrong on macOS, the two most useful files are:
+
+- `.miscoshorts/setup/macos-setup.log`
+- `.miscoshorts/setup/doctor-report.json`
+
 ## Windows First-Run Checklist
 
 For a confused Windows tester, the safest path is:
