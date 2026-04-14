@@ -49,7 +49,17 @@ def wait_for_url(url: str, timeout: float, process: subprocess.Popen[str], name:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if process.poll() is not None:
-            raise RuntimeError(f"{name} stopped unexpectedly with exit code {process.returncode}.")
+            stderr_tail = ""
+            if process.stderr is not None:
+                try:
+                    stderr_tail = process.stderr.read()
+                    if isinstance(stderr_tail, bytes):
+                        stderr_tail = stderr_tail.decode("utf-8", errors="replace")
+                    stderr_tail = stderr_tail.strip()[-500:] if stderr_tail else ""
+                except Exception:
+                    pass
+            detail = f"\n  Last error output:\n  {stderr_tail}" if stderr_tail else ""
+            raise RuntimeError(f"{name} stopped unexpectedly with exit code {process.returncode}.{detail}")
 
         try:
             with urllib.request.urlopen(url, timeout=2):

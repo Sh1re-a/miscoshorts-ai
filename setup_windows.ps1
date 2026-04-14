@@ -803,7 +803,13 @@ function Assert-RenderReadyFromDoctorReport {
         return
     }
 
-    $report = Get-Content -Path $doctorReportPath -Raw | ConvertFrom-Json
+    try {
+        $report = Get-Content -Path $doctorReportPath -Raw | ConvertFrom-Json
+    }
+    catch {
+        Write-SetupInfo "Doctor report could not be read (corrupted?). Continuing with launch."
+        return
+    }
     $blockingChecks = @($report.blockingChecks)
     $warningChecks = @($report.warningChecks)
 

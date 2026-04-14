@@ -28,7 +28,17 @@ def wait_for_url(url: str, timeout: float, process: subprocess.Popen[str] | None
     deadline = time.time() + timeout
     while time.time() < deadline:
         if process is not None and process.poll() is not None:
-            raise RuntimeError(f"{name} stopped unexpectedly with exit code {process.returncode}.")
+            stderr_tail = ""
+            if process.stderr is not None:
+                try:
+                    stderr_tail = process.stderr.read()
+                    if isinstance(stderr_tail, bytes):
+                        stderr_tail = stderr_tail.decode("utf-8", errors="replace")
+                    stderr_tail = stderr_tail.strip()[-500:] if stderr_tail else ""
+                except Exception:
+                    pass
+            detail = f"\n  Last error output:\n  {stderr_tail}" if stderr_tail else ""
+            raise RuntimeError(f"{name} stopped unexpectedly with exit code {process.returncode}.{detail}")
 
         try:
             with urllib.request.urlopen(url, timeout=2):
@@ -135,9 +145,17 @@ def stop_listener_on_port(port: int) -> bool:
             subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False, capture_output=True)
         else:
             os.kill(pid, signal.SIGTERM)
-        return True
     except Exception:
         return False
+
+    # Wait for the port to actually be released (up to 5 seconds).
+    for _ in range(20):
+        time.sleep(0.25)
+        if find_listener_pid(port) is None:
+            return True
+
+    logger.warning("Port %s still occupied after killing PID %s", port, pid)
+    return True
 
 
 def stop_process(process: subprocess.Popen[str] | None) -> None:
@@ -176,7 +194,6 @@ def main() -> None:
                 expected_signature,
             )
             stop_listener_on_port(5001)
-            time.sleep(1)
             popen_kw: dict = {}
             if os.name == "nt":
                 popen_kw["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP

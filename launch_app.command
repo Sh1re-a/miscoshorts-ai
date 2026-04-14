@@ -142,8 +142,12 @@ if [[ -z "$PYTHON_CMD" ]]; then
 	if command -v brew &>/dev/null; then
 		action "Installing Python via Homebrew..."
 		brew install python@3.12 >> "$LOG_PATH" 2>&1 || fail "Homebrew Python install failed."
-		rehash
-		PYTHON_CMD="python3"
+		hash -r 2>/dev/null || true
+		if command -v python3 &>/dev/null; then
+			PYTHON_CMD="python3"
+		else
+			fail "Python was installed by Homebrew but is not yet available in your shell. Close this terminal, open a new one, and run the launcher again."
+		fi
 	else
 		fail "Python 3.10+ not found and Homebrew is not installed. Install Python from https://www.python.org/downloads/ or install Homebrew first: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
 	fi
@@ -157,7 +161,10 @@ else
 	if command -v brew &>/dev/null; then
 		action "Installing FFmpeg via Homebrew..."
 		brew install ffmpeg >> "$LOG_PATH" 2>&1 || fail "Homebrew FFmpeg install failed."
-		rehash
+		hash -r 2>/dev/null || true
+		if ! command -v ffmpeg &>/dev/null; then
+			fail "FFmpeg was installed by Homebrew but is not yet available in your shell. Close this terminal, open a new one, and run the launcher again."
+		fi
 		done_msg "FFmpeg installed"
 	else
 		fail "FFmpeg not found. Install it with: brew install ffmpeg"
