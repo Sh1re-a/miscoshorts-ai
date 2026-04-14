@@ -33,16 +33,18 @@ class PathResolutionTests(unittest.TestCase):
         self.assertTrue(FRONTEND_DIR.is_dir())
 
     def test_env_override_outputs_dir(self) -> None:
-        with patch.dict(os.environ, {"MISCOSHORTS_OUTPUTS_DIR": "/tmp/test_outputs"}):
+        test_path = os.path.join("tmp", "test_outputs")
+        with patch.dict(os.environ, {"MISCOSHORTS_OUTPUTS_DIR": test_path}):
             paths = self._reload_paths()
-            self.assertEqual(str(paths.OUTPUTS_DIR), "/tmp/test_outputs")
+            self.assertEqual(str(paths.OUTPUTS_DIR), str(Path(test_path)))
         # Reload to restore defaults
         self._reload_paths()
 
     def test_env_override_internal_dir(self) -> None:
-        with patch.dict(os.environ, {"MISCOSHORTS_INTERNAL_DIR": "/tmp/test_internal"}):
+        test_path = os.path.join("tmp", "test_internal")
+        with patch.dict(os.environ, {"MISCOSHORTS_INTERNAL_DIR": test_path}):
             paths = self._reload_paths()
-            self.assertEqual(str(paths.INTERNAL_DIR), "/tmp/test_internal")
+            self.assertEqual(str(paths.INTERNAL_DIR), str(Path(test_path)))
         self._reload_paths()
 
     def test_tilde_expansion_in_env(self) -> None:
@@ -72,7 +74,11 @@ class WindowsPathSimulationTests(unittest.TestCase):
     """
 
     def test_windows_default_uses_localappdata(self) -> None:
-        with patch.dict(os.environ, {"LOCALAPPDATA": "C:\\Users\\Test\\AppData\\Local"}, clear=False):
+        env_overrides = {
+            "LOCALAPPDATA": "C:\\Users\\Test\\AppData\\Local",
+            "MISCOSHORTS_INTERNAL_DIR": "",  # clear CI override so default kicks in
+        }
+        with patch.dict(os.environ, env_overrides, clear=False):
             import app.paths
             importlib.reload(app.paths)
             internal_str = str(app.paths.INTERNAL_DIR)

@@ -101,22 +101,23 @@ class CheckWritableTests(unittest.TestCase):
             self.assertTrue(_check_writable(Path(tmpdir) / "subdir"))
 
     def test_non_writable_path(self) -> None:
-        self.assertFalse(_check_writable(Path("/proc/nonexistent/test")))
+        # Mock mkdir to simulate a permission error — avoids platform differences
+        # (/proc doesn't exist on Windows; CI runners may have admin rights)
+        with patch.object(Path, "mkdir", side_effect=PermissionError("mock")):
+            self.assertFalse(_check_writable(Path("unwritable_test_dir")))
 
 
 class WritableFixMessageTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform.startswith("win"), "WindowsPath only on Windows")
     def test_windows_message_includes_desktop(self) -> None:
-        with patch("os.name", "nt"):
-            msg = _writable_fix_message(Path("C:\\test"))
-            self.assertIn("Desktop", msg)
-            self.assertIn("miscoshorts-ai", msg)
-
-    @unittest.skipUnless(sys.platform.startswith("win"), "WindowsPath only on Windows")
-    def test_windows_message_logic(self) -> None:
-        """Verify the Windows branch is entered and includes expected keywords."""
         msg = _writable_fix_message(Path("C:\\test"))
+        self.assertIn("Desktop", msg)
         self.assertIn("miscoshorts-ai", msg)
+
+    @unittest.skipUnless(sys.platform.startswith("win"), "Windows-only")
+    def test_windows_message_mentions_network_drives(self) -> None:
+        msg = _writable_fix_message(Path("C:\\test"))
+        self.assertIn("network", msg.lower())
 
     def test_non_windows_message(self) -> None:
         with patch("os.name", "posix"):
