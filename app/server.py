@@ -315,6 +315,9 @@ def _cleanup_expired_jobs() -> int:
 
     with jobs_lock:
         for job_id, job in list(jobs.items()):
+            status = job.get("status", "")
+            if status in ACTIVE_JOB_STATUSES or status == "queued":
+                continue
             updated_at = float(job.get("updatedAt") or job.get("createdAt") or 0)
             if updated_at and updated_at < cutoff:
                 removed_job_ids.append(job_id)
