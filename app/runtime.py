@@ -23,6 +23,7 @@ _BACKEND_SIGNATURE_FILES = (
     "app/render_session.py",
     "app/video_render.py",
     "app/transcription.py",
+    "app/gemini_analyzer.py",
 )
 
 
@@ -132,5 +133,21 @@ def backend_code_signature() -> str:
             digest.update(file_path.read_bytes())
         except OSError:
             digest.update(b"missing")
+        digest.update(b"\0")
+    return digest.hexdigest()[:16]
+
+
+def pipeline_compat_signature() -> str:
+    """Version the reusable local artifacts against code + critical model config."""
+    load_local_env()
+    digest = hashlib.sha1()
+    for value in (
+        backend_code_signature(),
+        os.getenv("WHISPER_MODEL", "distil-large-v3,large-v3"),
+        os.getenv("WHISPER_BACKEND", "auto"),
+        os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+        os.getenv("SPEAKER_DIARIZATION_MODE", "auto"),
+    ):
+        digest.update(str(value).encode("utf-8"))
         digest.update(b"\0")
     return digest.hexdigest()[:16]

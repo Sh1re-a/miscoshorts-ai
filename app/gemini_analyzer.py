@@ -9,8 +9,9 @@ load_local_env()
 logger, _LOG_PATH = configure_logging("gemini")
 
 # Retry configuration for transient Gemini failures
-_GEMINI_MAX_RETRIES = 3
-_GEMINI_RETRY_DELAY_S = 2.0
+_GEMINI_MAX_RETRIES = max(1, int(os.getenv("GEMINI_MAX_RETRIES", "6")))
+_GEMINI_RETRY_DELAY_S = max(1.0, float(os.getenv("GEMINI_RETRY_DELAY_SECONDS", "5")))
+_GEMINI_MAX_RETRY_DELAY_S = max(_GEMINI_RETRY_DELAY_S, float(os.getenv("GEMINI_MAX_RETRY_DELAY_SECONDS", "45")))
 _GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 
@@ -27,7 +28,37 @@ def find_viral_clip(whisper_segments, api_key=None):
     return find_viral_clips(whisper_segments, api_key=api_key, clip_count=1)
 
 
-def find_viral_clips(whisper_segments, api_key=None, clip_count=3):
+def _retry_delay_seconds(attempt_index: int) -> float:
+    return min(_GEMINI_MAX_RETRY_DELAY_S, _GEMINI_RETRY_DELAY_S * (2 ** attempt_index))
+
+
+def _is_retryable_gemini_error(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        token in lowered
+        for token in (
+            "high demand",
+            "rate limit",
+            "429",
+            "resource exhausted",
+            "resource has been exhausted",
+            "temporarily unavailable",
+            "unavailable",
+            "deadline exceeded",
+            "try again later",
+            "internal error",
+            "overloaded",
+        )
+    )
+
+
+def _emit_progress(progress_callback, message: str) -> None:
+    if progress_callback is None:
+        return
+    progress_callback("analyzing", message)
+
+
+def find_viral_clips(whisper_segments, api_key=None, clip_count=3, progress_callback=None):
     logger.info("Requesting clip selection from Gemini for %s clip(s).", clip_count)
 
     timed_text = ""
@@ -141,16 +172,35 @@ Continue until CLIP {clip_count}."""
                 text = (response.text or "").strip()
                 if text:
                     break
-                # Empty response — retry with higher temperature
+                # Empty response — retry once the backend has had time to recover.
                 last_error = RuntimeError("Gemini returned an empty response.")
                 if attempt < _GEMINI_MAX_RETRIES - 1:
-                    logger.warning("Gemini returned an empty response. Retrying (%s/%s).", attempt + 2, _GEMINI_MAX_RETRIES)
-                    time.sleep(_GEMINI_RETRY_DELAY_S)
+                    delay_seconds = _retry_delay_seconds(attempt)
+                    logger.warning("Gemini returned an empty response. Retrying in %.1fs (%s/%s).", delay_seconds, attempt + 2, _GEMINI_MAX_RETRIES)
+                    _emit_progress(
+                        progress_callback,
+                        f"CLIP_SELECTION | Gemini returned an empty response. Retrying in {delay_seconds:.0f}s ({attempt + 2}/{_GEMINI_MAX_RETRIES})...",
+                    )
+                    time.sleep(delay_seconds)
             except errors.APIError as error:
                 last_error = RuntimeError(f"Gemini request failed: {error.message}")
-                if attempt < _GEMINI_MAX_RETRIES - 1:
-                    logger.warning("Gemini API error. Retrying (%s/%s).", attempt + 2, _GEMINI_MAX_RETRIES)
-                    time.sleep(_GEMINI_RETRY_DELAY_S * (attempt + 1))
+                retryable = _is_retryable_gemini_error(error.message or "")
+                if retryable and attempt < _GEMINI_MAX_RETRIES - 1:
+                    delay_seconds = _retry_delay_seconds(attempt)
+                    logger.warning(
+                        "Gemini API temporary failure. Retrying in %.1fs (%s/%s): %s",
+                        delay_seconds,
+                        attempt + 2,
+                        _GEMINI_MAX_RETRIES,
+                        error.message,
+                    )
+                    _emit_progress(
+                        progress_callback,
+                        f"CLIP_SELECTION | Gemini is busy right now. Retrying in {delay_seconds:.0f}s ({attempt + 2}/{_GEMINI_MAX_RETRIES})...",
+                    )
+                    time.sleep(delay_seconds)
+                    continue
+                raise last_error
     finally:
         client.close()
 

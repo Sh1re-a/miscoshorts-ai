@@ -379,7 +379,12 @@ def select_clip_candidates(
         return cached, True
 
     _emit(progress_callback, "analyzing", f"CLIP_SELECTION | Asking Gemini for the best {clip_count} clips...")
-    analysis = gemini_analyzer.find_viral_clips(transcript_segments, api_key, clip_count=clip_count)
+    analysis = gemini_analyzer.find_viral_clips(
+        transcript_segments,
+        api_key,
+        clip_count=clip_count,
+        progress_callback=progress_callback,
+    )
     clip_candidates = parse_gemini_responses(analysis)
     if not clip_candidates:
         clip_candidates = [parse_gemini_response(analysis)]

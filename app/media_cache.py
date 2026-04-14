@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 
 from app.paths import OUTPUT_CACHE_DIR
+from app.runtime import pipeline_compat_signature
 from app.storage import atomic_write_json
 
 CACHE_ENABLED = os.getenv("LOCAL_CACHE_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
@@ -17,7 +18,7 @@ def video_cache_key(video_url: str) -> str:
 
 
 def cache_dir_for_url(video_url: str) -> Path:
-    return OUTPUT_CACHE_DIR / video_cache_key(video_url)
+    return OUTPUT_CACHE_DIR / pipeline_compat_signature() / video_cache_key(video_url)
 
 
 def is_valid_transcript_payload(payload: dict | None) -> bool:

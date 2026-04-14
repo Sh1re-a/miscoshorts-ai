@@ -8,6 +8,7 @@ import os
 import unittest
 from unittest.mock import MagicMock, patch, PropertyMock
 
+import app.gemini_analyzer as gemini_analyzer
 from app.gemini_analyzer import get_gemini_api_key, find_viral_clips
 
 
@@ -104,8 +105,9 @@ End: 60.0
         # Should have retried after empty response
         self.assertEqual(mock_client.models.generate_content.call_count, 2)
 
+    @patch("app.gemini_analyzer.time.sleep")
     @patch("app.gemini_analyzer.genai")
-    def test_api_error_retries_with_backoff(self, mock_genai) -> None:
+    def test_api_error_retries_with_backoff(self, mock_genai, mock_sleep) -> None:
         mock_client = MagicMock()
         mock_genai.Client.return_value = mock_client
 
@@ -119,8 +121,35 @@ End: 60.0
         with self.assertRaises(RuntimeError):
             find_viral_clips(self._SAMPLE_SEGMENTS, api_key="test-key", clip_count=1)
 
-        # Should have retried _GEMINI_MAX_RETRIES times (3)
-        self.assertEqual(mock_client.models.generate_content.call_count, 3)
+        self.assertEqual(mock_client.models.generate_content.call_count, gemini_analyzer._GEMINI_MAX_RETRIES)
+        self.assertEqual(mock_sleep.call_count, gemini_analyzer._GEMINI_MAX_RETRIES - 1)
+
+    @patch("app.gemini_analyzer.time.sleep")
+    @patch("app.gemini_analyzer.genai")
+    def test_high_demand_error_emits_retry_progress(self, mock_genai, mock_sleep) -> None:
+        mock_client = MagicMock()
+        mock_genai.Client.return_value = mock_client
+
+        from google.genai import errors as genai_errors
+        busy_error = genai_errors.APIError(
+            code=429,
+            response_json={"error": {"message": "This model is currently experiencing high demand. Please try again later."}},
+        )
+        valid_response = MagicMock()
+        valid_response.text = """CLIP 1:
+Title: Test
+Reason: Test
+Start: 0.0
+End: 30.0
+"""
+        mock_client.models.generate_content.side_effect = [busy_error, valid_response]
+        progress = MagicMock()
+
+        result = find_viral_clips(self._SAMPLE_SEGMENTS, api_key="test-key", clip_count=1, progress_callback=progress)
+
+        self.assertIn("CLIP 1", result)
+        self.assertEqual(mock_client.models.generate_content.call_count, 2)
+        progress.assert_any_call("analyzing", unittest.mock.ANY)
 
     @patch("app.gemini_analyzer.genai")
     def test_client_closed_on_success(self, mock_genai) -> None:

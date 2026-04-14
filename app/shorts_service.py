@@ -192,6 +192,7 @@ DEFAULT_RENDER_PROFILE = os.getenv("DEFAULT_RENDER_PROFILE", "studio").strip().l
 KEEP_RENDER_DIAGNOSTICS = os.getenv("KEEP_RENDER_DIAGNOSTICS", "0").strip().lower() in {"1", "true", "yes", "on"}
 REUSE_COMPLETED_RENDERS = os.getenv("REUSE_COMPLETED_RENDERS", "1").strip().lower() not in {"0", "false", "no"}
 _LAST_STORAGE_PRUNE_AT = 0.0
+ENCODE_HEARTBEAT_SECONDS = max(15, int(os.getenv("ENCODE_HEARTBEAT_SECONDS", "30")))
 RENDER_PROFILES = {
     "fast": {
         "label": "Fast Draft 1080x1920 MP4",
@@ -2214,12 +2215,14 @@ def _render_selected_clips(
                 prepared_runtime=subtitle_runtime,
             )
             clip_metrics["subtitleComposeSeconds"] = round(time.time() - subtitle_compose_started_at, 2)
-            encode_metrics = write_high_quality_video(
-                clip_final,
-                temp_output_path,
+            encode_metrics = _write_video_with_heartbeat(
+                clip=clip_final,
+                output_path=temp_output_path,
                 audio_path=audio_temp_path,
                 render_settings=render_settings,
-                render_threads=RENDER_THREADS,
+                clip_index=index,
+                progress_callback=progress_callback,
+                observer=observer,
             )
             clip_metrics.update(encode_metrics)
             clip_metrics["totalClipSeconds"] = round(time.time() - clip_started_at, 2)
@@ -2284,6 +2287,56 @@ def _render_selected_clips(
         raise RuntimeError("All clips failed to render. Check the logs folder for details.")
 
     return clips_output
+
+
+def _write_video_with_heartbeat(
+    *,
+    clip: VideoFileClip,
+    output_path: Path,
+    audio_path: Path | None,
+    render_settings: dict[str, str],
+    clip_index: int,
+    progress_callback: ProgressCallback | None,
+    observer: RunObserver | None,
+) -> dict[str, int | float | bool]:
+    result_holder: dict[str, dict[str, int | float | bool]] = {}
+    error_holder: dict[str, Exception] = {}
+
+    def _target() -> None:
+        try:
+            result_holder["metrics"] = write_high_quality_video(
+                clip,
+                output_path,
+                audio_path=audio_path,
+                render_settings=render_settings,
+                render_threads=RENDER_THREADS,
+            )
+        except Exception as error:  # pragma: no cover - surfaced in caller
+            error_holder["error"] = error
+
+    worker = threading.Thread(target=_target, daemon=True, name=f"encode-heartbeat-{clip_index}")
+    worker.start()
+    started_at = time.time()
+    last_emit_at = started_at
+
+    while worker.is_alive():
+        worker.join(timeout=1.0)
+        now = time.time()
+        if now - last_emit_at >= ENCODE_HEARTBEAT_SECONDS:
+            _emit_labeled(
+                progress_callback,
+                "rendering",
+                "ENCODE",
+                f"Clip {clip_index} is still encoding locally. This can take several minutes on slower machines.",
+                observer=observer,
+                clipIndex=clip_index,
+                encodeElapsedSeconds=round(now - started_at, 1),
+            )
+            last_emit_at = now
+
+    if "error" in error_holder:
+        raise error_holder["error"]
+    return result_holder["metrics"]
 
 
 def _materialize_final_clips(workspace: RenderWorkspace, clips_output: list[dict]) -> list[dict]:
